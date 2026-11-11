@@ -683,7 +683,7 @@ address, and a burst that trips the limiter. It prints one line per packet:
 
 ```console
 $ python3 tools/ntp_test.py 192.0.2.20 2001:db8::50
-mode 3, vn 4                       len=48 li=0 vn=4 mode=4 stratum=3 prec=-20 delay=0.000992 disp=0.002121 refid=b'\x83T\x01\x01' origin_ok=True
+mode 3, vn 4                       len=48 li=0 vn=4 mode=4 stratum=3 prec=-20 delay=0.000992 disp=0.002121 refid=b'\xc0\x00\x02\x01' origin_ok=True
 mode 4 (server)                    NO REPLY
 ...
 answered=16 kod=2 silent=2
