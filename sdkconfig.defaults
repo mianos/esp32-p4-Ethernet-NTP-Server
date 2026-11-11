@@ -1,0 +1,16 @@
+CONFIG_IDF_TARGET="esp32p4"
+
+# The Waveshare ESP32-P4-ETH carries 32 MB of flash; this demo uses ~1 MB.
+CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
+
+# Console/logs on UART0. The board's USB-C port is a CH343 USB-UART bridge
+# (VID 0x1A86, PID 0x55D3, CDC-ACM -> /dev/tty.usbmodem*), wired to the P4's
+# UART0. It is the same port esptool flashes over, so one cable does both.
+# (The P4's native USB-Serial/JTAG is *not* on that connector.)
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
+
+# A 1.5 MB factory app gives room for lwIP + Ethernet + future NTP code.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

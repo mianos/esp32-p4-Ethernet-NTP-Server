@@ -1,0 +1,376 @@
+<html> 
+<meta http-equiv="refresh" content="0; url=https://docs.waveshare.com/ESP32-P4-ETH">
+</html>
+<div class="wiki-pages jet-green-color">
+<div class="tabber">
+{{Infobox item|colorscheme=green
+|name = ESP32-P4-ETH
+|name2 = ESP32-P4-POE-ETH-KIT-A
+|name3 = ESP32-P4-POE-ETH-KIT-B
+|img = [[File:540px-ESP32-P4-ETH-1.jpg|360px |alt=ESP32-P4-ETH|link=https://www.waveshare.com/esp32-p4-eth.htm?sku=32086 | ESP32-P4-ETH]]
+|img2 = [[File:540px-ESP32-P4-ETH-KIT-A.jpg|360px |alt=ESP32-P4-ETH-KIT-A|link=https://www.waveshare.com/esp32-p4-eth.htm?sku=32089 | ESP32-P4-POE-ETH-KIT-A]]
+|img3 = [[File:540px-ESP32-P4-ETH-KIT-B.jpg|360px |alt=ESP32-P4-ETH-KIT-B|link=https://www.waveshare.com/esp32-p4-eth.htm?sku=32090 | ESP32-P4-POE-ETH-KIT-B]]
+|caption=ESP32-P4NRW32, USB HS OTG/MIPI CSI/MIPI DSI
+|caption2=ESP32-P4NRW32, USB HS OTG/MIPI CSI/MIPI DSI
+|caption3=ESP32-P4NRW32, USB HS OTG/MIPI CSI/MIPI DSI
+|{{#ifeq: {{#urlget:amazon|0}}|{{#urlget:Amazon|0}}| default|}}=display
+|category1 = ESP32S3
+|brand=Waveshare
+|feature-name1= microcontroller
+|feature-value1= ESP32-P4NRW32
+| interface1 = MIPI DSI
+| interface2 = MIPI CSI
+| interface3 = USB HS OTG
+}}
+
+<div class="tabbertab" title="Overview" id="myintro">
+=Overview=
+== Introduction ==
+'''ESP32-P4-ETH''' is a multimedia development board designed by Waveshare based on ESP32-P4. It provides a rich set of human-machine interaction interfaces, including MIPI-CSI (integrated image signal processor ISP), MIPI-DSI, SPI, I2S, I2C, LED PWM, MCPWM, RMT, ADC, UART, TWAI, etc. Additionally, it supports USB OTG 2.0 HS, and has a built-in 40PIN GPIO expansion interface on board that is compatible with some Raspberry Pi HAT expansion boards, enabling a wider range of application adaptability. The ESP32-P4 uses a 360MHz dual-core RISC-V processor and supports up to 32MB PSRAM, featuring USB 2.0, MIPI-CSI/DSI, H.264 encoding, and other peripherals, meeting the needs for low-cost, high-performance, and low-power multimedia development. In addition, the ESP32-P4 integrates a digital signature peripheral and a dedicated key management unit to ensure data and operation security. The ESP32-P4-ETH is specially designed for high-performance and high-security applications, meeting the needs of embedded systems in human-machine interaction, edge computing, and IO expansion.
+
+== Features ==
+* Processor
+** High-performance MCU equipped with RISC-V 32-bit dual-core and single-core processors
+** Equipped with RISC-V 32-bit single-core processor (LP system)
+* Memory
+** 128 KB of high-performance (HP) system read-only memory (ROM)
+** 16 KB of low-power (LP) system read-only memory (ROM)
+** 768 KB of high-performance (HP) L2 memory (L2MEM)
+** 32 KB of low-power (LP) SRAM
+** 8 KB of system tightly coupled memory (TCM)
+** 32 MB PSRAM is stacked in the package, and the QSPI port is connected to 32MB Nor Flash
+* Peripheral interfaces
+** 2 × 20 header pins onboard, 27 remaining programmable GPIOs, supporting a variety of peripheral devices
+** Onboard USB 2.0 OTG port, SDIO3.0 TF card slot, Type-C UART programming port, convenient for different scenarios
+** Onboard speaker port, microphone, Codec chip and power amplifier chip can be used to achieve the ideal audio function requirements
+** Onboard MIPI-CSI high-definition camera port, support full HD 1080P picture acquisition and encoding, integrated image signal processor (ISP) and H264 video encoder, support H.264 & JPEG video encoding (1080P @30fps), easy to apply to computer vision, machine vision and other fields
+** Onboard MIPI-DSI high-definition screen display port, integrated pixel processing accelerator (PPA), 2D graphics acceleration controller (2D DMA), supporting JPEG image decoding (1080P @30fps), providing strong support for high-definition screen display and smooth HMI experience, convenient for application to smart home central control screen, industrial central control screen, vending machine and other scenarios
+
+== Hardware Description==
+
+[[File:ESP32-P4-ETH-details-intro.jpg]]
+
+{| style="background-color: #f0f0f0;margin: 0px 30px;width: 90%;"
+| style="width:45%;padding: 10px 30px;" | 
+'''1. ESP32-P4NRW32'''<br />
+ESP32-P4 Stacked 32MB PSRAM
+
+'''2. 100M RJ45 Ethernet port'''<br />
+
+'''3. 32MB Nor Flash'''<br />
+
+'''4. Display screen interface'''<br />
+MIPI-DSI (2-lane), supports 5 / 7 / 8 / 10.1 inch DSI screen
+
+'''5. Camera port'''<br />
+MIPI-CSI (2-lane), compatible with cameras such as OV5647
+
+'''6. Type-C port'''<br />
+for power supply and program flashing
+
+'''7. SMD microphone'''<br />
+|
+| style="width:45%;padding: 10px 30px;" | 
+'''8. Speaker interface'''<br />
+MX1.25 2P connector, supports 8Ω 2W speaker
+
+'''9. 4PIN USB port'''<br />
+USB OTG 2.0 High Speed port
+
+'''10. PoE module header and power port'''<br />
+
+'''11. BOOT button'''<br />
+Press when powering on or resetting to enter download mode
+
+'''12. RST button'''<br />
+Reset button
+
+'''13. Power indicator'''<br />
+
+'''14. TF card slot'''<br />
+SDIO 3.0 interface protocol
+|}
+
+== Pinout Definition ==
+[[File:ESP32-P4-ETH-details-inter.jpg]]
+
+== Dimensions ==
+[[File:ESP32-P4-ETH-details-size.jpg]]
+==Version Connection Description==
+[[File:900px-ESP32-P4-ETH-details-11.jpg|600px]]
+
+[[File:900px-ESP32-P4-ETH-details-13.jpg|600px]]
+= User Guide =
+
+This tutorial is designed to guide users to set up a software environment for ESP32-P4 hardware development, and show how to use the ESP-IDF configuration menu and compile and download the firmware to the ESP32-P4 development board through simple examples.
+* Preparation
+** Hardware
+*** '''ESP32-P4-ETH''' development board
+*** '''USB cable''' (Type-A to Type-C, prepared as needed)
+*** '''Computer''' (Windows, Linux or macOS)
+** Software (it is recommended to use the integrated development environment to install ESP-IDF, if you are familiar with ESP-IDF, you can directly start from the ESP-IDF terminal, you can choose one of the following development methods)
+*** '''VSCode + ESP-IDF plugin''' ('''Recommended''')
+*** Eclipse + ESP-IDF plugin (Espressif-IDE)
+*** Arduino IDE
+
+{{ESP32-P4-Arduino-withoutwifi}}
+
+= ESP-IDF =
+== Introduction to ESP-IDF and Environment Setup (VSCode Column) ==
+ESP-IDF (Espressif IoT Development Framework) is an open-source IoT development framework launched by Espressif specifically for the development of its ESP32 series chips. ESP-IDF provides the necessary tools and libraries to build IoT applications, including Wi-Fi, Bluetooth, peripheral drivers, file systems, network protocol stacks, encryption, security, and real-time operating systems (FreeRTOS).
+<br/><br/>
+The following description only applies to the VSCode + ESP-IDF environment<br/><br/>
+*'''PS:'''
+** If you wish to use the Eclipse editor as your primary development environment, please click the link to download [https://dl.espressif.com/dl/esp-idf/ Espressif-IDE] and install it, replacing the ESP-IDF version to be ≥v5.3.1.
+** <font size="4" color="red"> '''If you encounter errors such as TSL Error, Network Error, etc., during the installation of ESP-IDF, please re-clear the directory folders, ensure a stable network environment without any proxy contamination, and then try the installation again. It will take a long time, so please be patient.''' </font>
+=== Prerequisites ===
+# If you are using a Mac or Linux, install the following [https://docs.espressif.com/projects/esp-idf/en/latest/esp32/get-started/linux-macos-setup.html#step-1-install-prerequisites ESP-IDF prerequisites]. If you're using Windows, ignore this step.
+# 
+===Install VSCode===
+# Open the [https://code.visualstudio.com/download download page] of the official VSCode website, and select the corresponding system and system bit to download <br>[[File:esp32-vscod-01.jpg|800px]]
+# After running the installation package, the rest can be installed by default, but here for the subsequent experience, it is recommended to check boxes 1, 2, and 3<br> [[File:esp32-vscod-02.jpg|800px]]
+#* After '''the first and second items''' are enabled, you can open VSCode directly by right-clicking files or directories, which can improve the subsequent user experience
+#* After '''the third item''' is enabled, you can select VSCode directly when you choose how to open it
+
+===Install the ESP-IDF Plugin===
+# Open VSCode, click on Plugin Manager, and search for '''ESP-IDF''' to download and install, as shown in the figure: <br/>[[File:ESP32-P4 VSCode ESP-IDF env 240905 01.png]]
+# After installation, there is an Espressif logo on the left toolbar is a plugin, click into the plugin (there will be a short period of time for loading the program), select <font color="red">'''EXPRESS'''</font>, for quick installation, as shown in the figure: [[File:ESP32-P4 VSCode ESP-IDF env 240905 02.png]]
+===Install the ESP-IDF Development Environment===
+# Enter the '''EXPRESS''' installation interface, '''confirm the ESP-IDF version ≥v5.3.1 release version''', ESP-IDF directory and ESP-IDF tool directory, click Install, and wait patiently for the installation steps to be completed, as shown in the figure: <br/>[[File:ESP32-P4 VSCode ESP-IDF env 240905 03.png]]
+# '''If you are a domestic user in China, you can choose to download the server as Espressif''', the installation process is slow, make sure the network is in good condition, you can wait patiently for the installation to complete, [[File:ESP32-P4 VSCode ESP-IDF env 240905 04.png]]
+# The installation process is as follows: <br/>[[File:ESP32-P4 VSCode ESP-IDF env 240905 05.png]]
+# After the installation is complete, the interface is as follows: <br/>[[File:ESP32-P4 VSCode ESP-IDF env 240905 06.png]]
+
+==Getting Start==
+{{Note|This Wiki keeps updating the ESP32-P4 demos, some demos require ESP-IDF version dependencies, it will take a period of time to test the update, please be patient. |info}}
+The best way to learn a language or development environment is to start from the basics. This section will provide a detailed guide on how to create projects, develop from existing projects, and include embedded classic tutorials such as '''HelloWorld''' and the usage of common port '''I2C'''
+=== Introduction to Basic Structure of an ESP-IDF Project ===
+* Open the ESP-IDF plugin, click New project, select the ESP-IDF demo -- >'''sample_project''' -- > click Create<br/>[[File:ESP32-P4 VSCode ESP-IDF GettingStart 240905 01.png]]
+* Create a new VSCode and open it in the window, you can see the structure of VSCode as follows
+ ├── CMakeLists.txt
+ ├── main
+ │   ├── CMakeLists.txt
+ │   └── main.c
+ └── README.md                  
+==== ESP-IDF Project Details ====
+* Component: The components in ESP-IDF are the basic modules for building applications, each component is usually a relatively independent code base or library, which can implement specific functions or services, and can be reused by applications or other components, similar to the definition of libraries in Python development.
+** Component reference: The import of libraries in the Python development environment only requires to "import library name or path", while ESP-IDF is based on the C language, and the importing of libraries is configured and defined through <code>CMakeLists.txt</code>.
+** When we use online components, we usually use <code>idf.py add-dependency <componetsName></code> to add online components to the project, which generates a <code>idf_component.yml</code> file for managing components.
+** The purpose of CmakeLists.txt: When compiling ESP-IDF, the build tool <code>CMake</code> first reads the content of the top-level <code>CMakeLists.txt</code> in the project directory to read the build rules and identify the content to be compiled. When the required components and demos are imported into the <code>CMakeLists.txt</code>, the compilation tool <code>CMake</code> will import each content that needs to be compiled according to the index. The compilation process is as follows:
+[[File:ESP32-P4 VSCode ESP-IDF GettingStart 240906 02.png]]
+
+==== Description of Bottom Toolbar of VSCode User Interface====
+When we open an ESP-IDF project, the environment is automatically loaded at the bottom. For the development of '''ESP32-P4-ETH''', the bottom toolbar is also very important, as shown in the figure:
+[[File:ESP32-P4 VSCode ESP-IDF GettingStart 240905 03.png]]
+# '''ESP-IDF Development Environment Version Manager''', when our project requires differentiation of development environment versions, it can be managed by installing different versions of ESP-IDF. When the project uses a specific version, it can be switched to by utilizing it
+# '''Device flashing COM port''', select to flash the compiled program into the chip
+# '''Select set-target chip model''', select the corresponding chip model, for example, ESP32-P4-ETH needs to choose <code>esp32p4</code> as the target chip
+# '''menuconfig''', click it to modify sdkconfig configuration file
+# '''Fullclean button''', when the project compilation error or other operations pollute the compiled content, you can clean up all the compiled content by clicking it
+# '''Build project''', when a project satisfies the build, click this button to compile
+# '''Flash button''', when a project build is completed, select the COM port of the corresponding development board, and click this button to flash the compiled firmware to the chip
+# '''Monitor enable flashing port monitoring''', when a project passes through Build --> Flash, click this button to view the log of output from flashing port and debugging port, so as to observe whether the application works normally
+#'''Build Flash Monitor one-click button''', which is used to continuously execute Build->Flash->Monitor, often referred to as "little flame"
+
+=== HelloWorld Demo===
+After understanding '''Description of bottom toolbar of VSCode user interface''', the HelloWorld project allows you to quickly get started and understand the basic projects of the ESP32 development environment. It demonstrates how to use ESP-IDF to create a basic application, and covers the ESP32 development process, including compilation, flashing, and monitor debugging steps.
+# After opening the sample project <code>HelloWorld</code>, set the target port and chip type (<font color="red">Note: There is a loading action in the lower right corner when the chip type is selected, indicating that ESP-IDF is executing the command <code>idf.py set-target esp32p4</code>. It needs to pull the architecture package environment corresponding to the chip from the package manager, which may take some time. Please wait patiently. If you perform build or other operations at this time, there will be errors!!! </font>)
+# Through the bottom tool <code>🔥</code> with one click, you can build, flash, and monitor, allowing you to view the terminal output of "Hello World"! <br/>[[File:900px-ESP32-P4_VSCode_ESP-IDF_GettingStart_240906_01.png|600px]]
+#Code content analysis
+##There is only one <code>app_main</code> main function in the code, which determines the print content output through conditional judgment, and adds a loop at the end to achieve 10s restart of the chip.
+##<Code>app_main</code> function is the entry point for user applications in the ESP-IDF (Espressif IoT Development Framework) development framework. It is the core function of the ESP-IDF project and is equivalent to the main function in the standard program of the C language. In ESP32 development, <code>app_main</code> function is the first task scheduled by the real-time operating system (FreeRTOS), which is the starting point for the execution of the user's code.
+
+=== I2C ===
+I2C is a commonly used serial communication bus, which can communicate through two lines, one data cable (SDA, Serial Data) and one clock cable (SCL, Serial Clock), and supports multi-master and multi-slave mode. On the ESP32-P4, there are two I2C bus ports. The chip internally uses a GPIO exchange matrix to configure the use of any GPIO pins. This feature allows us to freely use any GPIO as an I2C pin control. Of course, the ESP32-P4 I2C supports both Slave and Master modes. Below, we primarily use the I2C host (Master) mode for ESP32-P4 to start communication, control, send data requests or receive data from the slave devices (which can be sensors from any I2C port).
+The I2C pins of '''ESP32-P4-ETH''' use <code>SCL(GPIO8)</code> and <code>SDA(GPIO7)</code> by default <br/>
+[[File:ESP32-P4-Nano-I2C 240906 01.png]]
+
+In ESP-IDF, the I2C bus requires the configuration specified by <code>i2c_master_bus_config_t</code>:
+* <code>i2c_master_bus_config_t::clk_source</code> selects the source clock for the I2C bus, using the default I2C clock source (usually the default clock source) is simply set to <code>I2C_CLK_SRC_DEFAULT</code>
+* <code>i2c_master_bus_config_t::i2c_port</code> sets the I2C port used by the controller, as explained above, the ESP32-P4 has two I2C ports. When two different I2C ports need to be '''enabled simultaneously''', this needs to be utilized to distinguish between them
+* <code>i2c_master_bus_config_t::scl_io_num</code> sets the GPIO number of the serial clock bus (SCL), which is 8 on ESP32-P4-ETH
+* <code>i2c_master_bus_config_t::sda_io_num</code> sets the GPIO number for the serial data bus (SDA), which is 7 on the ESP32-P4-ETH
+* <code>i2c_master_bus_config_t::glitch_ignore_cnt</code> sets the Glitch Period for the Master Bus, and if the Glitch Period on the line is smaller than this value, it can be filtered out. Typically, this value is set to 7
+* <code>i2c_master_bus_config_t::enable_internal_pullup</code> enables internal pullups, on the ESP32-P4-ETH, there is already an additional I2C pullup, no need to enable internal pullups
+As described above, the I2C configuration is:
+    i2c_master_bus_config_t i2c_bus_config = {
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .i2c_port = I2C_NUM_0,
+        .scl_io_num = 8,
+        .sda_io_num = 7,
+        .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = false,
+    };
+
+#Open the <code>i2c_tools</code> the project, select the COM port and chip model, click <code>⚙️</code> to enter the settings. This will open a new tab: '''SDK Configuration editor''', also known as menuconfig. Directly search for I2C in the search bar. The content has already been retrieved, and the SCL GPIO Num and SDA GPIO Num in the demo are already corresponding to <code>SCL(GPIO8)</code> and <code>SDA(GPIO7)</code>
+#Next, you can directly compile, flash, and monitor by clicking <code>🔥</code>. Upon after completion, you will see the command menu in the terminal. When you execute i2cdetect, all I2C addresses will be printed. If there is a device, a number will be displayed (I2C address 18 device corresponds to the onboard ES8311 Codec audio chip, this chip will be detailed in the I2S section), as shown in the figure:<br/>[[File:ESP32-P4-Nano I2C demo 240906 01.png|600px]]
+#The above steps have realized the basics of I2C device communication. In devices that use the I2C communication protocol, it is often necessary to write register configurations to the corresponding address device via the I2C bus to achieve the functionality of the I2C device. In this case, we need to write the initialization program for the I2C device in the program to drive the I2C device. Different I2C devices have different I2C addresses. In development, we can use the i2ctools tool to query the attached I2C address, nd then read the chip manual to query the registers, configuration and other contents to achieve I2C bus communication.
+
+== Intermediate==
+{{Note|This Wiki keeps updating the ESP32-P4 demos, some demos require ESP-IDF version dependencies, it will take a period of time to test the update, please be patient. |info}}
+
+=== SDMMC Demo===
+The ESP32-P4-ETH features a 4-Wire SDIO3.0 card slot for off-chip memory expansion
+*'''Supported rate modes'''
+**Default rate (20 MHz)
+**High-speed mode (40 MHz)
+*'''Configure bus width and frequency'''
+In ESP-IDF, use <code>sdmmc_host_t</code> and <code>sdmmc_slot_config_t</code> settings to configure the default 20MHz communication frequency and 4-wire width communication, as follows:
+ sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+ sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+
+In the design that supports 40 MHz communication, you can adjust the max_freq_khz field in the sdmmc_host_t structure to increase the bus frequency:
+ sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+ host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+The SDMMC 4-wire connection on the ESP32-P4-ETH should be defined as:
+ sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+ slot_config.width = 4;
+ slot_config.clk = 43;
+ slot_config.cmd = 44;
+ slot_config.d0 = 39;
+ slot_config.d1 = 40;
+ slot_config.d2 = 41;
+ slot_config.d3 = 42;
+ slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
+
+#Open the <code>sdmmc</code> project, select the COM port and chip model, because the demo project defines the pin as a macro, so you need to configure it, of course, you can also directly fill in the pin value. Click <code>⚙️</code> to enter the settings, here a new tab will open: '''SDK Configuration editor''', which is also known as menuconfig. We directly search for sd in the search bar, see that the content has been retrieved at this time, and the demo configuration has been configured, check the default initialization and create the demo file by default: <br/>[[File:ESP32-P4-Nano-SDMMC 240906 02.png|800px]]
+#Next, insert the prepared TF card, click <code>🔥</code> to compile, flash and monitor. After completion, you will see the output of the command menu in the terminal showing the contents of the files in the directory:<br/>[[File:ESP32-P4-Nano-SDMMC 240906 03.png|800px]]
+
+=== I2S Audio Demo===
+'''I2S (Inter-IC Sound)''' is a digital communication protocol for transmitting audio data. I2S is a serial bus interface that is primarily used for digital audio data transmission between audio devices, such as digital audio processors (DSPs), digital-to-analog converters (DACs), analog-to-digital converters (ADCs), and audio codecs. <br />
+The ESP32-P4 includes 1 I2S peripheral. By configuring these peripherals, the sample data can be input and output with the help of an I2S driver.''' ESP32-P4-ETH''' board integrates the es8311 Codec chip and the NS4150B power amplifier chip combination. The I2S bus and pin distribution are as follows:<br/>
+* '''MCLK (Master Clock)''': Master clock signal. The clock is typically provided to the ES8311 by an external device (such as an MCU or DSP), which serves as the clock source for its internal digital audio processing module.
+* '''SCLK (Serial Clock)''': Serial clock signal. This signal is typically used for clock synchronization for I2S data transmission and is generated by the master device to indicate the rate at which the data is transferred. The transmission of each bit of each audio sample requires a clock cycle.
+* '''ASDOUT (Audio Serial Data Output)''' or '''DOUT''': Audio data output pin. The ES8311 outputs decoded digital audio data to this pin, which is then transmitted to an amplifier chip or other audio device.
+* '''LRCK (Left/Right Clock)''' or '''WS (Word Select)''': Left and right channel selection signals to indicate whether the current data sample belongs to the left or right channel. Typically in the I2S protocol, one clock cycle represents the left channel data and the other clock cycle represents the right channel data.
+* '''DSDIN (Digital Serial Data Input)''' or '''DIN''': Digital audio data input pin. This pin receives audio data from an external audio device or a master. The ES8311 decodes this data and processes the audio signals through an internal digital signal processing module.
+[[File:ESP32-P4-Nano-i2scodec 240909 05.png]]
+{| class="wikitable list table table-striped table-bordered" style="width:80%"
+|-
+! Function pin !! ESP32-P4-ETH pin
+|-
+| MCLK || '''GPIO13'''
+|-
+| SCLK || '''GPIO12'''
+|-
+| ASDOUT || '''GPIO11'''
+|-
+| LRCK || '''GPIO10'''
+|-
+| DSDIN || '''GPIO9'''
+|-
+| PA_Ctrl (Power amplifier chip enable pin, active high) || '''GPIO53'''
+|}
+
+The ESP32-P4-ETH es8311 driver uses [https://components.espressif.com/component/espressif/es8311 ES8311 components]. It can be added during usage through the IDF Component Manager.
+ idf.py add-dependency "espressif/es8311"
+#Open the <code>i2scodec</code> project to add components <br/>[[File:ESP32-P4-Nano-i2scodec 240909 01.png]]
+# As shown in the above figure, these are the specific steps to add components
+## Open the ESP-IDF terminal
+## Add the required components in Terminal
+## After successful addition, there will be an additional <code>idf_component.yml</code> in the main folder of the project, which is used to manage project components, as explained in the ESP-IDF Project Catalog section
+## Once opened, you can see that <code>the espressif/es8311</code> component has been added, and it will be added to the project when you build it
+#Next, you can open the settings by clicking on <code>⚙️</code>, search for Example, and adjust the appropriate volume<br/>[[File:ESP32-P4-Nano-i2scodec 240909 02.png]]
+#When connected to the speaker, you can directly compile, flash, and monitor by clicking <code>🔥</code>, and the following results will be displayed on the terminal after completion. At this time, ESP32-P4-ETH is already playing audio <br/>[[File:ESP32-P4-Nano-i2scodec 240909 03.png]]
+#When the <code>echo</code> mode is set in the settings, the audio will be recorded by the microphone and output by the speaker<br/>[[File:ESP32-P4-Nano-i2scodec_240909_04.png]]
+
+===MIPI-DSI Screen Wake-Up Demo===
+'''ESP32-P4-ETH''' uses the ESP32-P4NRW32 chip with the following new features:
+* '''MIPI-DSI''' compliant, using '''D-PHY v1.1''' version, up to 2-lane x 1.5Gbps (total 3Gbps)
+* Supports RGB888, RGB565, YUV422 input
+* Supports RGB888, RGB666, RGB565 output
+* Uses video mode to output video streams, and supports output of fixed image patterns
+'''MIPI-DSI''' image processing can also be processed using a '''2D-DMA''' controller, which supports PPA and JPEG encoding/decoding peripherals
+
+==== MIPI-DSI LCD Driving Principle ====
+
+[[File:ESP32-P4-Nano-ETH to WiFi 240925 02.png]]
+
+==== Hardware Required ====
+*7inch display and accessories
+*ESP32-P4-ETH [Host]
+==== Screen Wake-Up Steps====
+#The 7inch screen driver has been packaged as a component, and the component is located at [https://components.espressif.com/components/waveshare/esp_lcd_ili9881c/ ESP Component Registry]<br/>
+#After opening the project, select <code>esp32p4</code> core, and you can directly click 🔥 to compile, flash, monitor. Upon completion, you can see that the screen has lit up to refresh the color bar:
+
+[[File:1200px-ESP32-P4-Module-DEV-KIT_250326_01.png|800px]]
+
+== Advanced==
+{{Note|This Wiki keeps updating the ESP32-P4 demos, some demos require ESP-IDF version dependencies, it will take a period of time to test the update, please be patient. |info}}
+
+=== LVGL HMI Human Machine Interaction ===
+This example shows that the ESP32-P4 displays LVGL images through the MIPI DSI interface, which fully demonstrates the powerful image processing capabilities of the ESP32-P4
+
+==== Hardware Required ====
+*7inch display and accessories
+*ESP32-P4-ETH [Host]
+==== Screen Wake-Up Steps====
+#The 7inch screen driver has been packaged as a component, and the component is located at [https://components.espressif.com/components/waveshare/esp_lcd_ili9881c/ ESP Component Registry]<br/>
+#After opening the project, select <code>esp32p4</code> core, and you can directly click 🔥 to compile, flash, monitor. Upon completion, you can view the screen:
+
+[[File:600px-ESP32-P4-Module-DEV-KIT_250326_02.png|400px]]
+[[File:600px-ESP32-P4-Module-DEV-KIT_250326_03.png|400px]]
+[[File:600px-ESP32-P4-Module-DEV-KIT_250326_04.png|400px]]
+[[File:600px-ESP32-P4-Module-DEV-KIT_250326_05.png|400px]]
+[[File:600px-ESP32-P4-Module-DEV-KIT_250326_06.png|400px]]
+[[File:600px-ESP32-P4-Module-DEV-KIT_250326_07.png|400px]]
+
+== Expert Techniques ==
+{{Note|This Wiki keeps updating the ESP32-P4 demos. Some demos require '''ESP-IDF Master''' version dependencies, which will take some time to test and update. Please be patient. |info}}
+=== ESP-Phone ===
+This example is based on [https://github.com/espressif/esp-brookesia ESP_Brookesia] and shows an Android-like interface with many different applications. This example uses the board's MIPI-DSI port, MIPI-CSI port, TF card slot, and audio jack. Based on this example, you can create a use case based on ESP_Brookesia to efficiently develop multimedia applications.
+
+==== Hardware Required ====
+*Equipped with 10.1-inch display and accessories
+*OV5647 or SC2336 camera and cable
+*8Ω 2W speaker 
+*ESP32-P4-ETH [Host]
+==== Screen Wake-Up Steps====
+#The 10.1-inch screen driver has been packaged as a component, with the component located at [https://components.espressif.com/components/waveshare/esp_lcd_jd9365_10_1/ ESP Component Registry]<br/>Use <code>idf.py add-dependency "waveshare/esp_lcd_jd9365_10_1"</code> to add components to your project.
+#After opening the project, select <code>esp32p4</code> core, and you can directly click 🔥 to compile, flash, monitor. Upon completion, you can view the screen:
+
+[[File:ESP32-P4-Module-DEV-KIT 250326 08.png|400px]]
+[[File:ESP32-P4-Module-DEV-KIT 250326 09.png|400px]]
+[[File:ESP32-P4-Module-DEV-KIT 250326 10.png|400px]]
+[[File:ESP32-P4-Module-DEV-KIT 250326 11.png|400px]]
+[[File:ESP32-P4-Module-DEV-KIT 250326 12.png|400px]]
+[[File:ESP32-P4-Module-DEV-KIT 250326 13.png|400px]]
+
+<!--
+=== Get Video Stream from USB-OTG (Expand the display) ===
+
+===4G-Module Portable WIFI===
+=== Play Audio from TF Card===
+
+-->
+
+=Resources=
+==Schematic Diagram==
+*[https://files.waveshare.com/wiki/ESP32-P4-ETH/ESP32-P4-ETH-datasheet.pdf ESP32-P4-ETH Schematic]
+
+==Demo==
+
+*[https://files.waveshare.com/wiki/ESP32-P4-ETH/ESP32-P4-ETH-Demos.zip ESP32-P4-ETH Demo]
+
+==Datasheets==
+{{ESP32-P4-Dock}}
+
+==Software==
+*[https://dl.espressif.com/public/flash_download_tool.zip Flash_download_tool]
+</div>
+
+
+<div class="tabbertab" title="FAQ" id="myfaq">
+
+=FAQ=
+
+{{ESP32-P4-ETH-FAQ}}
+
+</div>
+
+<div class="tabbertab" title="Support" id="mysupport">
+
+=Support=
+<br />{{Servicebox1}}</div>
+</div>
+</div>
