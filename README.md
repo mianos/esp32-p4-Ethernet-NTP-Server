@@ -16,7 +16,7 @@ IP101GRI 10/100 PHY, RJ45). This is what is currently on
 `/dev/cu.usbmodem5CF71255951` (chip reported by esptool: ESP32-P4 rev v3.2).
 
 The P4 has an on-chip 10/100 Ethernet MAC but **no PHY**, so the board's
-IP101GRI is driven over RMII. Pins are hard-coded in `main/main.cpp`:
+IP101GRI is driven over RMII. Pins are hard-coded in `main/eth_link.cpp`:
 
 | Signal      | GPIO | Notes                                  |
 |-------------|------|----------------------------------------|
@@ -33,8 +33,8 @@ IP101GRI is driven over RMII. Pins are hard-coded in `main/main.cpp`:
 
 PHY address 1 (IP101 default, confirmed: ID reads `0x02430c54`). The whole
 table is verified working on this board — DHCP would not complete otherwise —
-but if you ever swap boards, the `kEthPins` table at the top of `main/main.cpp`
-is the only thing to change.
+but if you ever swap boards, the `kEthPins` table at the top of
+`main/eth_link.cpp` is the only thing to change.
 
 ## Status: working
 
@@ -132,8 +132,12 @@ firmware does not pull, because the P4 has no radio.
 PHY instances are `std::unique_ptr`s with `del()` deleters (released to the
 driver once it owns them, so a failed bring-up has no cleanup branches), PHY
 registers read as `std::optional<uint32_t>`, and the MAC arrives as a
-`std::string`. `app_main()` is then just boot order: NVS, settings, netif,
-clock, link.
+`std::string`.
+
+Each subsystem owns a `.[ch]pp` pair, so `main/main.cpp` holds `app_main()` and
+nothing else — and `app_main()` is just boot order: NVS, settings, netif, clock,
+link. The Ethernet link, which is the longest of those, is `eth_link.cpp`; the
+boot sequence reads as five calls because of it.
 
 ## Expected log (captured from this board)
 
@@ -206,8 +210,8 @@ are the whole implementation:
 | Where | What |
 |-------|------|
 | `sdkconfig.defaults` | `CONFIG_LWIP_IPV6=y` (IDF's own default, spelled out because the rest depends on it), `CONFIG_LWIP_IPV6_AUTOCONFIG=y` for SLAAC, `CONFIG_LWIP_IPV6_NUM_ADDRESSES=3` |
-| `main.cpp`, `ETHERNET_EVENT_CONNECTED` | `esp_netif_create_ip6_linklocal()`. esp_netif does **not** create `fe80::` on its own, and without a source address lwIP has nothing to send the Router Solicitation from — so no RA comes back and there is no global address either. Called on every link-up, so a cable bounce re-arms it. |
-| `main.cpp`, `IP_EVENT_GOT_IP6` | logs each address as it lands, with the URL it makes reachable |
+| `eth_link.cpp`, `ETHERNET_EVENT_CONNECTED` | `esp_netif_create_ip6_linklocal()`. esp_netif does **not** create `fe80::` on its own, and without a source address lwIP has nothing to send the Router Solicitation from — so no RA comes back and there is no global address either. Called on every link-up, so a cable bounce re-arms it. |
+| `eth_link.cpp`, `IP_EVENT_GOT_IP6` | logs each address as it lands, with the URL it makes reachable |
 
 Nothing above that needed changing:
 
@@ -302,10 +306,10 @@ What that says:
   above for "IPv6 off" were produced with a six-line `#if CONFIG_LWIP_IPV6`
   fallback to `sockaddr_in` in a throwaway copy of that component — that is the
   change it would take to make IPv4-only builds possible again.
-- The code in *this* repo is already guarded: `main.cpp`, `net_state.cpp` and
-  `web_server.cpp` put their IPv6 work behind `#if CONFIG_LWIP_IPV6`, so the
-  same sources serve an IPv4-only board at zero cost once the component allows
-  it.
+- The code in *this* repo is already guarded: `eth_link.cpp`, `net_state.cpp`
+  and `web_server.cpp` put their IPv6 work behind `#if CONFIG_LWIP_IPV6`, so
+  the same sources serve an IPv4-only board at zero cost once the component
+  allows it.
 
 Verdict: leave IPv6 on. 30 KB is 1.6% of a 1.9 MB OTA slot on a 4 MB module —
 not worth a component patch and the loss of the IPv6 half of every endpoint —
@@ -418,7 +422,7 @@ What checks the update:
   leaves the boot slot untouched.
 - **Size.** `Content-Length` must fit the slot, otherwise `413`.
 - **Boot.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` marks a newly written image
-  `ESP_OTA_IMG_PENDING_VERIFY`. `main.cpp` confirms it with
+  `ESP_OTA_IMG_PENDING_VERIFY`. `eth_link.cpp` confirms it with
   `esp_ota_mark_app_valid_cancel_rollback()` as soon as it has a DHCP lease and
   the HTTP server is listening; if an image never gets that far, the bootloader
   returns to the slot that worked. On a box with no other interface, that is the
@@ -731,12 +735,13 @@ Not in this milestone, on purpose:
 
 | File                    | Contents                                                        |
 |-------------------------|-----------------------------------------------------------------|
-| `main/main.cpp`         | `EthernetLink`: EMAC + PHY bring-up, PHY diagnostics, event handlers, boot order, web server and responder start, OTA image confirmation |
+| `main/main.cpp`         | boot order only: NVS, settings, netif + event loop, the clock, then the link |
+| `main/eth_link.[ch]pp`  | `EthernetLink`: EMAC + PHY bring-up, pin map, PHY diagnostics, event handlers, netif, status task, web server and responder start, OTA image confirmation |
 | `main/settings.[ch]pp`  | `Settings : SettingsBase` — the five device settings            |
 | `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync`, `/firmware` |
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
 | `main/ntp_server.[ch]pp`| `NtpServer` + `TimeRef`/`UpstreamTimeRef`: the UDP/123 responder, reply builder, rate limiter |
-| `main/net_state.[ch]pp` | read-only netif / link / IPv6-address accessors, fed by `main.cpp` |
+| `main/net_state.[ch]pp` | read-only netif / link / IPv6-address accessors, fed by `eth_link.cpp` |
 | `tools/ntp_test.py`     | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
 
 Written locally; everything else (JSON, NVS, settings machinery, the HTTP
@@ -800,7 +805,7 @@ server) is a mianesp component.
   address if you want to see it there.
 - **`ipv6_linklocal` is missing from `/healthz`**: IPv6 never came up. Check the
   log for `IPv6 link-local: ...` right after `link up` — that line comes from
-  the `esp_netif_create_ip6_linklocal()` call in `main.cpp`, and without it
+  the `esp_netif_create_ip6_linklocal()` call in `eth_link.cpp`, and without it
   esp_netif leaves the netif with no IPv6 address at all even though lwIP was
   built for it. If the log line is there, the address is still in DAD: it shows
   up a second later.
