@@ -1,8 +1,6 @@
 /*
- * The mianesp HTTP surface.
- *
- * Same wire contract as the components/webserver in mianos/mianesp, so scripts
- * and dashboards that talk to the other devices work here unchanged:
+ * The device's HTTP surface: a WebServer subclass (mianesp's webserver
+ * component), so the wire contract is the shared one:
  *
  *   GET  /healthz        uptime, clock, build, heap, link, lease, time source
  *   GET  /config         the settings JSON as stored
@@ -15,47 +13,38 @@
  * paths and wrong methods get the same JSON shape rather than httpd's built-in
  * plain-text page.
  *
- * httpd calls the handlers as C function pointers, so they are static members:
- * the instance state is a single httpd_handle_t, reached through instance().
+ * WebServer supplies /healthz (uptime + time, then populate_healthz_fields()),
+ * the JSON/body/caller helpers and the async workers. This class registers the
+ * endpoints above and adds the device's own health fields. The WiFi endpoints
+ * (/reset, /set_hostname) are deliberately absent: the P4 has no radio, so it
+ * uses the network-agnostic base rather than wifiwebserver.
  */
 #pragma once
 
 #include <string>
 
-#include "esp_err.h"
-#include "esp_http_server.h"
+#include "WebServer.h"
 
-#include "json.h"
-
-class WebServer {
+class NtpWebServer : public WebServer {
 public:
-    static WebServer &instance();
+    static NtpWebServer &instance();
 
     /* Start on :80, once, after the netif has an address. Idempotent. */
     esp_err_t begin();
 
 private:
-    static constexpr const char *TAG = "webserver";
+    NtpWebServer();
 
-    WebServer() = default;
+    void register_routes() override;
+    void populate_healthz_fields(WebContext *ctx, JsonWrapper &json) override;
 
-    esp_err_t registerRoutes();
-
-    static esp_err_t healthz(httpd_req_t *req);
-    static esp_err_t configGet(httpd_req_t *req);
-    static esp_err_t configPost(httpd_req_t *req);
-    static esp_err_t configResetPost(httpd_req_t *req);
-    static esp_err_t syncPost(httpd_req_t *req);
-
-    static esp_err_t notFound(httpd_req_t *req, httpd_err_code_t err);
-    static esp_err_t methodNotAllowed(httpd_req_t *req, httpd_err_code_t err);
+    static esp_err_t config_get_handler(httpd_req_t *req);
+    static esp_err_t config_post_handler(httpd_req_t *req);
+    static esp_err_t config_reset_post_handler(httpd_req_t *req);
+    static esp_err_t sync_post_handler(httpd_req_t *req);
 
     /* Point the DHCP client's option-12 name at a renamed device. */
-    static void applyHostname(const std::string &hostname);
+    static void apply_hostname(const std::string &hostname);
 
-    /* Sends `doc` as the body and takes ownership of it. */
-    static esp_err_t sendJson(httpd_req_t *req, json::Value doc, int status_code);
-    static esp_err_t sendError(httpd_req_t *req, int status_code, const std::string &message);
-
-    httpd_handle_t m_server = nullptr;
+    bool m_started = false;
 };

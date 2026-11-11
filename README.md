@@ -5,7 +5,9 @@ plus the device's HTTP surface (`/healthz`, `/config`, `/config/reset`,
 `/ntp/sync`) using the same REST conventions as the other
 [mianesp](https://github.com/mianos/mianesp) devices, plus a test-mode clock
 that steps itself from the upstream NTP server the DHCP server hands out
-(option 42). All of it is C++, in the same shape as mianesp's components.
+(option 42). The HTTP surface and settings are mianesp's own components
+(`webserver`, `jsonwrapper`, `nvsstoragemanager`, `settingsbase`), not local
+copies of them.
 
 Target board: **Waveshare ESP32-P4-ETH** (ESP32-P4NRW32, 32 MB flash,
 IP101GRI 10/100 PHY, RJ45). This is what is currently on
@@ -83,9 +85,13 @@ native USB-Serial/JTAG is not on that connector, which is why
    hand — so the NTP responder has real time to serve. See
    [Clock (test mode)](#clock-test-mode).
 
-The code is C++ (`.cpp` + classes), matching mianesp's components:
-`Settings`, `WebServer` and `NtpTime` are singletons reached through
-`instance()`, with httpd's C callbacks as static members.
+The app code is C++ (`.cpp` + classes) on top of those components: `Settings`
+is a `settingsbase`/`SettingsBase` subclass, the HTTP handlers are
+`NtpWebServer : webserver`/`WebServer`, and both `Settings` and `NtpTime` are
+singletons reached through `instance()`, with httpd's C callbacks as static
+members. `webserver` is the network-agnostic base — the WiFi endpoints
+(`/reset`, `/set_hostname`) live in `wifiwebserver`, which this firmware does
+not pull, because the P4 has no radio.
 
 ## Expected log (captured from this board)
 
@@ -105,7 +111,7 @@ I (7409) esp_netif_handlers: eth ip: 131.84.1.107, mask: 255.255.255.0, gw: 131.
 I (7409) eth_demo: DHCP lease: ip 131.84.1.107  mask 255.255.255.0  gw 131.84.1.2
 I (7409) eth_demo: ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP
 I (7419) ntp_time: upstream time server: 192.0.2.1
-I (7419) webserver: starting http server on port 80
+I (7420) WebServer: Starting server on port: 80
 I (7429) eth_demo: http: http://131.84.1.107/healthz  http://131.84.1.107/config
 I (8129) ntp_time: clock set from 192.0.2.1: 2026-11-11T13:38:15+1100
 ```
@@ -269,25 +275,29 @@ Body size is capped at 4 KB, and string values are capped at 63 characters
 (`Settings::kMaxValueLen`); longer values are truncated and logged.
 
 Settings live as one JSON blob in NVS (namespace `settings`, key `config`),
-which is why they survive a reboot. The layout is the C++ counterpart of
-mianesp's `SettingsBase`: fields are registered with their compiled-in defaults
-in the `Settings` constructor, so a new setting is one `add()` line plus its
-member in `Settings::Values`.
+which is why they survive a reboot. `Settings` is a mianesp `SettingsBase`
+subclass: the fields are registered with their compiled-in defaults in the
+constructor via `field()`, so a new setting is one `field()` line plus its
+member (and, if it needs to take effect immediately, an `onChange()` callback —
+that is how a new `tz` reaches `setenv`/`tzset`).
 
-`cJSON` is no longer part of the IDF core, so `main/idf_component.yml` pulls
-`espressif/cjson` from the component registry; the first build downloads it
-into `managed_components/` (git-ignored).
+The dependencies are mianesp components pulled over git (`main`), plus
+`espressif/cjson` from the registry — cJSON left the IDF core in v6. The first
+build downloads them into `managed_components/` (git-ignored), and it needs an
+SSH key with read access to `mianos/mianesp`.
 
 ## Layout
 
 | File                    | Contents                                                        |
 |-------------------------|-----------------------------------------------------------------|
 | `main/main.cpp`         | EMAC + PHY bring-up, event handlers, boot order, web server start |
-| `main/settings.[ch]pp`  | `Settings`: NVS-backed settings (mianesp `SettingsBase` shape)   |
-| `main/web_server.[ch]pp`| `WebServer`: `/healthz`, `/config`, `/config/reset`, `/ntp/sync` |
+| `main/settings.[ch]pp`  | `Settings : SettingsBase` — the four device settings            |
+| `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync` |
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
 | `main/net_state.[ch]pp` | read-only netif / link accessors, fed by `main.cpp`              |
-| `main/json.h`           | `json::Value`: cJSON behind a `unique_ptr`, so nothing hand-frees |
+
+Written locally; everything else (JSON, NVS, settings machinery, the HTTP
+server) is a mianesp component.
 
 ## Troubleshooting
 
@@ -307,7 +317,7 @@ into `managed_components/` (git-ignored).
 - **Port busy / `[Errno 16] Resource busy`**: a leftover `esp_idf_monitor`
   still owns `/dev/cu.usbmodem*`; `lsof /dev/cu.usbmodem*` and kill it.
 - **Nothing on port 80, but ping works**: the server starts on the first
-  `IP_EVENT_ETH_GOT_IP`, so check the log for `webserver: starting http server`.
+  `IP_EVENT_ETH_GOT_IP`, so check the log for `WebServer: Starting server on port: 80`.
   If it says `httpd_start: ESP_ERR_HTTPD_...`, the port is already bound.
 - **`/config` returns defaults after a reboot**: the NVS write failed — look for
   `settings: failed to persist config` in the log (usually a full partition).

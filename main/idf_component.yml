@@ -1,5 +1,23 @@
-## cJSON left the IDF core in v6; it is a managed component now, pulled the same
-## way mianesp's jsonwrapper does it. Fetching it needs the component registry
-## on first build; it then lands in managed_components/ (git-ignored).
+## Shared infrastructure comes from mianesp, in the same git/path/version shape
+## the other devices use. Only the network-agnostic `webserver` is pulled: the
+## P4 has no radio, so `wifiwebserver` would drag in esp_wifi for nothing.
 dependencies:
+  jsonwrapper:
+    git: git@github.com:mianos/mianesp.git
+    path: components/jsonwrapper
+    version: main
+  nvsstoragemanager:
+    git: git@github.com:mianos/mianesp.git
+    path: components/nvsstoragemanager
+    version: main
+  settingsbase:
+    git: git@github.com:mianos/mianesp.git
+    path: components/settingsbase
+    version: main
+  webserver:
+    git: git@github.com:mianos/mianesp.git
+    path: components/webserver
+    version: main
+
+  ## cJSON left the IDF core in v6; jsonwrapper depends on it too.
   espressif/cjson: "^1.7.19"

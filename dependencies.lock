@@ -13,8 +13,62 @@ dependencies:
     source:
       type: idf
     version: 6.0.1
+  jsonwrapper:
+    component_hash: fc06d29df177f71c330edeae204f5d900a7bb9658fbd297a955d1c917212379e
+    dependencies:
+    - name: espressif/cjson
+      version: '*'
+    source:
+      git: git@github.com:mianos/mianesp.git
+      path: components/jsonwrapper
+      type: git
+    version: 8a3dc6fb82134c67db4e1945b164e16c7f9cd8b3
+  nvsstoragemanager:
+    component_hash: 17abcaed9caf3c8dc23e40baaa180de517980b84cc45c1d668065b7851e58ed2
+    dependencies: []
+    source:
+      git: git@github.com:mianos/mianesp.git
+      path: components/nvsstoragemanager
+      type: git
+    version: 8a3dc6fb82134c67db4e1945b164e16c7f9cd8b3
+  settingsbase:
+    component_hash: 6605801bc4e427e3d35041e5a2b6c4cad366cfe12171e3f9ac246a77ba8d68ab
+    dependencies:
+    - git: git@github.com:mianos/mianesp.git
+      name: jsonwrapper
+      path: components/jsonwrapper
+      version: main
+    - git: git@github.com:mianos/mianesp.git
+      name: nvsstoragemanager
+      path: components/nvsstoragemanager
+      version: main
+    source:
+      git: git@github.com:mianos/mianesp.git
+      path: components/settingsbase
+      type: git
+    version: 8a3dc6fb82134c67db4e1945b164e16c7f9cd8b3
+  webserver:
+    component_hash: 89ff2562bbfe789121f863924f60f7376b0677fdf202f986f3aba54c32f9e59a
+    dependencies:
+    - git: git@github.com:mianos/mianesp.git
+      name: jsonwrapper
+      path: components/jsonwrapper
+      version: main
+    - git: git@github.com:mianos/mianesp.git
+      name: nvsstoragemanager
+      path: components/nvsstoragemanager
+      version: main
+    source:
+      git: git@github.com:mianos/mianesp.git
+      path: components/webserver
+      type: git
+    version: 8a3dc6fb82134c67db4e1945b164e16c7f9cd8b3
 direct_dependencies:
 - espressif/cjson
-manifest_hash: f83beacbfab8dfe279eb84d1f99cb79a89c68c144ca0260e4dc8d8f2d2fb3f03
+- jsonwrapper
+- nvsstoragemanager
+- settingsbase
+- webserver
+manifest_hash: 1d615406fbdf56a3d361a0a5c3b7e6c452d92bc1d32ba9824b4e050a47f64237
 target: esp32p4
 version: 3.0.0

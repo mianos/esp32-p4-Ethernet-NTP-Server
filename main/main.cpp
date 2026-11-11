@@ -229,7 +229,7 @@ void gotIpEvent(void *, esp_event_base_t, int32_t, void *event_data)
     /* The HTTP surface is only reachable once there is an address, so start it
      * on the first lease. Later rebinds leave it listening on all addresses. */
     if (!s_web_started) {
-        esp_err_t err = WebServer::instance().begin();
+        esp_err_t err = NtpWebServer::instance().begin();
         if (err == ESP_OK) {
             s_web_started = true;
             ESP_LOGI(TAG, "http: http://" IPSTR "/healthz  http://" IPSTR "/config",
