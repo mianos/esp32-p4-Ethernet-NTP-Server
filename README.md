@@ -576,10 +576,20 @@ is also how the `INIT` refid and the zero reference timestamp were verified.)
   remembered; the table recycles the least recently seen rather than growing.
   The burst is sized for people, not for clients: `sntp` sends five queries per
   invocation, so two runs back to back (the obvious thing to try) stay answered.
-- **Timestamps are software**: lwIP has no `SO_TIMESTAMP`, so the receive stamp
-  is taken after `recvfrom()` returns. Until the hardware path exists (the EMAC's
-  PTP clock), that scheduler latency is part of the answer — which is why the
-  dispersion above is stated rather than implied.
+- **Timestamps are software**: lwIP's port has no `SO_TIMESTAMP` (`lwipopts.h`
+  and the Kconfig have no such option in IDF 6.0), so the receive stamp is taken
+  after `recvfrom()` returns. The EMAC does have an IEEE 1588 unit — the P4 sets
+  `SOC_EMAC_IEEE1588V2_SUPPORTED` — but `esp_eth` exposes it as a *steerable
+  clock*, not a per-frame stamper: `esp_eth_mac_ptp_enable()`,
+  `esp_eth_mac_get_ptp_time()` / `set_ptp_time()`, `esp_eth_mac_adj_ptp_freq()`,
+  `esp_eth_mac_adj_ptp_time()` ("adjust base PTP time frequency increment by
+  PPS", in ppb) and a target-time interrupt. Nowhere does a received frame hand
+  back the descriptor's hardware timestamp, so making `t2` hardware-accurate
+  means patching the driver, not calling an API. That scheduler latency is
+  therefore part of the answer — which is why the dispersion above is stated
+  rather than implied. What the clock *is* good for is the other half: a PPS
+  edge can steer it in ppb, which is exactly the discipline mechanism the
+  stratum-1 phase needs.
 
 The log stays quiet on purpose — one line at start-up, one for the first request
 of a boot, then one a minute (these are the format strings in the code, with
@@ -698,9 +708,15 @@ Not in this milestone, on purpose:
 - **Interleaved mode** (RFC 9769) — the server must remember each client's last
   transmit timestamp, which is not worth it before hardware stamping exists.
 - **A stratum-1 reference.** That is the next phase, and the seam is ready: GPS
-  over UART plus the PPS line, disciplining the EMAC's PTP clock, a `GpsTimeRef`
-  returning `stratum = 1` / `refid = "GPS"`, and `now()` reading that clock
-  instead of `CLOCK_REALTIME`. The responder itself does not change.
+  over UART plus the PPS line, a `GpsTimeRef` returning `stratum = 1` /
+  `refid = "GPS"`, and `serveNtp` deciding whether the LAN gets it. The responder
+  itself does not change. The one design choice to make deliberately is *which*
+  clock the servo steers: `CLOCK_REALTIME` with `adjtime()` (everything on the
+  device agrees with what is served, but the correction passes through the OS
+  and the PPS edge is timestamped at interrupt latency), or the EMAC's PTP clock
+  with `esp_eth_mac_adj_ptp_time()` (a hardware counter one PPS edge can steer
+  in ppb, read straight out of `now()`, at the cost of a second clock to keep in
+  step with the logs).
 
 ## Layout
 
@@ -808,18 +824,22 @@ server) is a mianesp component.
 ## Next step
 
 A stratum-1 reference of its own: GPS over UART for time-of-day, the PPS line
-for the sub-microsecond edge, both disciplining the system clock instead of
-stepping it once from an upstream server. The responder is already shaped for
-it — a second `TimeRef` returning `stratum = 1` and `refid = "GPS"`, the leap
-indicator driven by the fix instead of by the freshness window, and `serveNtp`
-deciding whether the LAN gets it. The parts that are genuinely new work:
+for the sub-microsecond edge, both disciplining a local clock rather than
+stepping the system clock once from an upstream server. The responder is already
+shaped for it — a second `TimeRef` returning `stratum = 1` and `refid = "GPS"`,
+the leap indicator driven by the fix instead of by the freshness window, and
+`serveNtp` deciding whether the LAN gets it. The parts that are genuinely new
+work:
 
 - **A discipline loop**, not a step: a servo that slews the clock from PPS
   instead of jumping it, so a client never sees the jump.
-- **The receive-side accuracy** the dispersion above admits to: the P4's EMAC
-  carries an IEEE 1588 timestamp unit (`esp_eth` mentions it; check what IDF
-  6.0 actually exposes before betting the design on it), which would replace
-  the post-`recvfrom()` stamp with a hardware one.
+- **The receive-side accuracy** the dispersion above admits to. It is *not* a
+  call away: the EMAC's IEEE 1588 unit is exposed as a steerable clock
+  (`esp_eth_mac_adj_ptp_time()`, `get_ptp_time()`), not as a per-frame
+  timestamp, and lwIP has no `SO_TIMESTAMP` — so a hardware `t2` needs a driver
+  patch that surfaces the DMA descriptor's stamp ([what the API actually
+  offers](#serving-ntp-udp123)). Worth doing only after the servo, because a
+  disciplined local clock is the larger error term today.
 - **Leap-second and holdover behaviour** worth stating out loud before the
   server calls itself stratum 1.
 
