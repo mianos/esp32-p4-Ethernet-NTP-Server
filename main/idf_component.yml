@@ -1,0 +1,5 @@
+## cJSON left the IDF core in v6; it is a managed component now, pulled the same
+## way mianesp's jsonwrapper does it. Fetching it needs the component registry
+## on first build; it then lands in managed_components/ (git-ignored).
+dependencies:
+  espressif/cjson: "^1.7.19"

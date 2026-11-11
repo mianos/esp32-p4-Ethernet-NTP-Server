@@ -1,5 +1,5 @@
 /*
- * esp32p4-ntp — step 1: Ethernet bring-up, DHCP, ICMP echo (ping).
+ * esp32p4-ntp — step 1: Ethernet bring-up, DHCP, ping, and the HTTP surface.
  *
  * Board: Waveshare ESP32-P4-ETH (ESP32-P4NRW32 + IP101GRI 10/100 PHY).
  *
@@ -16,6 +16,8 @@
  *   3. logs the lease (IP/netmask/gateway) as soon as it arrives
  *   4. answers ICMP echo requests -- lwIP replies to ping by default once the
  *      netif is up, no extra code needed
+ *   5. serves the mianesp HTTP endpoints (/healthz, /config, /config/reset)
+ *      once there is an address to reach them on
  *
  * It is intentionally small: it is the plumbing the NTP server will sit on.
  */
@@ -30,7 +32,12 @@
 #include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 #include "sdkconfig.h"
+
+#include "net_state.h"
+#include "settings.h"
+#include "web_server.h"
 
 /* ---- Board wiring (Waveshare ESP32-P4-ETH, IP101GRI) --------------------
  * Reference design values. MDC/MDIO are the SMI (management) bus, the rest
@@ -54,6 +61,8 @@ static const char *TAG = "eth_demo";
 static esp_eth_handle_t s_eth_handle;
 static esp_netif_t *s_eth_netif;
 static volatile bool s_have_ip;
+static volatile bool s_link_up;
+static bool s_web_started;
 
 /* Read one PHY register through the SMI (MDC/MDIO) bus. */
 static esp_err_t phy_read_reg(uint32_t reg, uint32_t *val)
@@ -159,6 +168,7 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     case ETHERNET_EVENT_CONNECTED: {
         uint8_t mac_addr[6] = {0};
         esp_eth_ioctl(s_eth_handle, ETH_CMD_G_MAC_ADDR, mac_addr);
+        s_link_up = true;
         ESP_LOGI(TAG, "link up   (MAC %02x:%02x:%02x:%02x:%02x:%02x)",
                  mac_addr[0], mac_addr[1], mac_addr[2],
                  mac_addr[3], mac_addr[4], mac_addr[5]);
@@ -167,6 +177,7 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     }
     case ETHERNET_EVENT_DISCONNECTED:
         s_have_ip = false;
+        s_link_up = false;
         ESP_LOGW(TAG, "link down");
         break;
     case ETHERNET_EVENT_START:
@@ -190,6 +201,32 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
     ESP_LOGI(TAG, "DHCP lease: ip " IPSTR "  mask " IPSTR "  gw " IPSTR,
              IP2STR(&ip_info->ip), IP2STR(&ip_info->netmask), IP2STR(&ip_info->gw));
     ESP_LOGI(TAG, "ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP");
+
+    /* The HTTP surface is only reachable once there is an address, so start it
+     * on the first lease. Later rebinds leave it listening on all addresses. */
+    if (!s_web_started) {
+        esp_err_t err = web_server_start();
+        if (err == ESP_OK) {
+            s_web_started = true;
+            ESP_LOGI(TAG, "http: http://" IPSTR "/healthz  http://" IPSTR "/config",
+                     IP2STR(&ip_info->ip), IP2STR(&ip_info->ip));
+        } else {
+            ESP_LOGE(TAG, "http server failed to start: %s", esp_err_to_name(err));
+        }
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * Read-only network state for the HTTP handlers (see net_state.h)
+ * ---------------------------------------------------------------------- */
+esp_netif_t *net_state_netif(void)
+{
+    return s_eth_netif;
+}
+
+bool net_state_link_up(void)
+{
+    return s_link_up;
 }
 
 /* -------------------------------------------------------------------------
@@ -208,7 +245,18 @@ static void status_task(void *arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "esp32p4-ntp eth demo: RMII + IP101, DHCP client, ICMP echo");
+    ESP_LOGI(TAG, "esp32p4-ntp: RMII + IP101, DHCP client, ICMP echo, HTTP /healthz");
+
+    /* Settings live in NVS. A stale blob from an older layout is erased rather
+     * than carried forward: the defaults are the documented starting point. */
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES || nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "erasing nvs partition (%s)", esp_err_to_name(nvs_err));
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(nvs_err);
+    settings_init();
 
     ESP_ERROR_CHECK(eth_init(&s_eth_handle));
 
@@ -223,6 +271,11 @@ void app_main(void)
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
     s_eth_netif = esp_netif_new(&netif_cfg);
     ESP_ERROR_CHECK(s_eth_netif ? ESP_OK : ESP_FAIL);
+
+    /* DHCP option 12 is built when the client's first DISCOVER goes out, which
+     * happens once the netif comes up -- so the hostname has to be in place
+     * before esp_eth_start(), not after the first lease. */
+    ESP_ERROR_CHECK(esp_netif_set_hostname(s_eth_netif, g_settings.hostname));
 
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
     ESP_ERROR_CHECK(esp_netif_attach(s_eth_netif, glue));
