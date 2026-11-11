@@ -138,7 +138,7 @@ httpd's built-in plain-text page.
 ```console
 $ curl -s http://131.84.1.107/healthz
 {"uptime":35,"time":"1970-01-01T11:00:35+1100","time_set":false,
- "version":"14e61f6-dirty","idf_ver":"v6.0.1","partition":"factory",
+ "version":"ce36551","idf_ver":"v6.0.1","partition":"factory",
  "heap_free":555124,"hostname":"esp32p4-ntp","link_up":true,
  "ip":"131.84.1.107"}
 ```
