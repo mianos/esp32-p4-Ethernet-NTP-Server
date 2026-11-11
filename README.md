@@ -33,8 +33,8 @@ IP101GRI is driven over RMII. Pins are hard-coded in `main/main.cpp`:
 
 PHY address 1 (IP101 default, confirmed: ID reads `0x02430c54`). The whole
 table is verified working on this board — DHCP would not complete otherwise —
-but if you ever swap boards, the `kEth*` constants at the top of `main/main.cpp`
-are the only thing to change.
+but if you ever swap boards, the `kEthPins` table at the top of `main/main.cpp`
+is the only thing to change.
 
 ## Status: working
 
@@ -120,11 +120,20 @@ native USB-Serial/JTAG is not on that connector, which is why
 
 The app code is C++ (`.cpp` + classes) on top of those components: `Settings`
 is a `settingsbase`/`SettingsBase` subclass, the HTTP handlers are
-`NtpWebServer : webserver`/`WebServer`, and both `Settings` and `NtpTime` are
-singletons reached through `instance()`, with httpd's C callbacks as static
-members. `webserver` is the network-agnostic base — the WiFi endpoints
-(`/reset`, `/set_hostname`) live in `wifiwebserver`, which this firmware does
-not pull, because the P4 has no radio.
+`NtpWebServer : webserver`/`WebServer`, and `Settings`, `NtpTime`, `NtpServer`,
+`NtpWebServer` and `EthernetLink` are singletons reached through `instance()`,
+with httpd's and esp_event's C callbacks as static members that take the
+instance from the `arg` pointer. `webserver` is the network-agnostic base — the
+WiFi endpoints (`/reset`, `/set_hostname`) live in `wifiwebserver`, which this
+firmware does not pull, because the P4 has no radio.
+
+`EthernetLink` is also where the C idioms go: the board's pads are one
+`constexpr RmiiPins kEthPins` table copied in by `applyPinMap()`, the MAC and
+PHY instances are `std::unique_ptr`s with `del()` deleters (released to the
+driver once it owns them, so a failed bring-up has no cleanup branches), PHY
+registers read as `std::optional<uint32_t>`, and the MAC arrives as a
+`std::string`. `app_main()` is then just boot order: NVS, settings, netif,
+clock, link.
 
 ## Expected log (captured from this board)
 
@@ -722,7 +731,7 @@ Not in this milestone, on purpose:
 
 | File                    | Contents                                                        |
 |-------------------------|-----------------------------------------------------------------|
-| `main/main.cpp`         | EMAC + PHY bring-up, event handlers, boot order, web server and responder start, OTA image confirmation |
+| `main/main.cpp`         | `EthernetLink`: EMAC + PHY bring-up, PHY diagnostics, event handlers, boot order, web server and responder start, OTA image confirmation |
 | `main/settings.[ch]pp`  | `Settings : SettingsBase` — the five device settings            |
 | `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync`, `/firmware` |
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
