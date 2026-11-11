@@ -1,5 +1,5 @@
 /*
- * esp32p4-ntp — step 1: Ethernet bring-up, DHCP, ping, and the HTTP surface.
+ * esp32p4-ntp — Ethernet bring-up, DHCP, ping, the HTTP surface, and a clock.
  *
  * Board: Waveshare ESP32-P4-ETH (ESP32-P4NRW32 + IP101GRI 10/100 PHY).
  *
@@ -16,14 +16,18 @@
  *   3. logs the lease (IP/netmask/gateway) as soon as it arrives
  *   4. answers ICMP echo requests -- lwIP replies to ping by default once the
  *      netif is up, no extra code needed
- *   5. serves the mianesp HTTP endpoints (/healthz, /config, /config/reset)
- *      once there is an address to reach them on
+ *   5. serves the mianesp HTTP endpoints (/healthz, /config, /config/reset,
+ *      /ntp/sync) once there is an address to reach them on
+ *   6. (test mode) steps the clock from an upstream SNTP server -- the one the
+ *      DHCP server names in option 42, or one from /config -- so that the NTP
+ *      responder in the next milestone has a real time to serve
  *
  * It is intentionally small: it is the plumbing the NTP server will sit on.
  */
 
 #include <inttypes.h>
-#include <string.h>
+
+#include <cstring>
 
 #include "esp_check.h"
 #include "esp_eth.h"
@@ -36,51 +40,54 @@
 #include "sdkconfig.h"
 
 #include "net_state.h"
+#include "ntp_time.h"
 #include "settings.h"
 #include "web_server.h"
+
+namespace {
 
 /* ---- Board wiring (Waveshare ESP32-P4-ETH, IP101GRI) --------------------
  * Reference design values. MDC/MDIO are the SMI (management) bus, the rest
  * are the RMII data plane. PHY_RST is active low; PHY_ADDR 1 is the IP101
  * default set by the PHYAD strap resistors on the board.
  */
-#define ETH_MDC_GPIO            31
-#define ETH_MDIO_GPIO           52
-#define ETH_PHY_RST_GPIO        51
-#define ETH_PHY_ADDR            1
-#define ETH_RMII_REFCLK_GPIO    50  /* 50 MHz REF_CLK from PHY -> P4 (input) */
-#define ETH_RMII_TX_EN_GPIO     49
-#define ETH_RMII_TXD0_GPIO      34
-#define ETH_RMII_TXD1_GPIO      35
-#define ETH_RMII_RXD0_GPIO      29
-#define ETH_RMII_RXD1_GPIO      30
-#define ETH_RMII_CRS_DV_GPIO    28
+constexpr int kEthMdcGpio        = 31;
+constexpr int kEthMdioGpio       = 52;
+constexpr int kEthPhyResetGpio   = 51;
+constexpr int kEthPhyAddr        = 1;
+constexpr int kEthRmiiRefclkGpio = 50; /* 50 MHz REF_CLK from PHY -> P4 (input) */
+constexpr int kEthRmiiTxEnGpio   = 49;
+constexpr int kEthRmiiTxd0Gpio   = 34;
+constexpr int kEthRmiiTxd1Gpio   = 35;
+constexpr int kEthRmiiRxd0Gpio   = 29;
+constexpr int kEthRmiiRxd1Gpio   = 30;
+constexpr int kEthRmiiCrsDvGpio  = 28;
 
-static const char *TAG = "eth_demo";
+const char *TAG = "eth_demo";
 
-static esp_eth_handle_t s_eth_handle;
-static esp_netif_t *s_eth_netif;
-static volatile bool s_have_ip;
-static volatile bool s_link_up;
-static bool s_web_started;
+esp_eth_handle_t s_eth_handle;
+volatile bool    s_have_ip;
+bool             s_web_started;
 
 /* Read one PHY register through the SMI (MDC/MDIO) bus. */
-static esp_err_t phy_read_reg(uint32_t reg, uint32_t *val)
+esp_err_t phyReadReg(uint32_t reg, uint32_t *val)
 {
-    esp_eth_phy_reg_rw_data_t rd = { .reg_addr = reg, .reg_value_p = val };
+    esp_eth_phy_reg_rw_data_t rd = {};
+    rd.reg_addr    = reg;
+    rd.reg_value_p = val;
     return esp_eth_ioctl(s_eth_handle, ETH_CMD_READ_PHY_REG, &rd);
 }
 
 /* Scan the 32 MDIO addresses for a PHY and print what is there. If the SMI
- * pins in eth_init() are wrong, every address reads 0xffff/0 and nothing is
+ * pins in ethInit() are wrong, every address reads 0xffff/0 and nothing is
  * logged -- that is the diagnostic signal.
  */
-static void phy_scan(void)
+void phyScan()
 {
     for (uint32_t addr = 0; addr < 32; addr++) {
         uint32_t id1 = 0, id2 = 0;
         esp_eth_ioctl(s_eth_handle, ETH_CMD_S_PHY_ADDR, &addr);
-        if (phy_read_reg(2, &id1) != ESP_OK || phy_read_reg(3, &id2) != ESP_OK) {
+        if (phyReadReg(2, &id1) != ESP_OK || phyReadReg(3, &id2) != ESP_OK) {
             continue;
         }
         if (id1 == 0 || id1 == 0xffff) {
@@ -89,15 +96,15 @@ static void phy_scan(void)
         ESP_LOGI(TAG, "MDIO addr %" PRIu32 ": PHY ID 0x%04" PRIx32 "%04" PRIx32
                  " (IP101 = 0x0243xxxx)", addr, id1, id2);
     }
-    uint32_t addr = ETH_PHY_ADDR;
+    uint32_t addr = kEthPhyAddr;
     esp_eth_ioctl(s_eth_handle, ETH_CMD_S_PHY_ADDR, &addr);
 }
 
 /* One line of PHY status: BMSR gives link + autoneg-done, BMCR the rest. */
-static void phy_log_status(void)
+void phyLogStatus()
 {
     uint32_t bmsr = 0, bmcr = 0;
-    if (phy_read_reg(1, &bmsr) != ESP_OK || phy_read_reg(0, &bmcr) != ESP_OK) {
+    if (phyReadReg(1, &bmsr) != ESP_OK || phyReadReg(0, &bmcr) != ESP_OK) {
         ESP_LOGW(TAG, "phy: MDIO read failed (check MDC/MDIO wiring)");
         return;
     }
@@ -110,38 +117,47 @@ static void phy_log_status(void)
  * The generic PHY driver speaks the standard MII registers, which is all the
  * IP101 needs for autonegotiation and link-up detection.
  * ---------------------------------------------------------------------- */
-static esp_err_t eth_init(esp_eth_handle_t *eth_handle_out)
+esp_err_t ethInit(esp_eth_handle_t *eth_handle_out)
 {
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
-    phy_config.phy_addr = ETH_PHY_ADDR;
-    phy_config.reset_gpio_num = ETH_PHY_RST_GPIO;
+    phy_config.phy_addr       = kEthPhyAddr;
+    phy_config.reset_gpio_num = kEthPhyResetGpio;
 
-    eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
-    emac_config.smi_gpio.mdc_num = ETH_MDC_GPIO;
-    emac_config.smi_gpio.mdio_num = ETH_MDIO_GPIO;
+    /* ETH_ESP32_EMAC_DEFAULT_CONFIG() is written with C99 designated
+     * initialisers in an order C++ rejects, so its defaults are set by hand
+     * here -- same values, plus this board's pin map. */
+    eth_esp32_emac_config_t emac_config = {};
+    emac_config.smi_gpio.mdc_num  = kEthMdcGpio;
+    emac_config.smi_gpio.mdio_num = kEthMdioGpio;
 
     emac_config.interface = EMAC_DATA_INTERFACE_RMII;
     /* The PHY's 50 MHz REF_CLK output clocks the MAC. */
     emac_config.clock_config.rmii.clock_mode = EMAC_CLK_EXT_IN;
-    emac_config.clock_config.rmii.clock_gpio = ETH_RMII_REFCLK_GPIO;
+    emac_config.clock_config.rmii.clock_gpio = kEthRmiiRefclkGpio;
+
+    emac_config.clock_config_out_in.rmii.clock_mode = EMAC_CLK_EXT_IN;
+    emac_config.clock_config_out_in.rmii.clock_gpio = -1; /* no clock out */
+    emac_config.dma_burst_len = ETH_DMA_BURST_LEN_32;
+    emac_config.intr_priority = 0;
+    emac_config.mdc_freq_hz   = 0; /* driver default */
 
     /* P4 routes the RMII data signals through the GPIO matrix. */
-    emac_config.emac_dataif_gpio.rmii.tx_en_num = ETH_RMII_TX_EN_GPIO;
-    emac_config.emac_dataif_gpio.rmii.txd0_num = ETH_RMII_TXD0_GPIO;
-    emac_config.emac_dataif_gpio.rmii.txd1_num = ETH_RMII_TXD1_GPIO;
-    emac_config.emac_dataif_gpio.rmii.rxd0_num = ETH_RMII_RXD0_GPIO;
-    emac_config.emac_dataif_gpio.rmii.rxd1_num = ETH_RMII_RXD1_GPIO;
-    emac_config.emac_dataif_gpio.rmii.crs_dv_num = ETH_RMII_CRS_DV_GPIO;
+    emac_config.emac_dataif_gpio.rmii.tx_en_num  = kEthRmiiTxEnGpio;
+    emac_config.emac_dataif_gpio.rmii.txd0_num   = kEthRmiiTxd0Gpio;
+    emac_config.emac_dataif_gpio.rmii.txd1_num   = kEthRmiiTxd1Gpio;
+    emac_config.emac_dataif_gpio.rmii.rxd0_num   = kEthRmiiRxd0Gpio;
+    emac_config.emac_dataif_gpio.rmii.rxd1_num   = kEthRmiiRxd1Gpio;
+    emac_config.emac_dataif_gpio.rmii.crs_dv_num = kEthRmiiCrsDvGpio;
 
     esp_eth_mac_t *mac = esp_eth_mac_new_esp32(&emac_config, &mac_config);
-    if (mac == NULL) {
+    if (mac == nullptr) {
         ESP_LOGE(TAG, "failed to create EMAC instance");
         return ESP_FAIL;
     }
 
     esp_eth_phy_t *phy = esp_eth_phy_new_generic(&phy_config);
-    if (phy == NULL) {
+    if (phy == nullptr) {
         ESP_LOGE(TAG, "failed to create PHY instance");
         mac->del(mac);
         return ESP_FAIL;
@@ -161,14 +177,17 @@ static esp_err_t eth_init(esp_eth_handle_t *eth_handle_out)
 /* -------------------------------------------------------------------------
  * Event handlers
  * ---------------------------------------------------------------------- */
-static void eth_event_handler(void *arg, esp_event_base_t event_base,
-                              int32_t event_id, void *event_data)
+void ethEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
+    (void)arg;
+    (void)event_base;
+    (void)event_data;
+
     switch (event_id) {
     case ETHERNET_EVENT_CONNECTED: {
         uint8_t mac_addr[6] = {0};
         esp_eth_ioctl(s_eth_handle, ETH_CMD_G_MAC_ADDR, mac_addr);
-        s_link_up = true;
+        net_state::setLinkUp(true);
         ESP_LOGI(TAG, "link up   (MAC %02x:%02x:%02x:%02x:%02x:%02x)",
                  mac_addr[0], mac_addr[1], mac_addr[2],
                  mac_addr[3], mac_addr[4], mac_addr[5]);
@@ -177,7 +196,7 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     }
     case ETHERNET_EVENT_DISCONNECTED:
         s_have_ip = false;
-        s_link_up = false;
+        net_state::setLinkUp(false);
         ESP_LOGW(TAG, "link down");
         break;
     case ETHERNET_EVENT_START:
@@ -191,10 +210,13 @@ static void eth_event_handler(void *arg, esp_event_base_t event_base,
     }
 }
 
-static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
-                                 int32_t event_id, void *event_data)
+void gotIpEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
 {
-    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    (void)arg;
+    (void)event_base;
+    (void)event_id;
+
+    ip_event_got_ip_t         *event   = static_cast<ip_event_got_ip_t *>(event_data);
     const esp_netif_ip_info_t *ip_info = &event->ip_info;
 
     s_have_ip = true;
@@ -202,10 +224,14 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
              IP2STR(&ip_info->ip), IP2STR(&ip_info->netmask), IP2STR(&ip_info->gw));
     ESP_LOGI(TAG, "ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP");
 
+    /* The lease is where the option-42 NTP server (if any) becomes known, so
+     * the clock can poll it now rather than at the next SNTP interval. */
+    NtpTime::instance().onGotIp();
+
     /* The HTTP surface is only reachable once there is an address, so start it
      * on the first lease. Later rebinds leave it listening on all addresses. */
     if (!s_web_started) {
-        esp_err_t err = web_server_start();
+        esp_err_t err = WebServer::instance().begin();
         if (err == ESP_OK) {
             s_web_started = true;
             ESP_LOGI(TAG, "http: http://" IPSTR "/healthz  http://" IPSTR "/config",
@@ -217,35 +243,25 @@ static void got_ip_event_handler(void *arg, esp_event_base_t event_base,
 }
 
 /* -------------------------------------------------------------------------
- * Read-only network state for the HTTP handlers (see net_state.h)
- * ---------------------------------------------------------------------- */
-esp_netif_t *net_state_netif(void)
-{
-    return s_eth_netif;
-}
-
-bool net_state_link_up(void)
-{
-    return s_link_up;
-}
-
-/* -------------------------------------------------------------------------
  * Status task: says what the demo is waiting for, then goes quiet.
  * ---------------------------------------------------------------------- */
-static void status_task(void *arg)
+void statusTask(void *arg)
 {
+    (void)arg;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(5000));
         if (!s_have_ip) {
             ESP_LOGI(TAG, "waiting for link + DHCP lease (is the RJ45 plugged in?)");
-            phy_log_status();
+            phyLogStatus();
         }
     }
 }
 
-void app_main(void)
+}  // namespace
+
+extern "C" void app_main(void)
 {
-    ESP_LOGI(TAG, "esp32p4-ntp: RMII + IP101, DHCP client, ICMP echo, HTTP /healthz");
+    ESP_LOGI(TAG, "esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, upstream clock");
 
     /* Settings live in NVS. A stale blob from an older layout is erased rather
      * than carried forward: the defaults are the documented starting point. */
@@ -256,36 +272,39 @@ void app_main(void)
         nvs_err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(nvs_err);
-    settings_init();
-
-    ESP_ERROR_CHECK(eth_init(&s_eth_handle));
-
-    /* Which PHY answers on the SMI bus, and what does it see? */
-    phy_scan();
-    phy_log_status();
+    Settings::instance().begin();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
+    /* Armed before the first DHCP DISCOVER: lwIP only keeps an option-42 NTP
+     * server if sntp_servermode_dhcp() is on when the ACK is processed. */
+    ESP_ERROR_CHECK(NtpTime::instance().begin());
+
+    ESP_ERROR_CHECK(ethInit(&s_eth_handle));
+
+    /* Which PHY answers on the SMI bus, and what does it see? */
+    phyScan();
+    phyLogStatus();
+
     /* Default Ethernet netif: DHCP client on, ICMP echo on (lwIP default). */
     esp_netif_config_t netif_cfg = ESP_NETIF_DEFAULT_ETH();
-    s_eth_netif = esp_netif_new(&netif_cfg);
-    ESP_ERROR_CHECK(s_eth_netif ? ESP_OK : ESP_FAIL);
+    esp_netif_t       *netif     = esp_netif_new(&netif_cfg);
+    ESP_ERROR_CHECK(netif != nullptr ? ESP_OK : ESP_FAIL);
+    net_state::setNetif(netif);
 
     /* DHCP option 12 is built when the client's first DISCOVER goes out, which
      * happens once the netif comes up -- so the hostname has to be in place
      * before esp_eth_start(), not after the first lease. */
-    ESP_ERROR_CHECK(esp_netif_set_hostname(s_eth_netif, g_settings.hostname));
+    ESP_ERROR_CHECK(esp_netif_set_hostname(netif, Settings::instance().hostname()));
 
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
-    ESP_ERROR_CHECK(esp_netif_attach(s_eth_netif, glue));
+    ESP_ERROR_CHECK(esp_netif_attach(netif, glue));
 
-    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID,
-                                               &eth_event_handler, NULL));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
-                                               &got_ip_event_handler, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &ethEvent, nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &gotIpEvent, nullptr));
 
     ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
 
-    xTaskCreate(status_task, "eth_status", 3072, NULL, 3, NULL);
+    xTaskCreate(statusTask, "eth_status", 3072, nullptr, 3, nullptr);
 }
