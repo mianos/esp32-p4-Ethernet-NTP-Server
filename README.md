@@ -59,7 +59,7 @@ well as over IPv4 — see [IPv6](#ipv6).
 The responder serves NTP to both families from one dual-stack socket, and says
 what it is: with the upstream clock fresh it answers `li=0 stratum=3
 refid=131.84.1.1`, and macOS `sntp` takes it
-(`+0.025324 +/- 0.002325 131.84.1.107`). Booted with `timeSource=off` it answers
+(`+0.014526 +/- 0.002399 131.84.1.107`). Booted with `timeSource=off` it answers
 `li=3 stratum=16 refid=INIT` and `sntp` refuses it with `Server not
 synchronized` — which is the point ([Serving NTP](#serving-ntp-udp123)).
 
@@ -325,14 +325,14 @@ httpd's built-in plain-text page.
 
 ```console
 $ curl -s http://131.84.1.107/healthz
-{"uptime":29,"time":"2026-11-11T17:57:03+1100","time_set":true,
- "version":"ac65668","idf_ver":"v6.0.1","partition":"ota_1","heap_free":524664,
+{"uptime":42,"time":"2026-11-11T18:07:30+1100","time_set":true,
+ "version":"aa33def","idf_ver":"v6.0.1","partition":"ota_1","heap_free":524508,
  "hostname":"esp32p4-ntp","link_up":true,"ip":"131.84.1.107",
  "ipv6_linklocal":"fe80::82f1:b2ff:fedb:e228",
  "ipv6_global":"2401:d002:120f:8701:82f1:b2ff:fedb:e228",
  "ntp_source":"dhcp","ntp_server":"131.84.1.1",
- "ntp_reachable":true,"ntp_synced":true,"last_sync":1794380203,
- "serve_ntp":true,"ntp_stratum":3,"ntp_refid":"131.84.1.1","ntp_requests":0}
+ "ntp_reachable":true,"ntp_synced":true,"last_sync":1794380815,
+ "serve_ntp":true,"ntp_stratum":3,"ntp_refid":"131.84.1.1","ntp_requests":5}
 ```
 
 The same JSON comes back over IPv6 — `/healthz` does not care which family the
@@ -597,20 +597,25 @@ error; `delay` 0.38 ms is the whole round trip over the LAN.
 
 ```console
 $ /usr/bin/sntp -d 131.84.1.107
+selected:
+sntp_exchange {
+        result: 0 (Success)
         header: 24 (li:0 vn:4 mode:4)
        stratum: 03 (3)
           poll: 00 (1)
      precision: FFFFFFEC (9.536743e-07)
          delay: 0000.0041 (0.000991821)
-    dispersion: 0000.0057 (0.001327515)
+    dispersion: 0000.0067 (0.001571655)
            ref: 83540101 (1.1.84.131)
-        offset: ... (0.033080500)
-         delay: ... (0.000383000)
-+0.033080 +/- 0.002206 131.84.1.107 131.84.1.107
+         t_ref: EE9E928F.00000000 (4003369615.000000000)
+        offset: ... (0.014526000)
+         delay: ... (0.000342000)
++0.014526 +/- 0.002399 131.84.1.107 131.84.1.107
 ```
 
 `ref: 83540101` is `131.84.1.1` on the wire, printed by sntp as a host-order
-integer; `dispersion` 1.33 ms is the 1 ms floor plus ~22 s of 15 ppm ageing.
+integer; `dispersion` 1.57 ms is the 1 ms floor plus the ~38 s since the last
+sync at 15 ppm.
 
 The rest of the matrix, from a 40-line Python client (raw sockets, `recv` with a
 1 s timeout):
