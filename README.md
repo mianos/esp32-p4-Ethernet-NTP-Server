@@ -270,7 +270,7 @@ lwIP's build:
 |-------|------:|--------------:|
 | ESP32-P4, IPv6 off | 495,328 | — |
 | ESP32-P4, IPv6 + SLAAC | 533,552 | +38,224 (+7.7%) |
-| ESP32-P4, IPv6 + SLAAC + NTP responder (this firmware) | 539,616 | +44,288 (+8.9%) |
+| ESP32-P4, IPv6 + SLAAC + NTP responder (this firmware) | 539,600 | +44,272 (+8.9%) |
 | classic ESP32 (`modswitch`, mianesp stack), IPv6 off | 938,896 | — |
 | classic ESP32, IPv6 on as IDF ships it | 969,440 | +30,544 (+3.3%) |
 | classic ESP32, IPv6 + SLAAC | 969,456 | +30,560 (+3.3%) |
@@ -280,7 +280,7 @@ What that says:
 - **The cost is lwIP's IPv6 stack, not this feature.** ~30–38 KB for IPv6 at all;
   SLAAC on top of it is **16 bytes** — a flag in the netif and a couple of
   branches that were compiled in either way.
-- **The responder is 6,064 bytes** (533,552 → 539,616): the socket, the header
+- **The responder is 6,048 bytes** (533,552 → 539,600): the socket, the header
   builder, the rate limiter and the `/healthz` fields, with no new dependency.
 - **Your ESP32 fleet is already paying it.** IDF 6 sets `CONFIG_LWIP_IPV6=y` by
   default, so those binaries have carried IPv6 since they moved to IDF 6 — they

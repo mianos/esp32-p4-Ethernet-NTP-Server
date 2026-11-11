@@ -75,9 +75,8 @@ public:
     bool running() const { return m_running.load(std::memory_order_relaxed); }
 
     /* Counters for /healthz. Read from the HTTP task while the responder task
-     * writes them, hence the atomics. */
+     * writes them, hence the atomic. */
     uint32_t requests() const { return m_requests.load(std::memory_order_relaxed); }
-    uint32_t kodSent() const { return m_kod.load(std::memory_order_relaxed); }
 
     /* What a reply would claim right now (also what /healthz reports). */
     TimeReference reference() const;
@@ -94,7 +93,6 @@ private:
     std::unique_ptr<TimeRef>   m_ref;
     std::atomic<bool>          m_running{false};
     std::atomic<uint32_t>      m_requests{0};
-    std::atomic<uint32_t>      m_kod{0};
     TaskHandle_t               m_task = nullptr;
     int                        m_sock = -1;
 };

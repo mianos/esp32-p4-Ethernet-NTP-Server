@@ -604,7 +604,6 @@ void NtpServer::serveLoop()
             }
 
             m_requests.store(answered, std::memory_order_relaxed);
-            m_kod.store(kodSent, std::memory_order_relaxed);
         }
 
         if (static_cast<int32_t>(nowMs - reportAt) >= 0) {
