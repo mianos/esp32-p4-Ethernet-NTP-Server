@@ -7,6 +7,10 @@
  *   POST /config         apply any subset of the keys, persist, echo the result
  *   POST /config/reset   restore compiled-in defaults
  *   POST /ntp/sync       force a poll of the upstream time server (test mode)
+ *   GET  /firmware       build and slot info for the running image
+ *   POST /firmware       stream the body into the inactive OTA slot, then reboot
+ *                        (this is how the device is updated over Ethernet; it
+ *                        has no other field interface)
  *
  * Success is 2xx with the resulting state as the body; failure is
  * {"error": "...", "statusCode": N} with the matching HTTP status. Unknown
@@ -42,6 +46,8 @@ private:
     static esp_err_t config_post_handler(httpd_req_t *req);
     static esp_err_t config_reset_post_handler(httpd_req_t *req);
     static esp_err_t sync_post_handler(httpd_req_t *req);
+    static esp_err_t firmware_get_handler(httpd_req_t *req);
+    static esp_err_t firmware_post_handler(httpd_req_t *req);
 
     /* Point the DHCP client's option-12 name at a renamed device. */
     static void apply_hostname(const std::string &hostname);

@@ -10,8 +10,18 @@ CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 
-# A 1.5 MB factory app gives room for lwIP + Ethernet + future NTP code.
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+# Two 1.7 MB app slots instead of one factory slot. The box is headless and its
+# only interface is the Ethernet port, so the way to update it in the field is
+# POST /firmware; that needs a second slot to write into. The app is ~0.5 MB of
+# a 32 MB part, so the spare slot costs nothing. nvs stays at 0x9000 in both
+# layouts, so settings survive the one-off USB reflash that installs this table.
+CONFIG_PARTITION_TABLE_TWO_OTA_LARGE=y
+
+# An OTA'd image boots as ESP_OTA_IMG_PENDING_VERIFY and the bootloader drops
+# back to the previous slot unless the app confirms itself; main.cpp does that
+# once it has a lease and a listening HTTP server. Without this, an image that
+# breaks the network would need a USB cable to recover.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 

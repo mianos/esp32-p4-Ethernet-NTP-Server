@@ -43,22 +43,37 @@ reboot (NVS), and `/config/reset` restores the compiled-in defaults. The clock
 steps from the DHCP-provided NTP server (option 42) about 2.7 s after the lease,
 and `/healthz` then reports `time_set: true` with a real date.
 
+Updates go over the network once the two-slot partition table is in place: this
+unit was moved `factory` → `ota_0` by USB, then `ota_0` → `ota_1` → `ota_0` by
+`POST /firmware` over the RJ45, including the fix that turned a rejected
+payload into a `400` rather than a `500`. Settings survived all of it.
+
 ## Build / flash
 
 ```sh
 cd esp32p4-ntp
-./build.sh flash      # build + flash
+./build.sh flash      # build + flash over USB
 ./build.sh monitor    # build + flash + serial log (Ctrl-] to quit)
+curl --data-binary @build/esp32p4_ntp.bin http://<ip>/firmware   # update over Ethernet
 ```
+
+USB is only needed the first time (or to recover): it is the only transport the
+ROM bootloader speaks, so the two-slot partition table has to be written with a
+cable. After that, `POST /firmware` installs builds over the network — see
+[Updating over Ethernet](#updating-over-ethernet-ota).
 
 `build.sh` uses the ESP-IDF v6.0.1 install at
 `/Users/robertfowler/.espressif/v6.0.1/esp-idf` and the port
 `/dev/cu.usbmodem5CF71255951` (override with `PORT=...`). Use the `/dev/cu.*`
 node on macOS: `/dev/tty.*` intermittently reports `EBUSY` here.
 
-The lwIP SNTP/DHCP options live in `sdkconfig.defaults`, which only seeds a
-*fresh* `sdkconfig`; an existing one keeps its old values, so after pulling a
-change like this run `rm sdkconfig` (or `idf.py menuconfig`) before building.
+The lwIP SNTP/DHCP options and the partition table (`TWO_OTA_LARGE`: `nvs`,
+`otadata`, `phy_init`, `ota_0` 1700 K, `ota_1` 1700 K) live in
+`sdkconfig.defaults`, which only seeds a *fresh* `sdkconfig`; an existing one
+keeps its old values, so after pulling a change like this run `rm sdkconfig`
+(or `idf.py menuconfig`) before building. `nvs` sits at `0x9000` in both the old
+single-app table and this one, so settings survive the swap.
+
 
 Console output goes to **UART0**, which on this board is wired to the USB-C
 port's CH343 USB-UART bridge (VID `0x1A86`, PID `0x55D3`, enumerates as
@@ -161,16 +176,18 @@ httpd's built-in plain-text page.
 | POST   | `/config`       | apply any subset of the keys, persist, echo back |
 | POST   | `/config/reset` | restore compiled-in defaults and persist         |
 | POST   | `/ntp/sync`     | force an upstream poll, wait up to 5 s for it    |
+| GET    | `/firmware`     | build + slot info for the running image          |
+| POST   | `/firmware`     | write the body into the inactive OTA slot, reboot into it |
 
 `/healthz` on this unit:
 
 ```console
 $ curl -s http://131.84.1.107/healthz
-{"uptime":30,"time":"2026-11-11T13:38:38+1100","time_set":true,
- "version":"d235d34","idf_ver":"v6.0.1","partition":"factory",
- "heap_free":552788,"hostname":"esp32p4-ntp","link_up":true,
- "ip":"131.84.1.107","ntp_source":"dhcp","ntp_server":"192.0.2.1",
- "ntp_reachable":true,"ntp_synced":true,"last_sync":1794364695}
+{"uptime":32,"time":"2026-11-11T16:16:41+1100","time_set":true,
+ "version":"67ea5fc","idf_ver":"v6.0.1","partition":"ota_0",
+ "heap_free":529576,"hostname":"esp32p4-ntp","link_up":true,
+ "ip":"131.84.1.107","ntp_source":"dhcp","ntp_server":"131.84.1.1",
+ "ntp_reachable":true,"ntp_synced":true,"last_sync":1794374178}
 ```
 
 `time_set` matters: there is no RTC, so the base `time` field is 1970 + uptime
@@ -203,6 +220,53 @@ $ curl -s http://131.84.1.107/healthz
 $ curl -s -X POST http://131.84.1.107/config/reset
 {"status":"reset"}
 ```
+
+## Updating over Ethernet (OTA)
+
+The board's only interface is the RJ45, so the firmware carries an update
+endpoint: `POST /firmware` with the raw app image as the body writes it into the
+inactive slot and reboots into it.
+
+```console
+$ curl --data-binary @build/esp32p4_ntp.bin http://131.84.1.107/firmware
+{"written":531328,"partition":"ota_0","rebooting":true}
+
+$ sleep 20; curl -s http://131.84.1.107/firmware
+{"version":"67ea5fc","idf_ver":"v6.0.1","built":"Nov 11 2026 16:12:36",
+ "partition":"ota_0","confirmed":true,"ota":true,"next_partition":"ota_1","slot_size":1740800}
+```
+
+`partition` is where the running image came from, `next_partition` is where the
+next upload lands: successive updates alternate `ota_0` / `ota_1`. That
+alternation is also the quickest proof an update happened — uploading the same
+build twice leaves `version` unchanged but flips the slot. `confirmed` is the
+rollback handshake below: `true` means this image passed the reachability check
+and will stay; `false` right after a write means it is still `PENDING_VERIFY`.
+
+What checks the update:
+
+- **Payload.** The first `esp_ota_write()` rejects a body whose magic byte is
+  not an app image, and `esp_ota_end()` verifies the whole thing (chip id,
+  checksum, segment hashes). Both answer
+  `400 {"error":"not a valid app image for this chip"}`, and a rejected body
+  leaves the boot slot untouched.
+- **Size.** `Content-Length` must fit the slot, otherwise `413`.
+- **Boot.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` marks a newly written image
+  `ESP_OTA_IMG_PENDING_VERIFY`. `main.cpp` confirms it with
+  `esp_ota_mark_app_valid_cancel_rollback()` as soon as it has a DHCP lease and
+  the HTTP server is listening; if an image never gets that far, the bootloader
+  returns to the slot that worked. On a box with no other interface, that is the
+  difference between a bad update and a trip to find a USB cable. While an image
+  is still unconfirmed the endpoint answers `409` — a pending-verify app is not
+  allowed to write another one.
+- **Trust.** No authentication, like `/config`: anything on this LAN can replace
+  the firmware. Fine for a bench network; on an untrusted one this needs a token
+  or `esp_https_ota` with a signed image.
+
+`"ota": false` in `GET /firmware` means the flashed partition table has no
+second slot — `POST /firmware` then answers `500` and updating needs the cable.
+`built` is the app descriptor's link-time stamp, which only moves when that
+object is recompiled; use `version` (the git describe stamp) to identify a build.
 
 ## Clock (test mode)
 
@@ -290,9 +354,9 @@ SSH key with read access to `mianos/mianesp`.
 
 | File                    | Contents                                                        |
 |-------------------------|-----------------------------------------------------------------|
-| `main/main.cpp`         | EMAC + PHY bring-up, event handlers, boot order, web server start |
+| `main/main.cpp`         | EMAC + PHY bring-up, event handlers, boot order, web server start, OTA image confirmation |
 | `main/settings.[ch]pp`  | `Settings : SettingsBase` — the four device settings            |
-| `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync` |
+| `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync`, `/firmware` |
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
 | `main/net_state.[ch]pp` | read-only netif / link accessors, fed by `main.cpp`              |
 
@@ -331,6 +395,18 @@ server) is a mianesp component.
   run before `esp_eth_start()` or lwIP discards option 42. Check the boot order
   in `app_main()`, and that `CONFIG_LWIP_DHCP_GET_NTP_SRV=y` survived a
   `sdkconfig` edit (run `idf.py menuconfig` → Component config → LWIP → SNTP).
+- **`POST /firmware` answers `500` `no OTA partition`**: the chip still has the
+  old single-app table (`GET /firmware` says `"ota": false`). Flash once over
+  USB with the current `sdkconfig.defaults`; `idf.py flash` writes the new table
+  and `ota_data_initial.bin` for you.
+- **`POST /firmware` answers `409`**: the running image has not confirmed itself
+  yet (it has no lease yet, usually right after an update). Retry once `/healthz`
+  answers.
+- **An update "does not take": the device comes back on the other slot.** That
+  is the rollback working — the new image never reached a lease + HTTP server, so
+  the bootloader returned to the slot that had one. Look for
+  `OTA image confirmed` in the log: absent means the image died earlier, and the
+  serial console is the only place that says why.
 - **First build fails fetching `espressif/cjson`**: the component registry is
   unreachable. Build once with network access; after that
   `managed_components/` is cached locally.
