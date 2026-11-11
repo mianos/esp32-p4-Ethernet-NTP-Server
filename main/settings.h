@@ -61,6 +61,12 @@ public:
      * (ntp_time.cpp logs a warning when it sees one). */
     const std::string &ntpServer() const { return m_ntpServer; }
 
+    /* Serve NTP on udp/123 ("on"/"off"). Serving is honest by construction: a
+     * device that is not locked answers with stratum 16 and leap indicator 3,
+     * which tells every client to ignore it, so leaving this on cannot mislead
+     * anything -- it can only spend electricity. */
+    bool serveNtp() const { return m_serveNtp == "on"; }
+
     /* Apply whichever registered keys are present in `doc`; unknown keys and
      * wrong-typed values are ignored. Long values are truncated to
      * kMaxValueLen. SettingsBase fires the onChange callbacks for the fields
@@ -81,4 +87,5 @@ private:
     std::string m_tz         = "AEST-10AEDT,M10.1.0,M4.1.0/3";
     std::string m_timeSource = "dhcp";
     std::string m_ntpServer;
+    std::string m_serveNtp   = "on";
 };

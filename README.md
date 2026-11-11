@@ -1,13 +1,15 @@
 # esp32p4-ntp
 
-Step 1 of an NTP server on the ESP32-P4: **Ethernet bring-up + DHCP + ping**,
-plus the device's HTTP surface (`/healthz`, `/config`, `/config/reset`,
-`/ntp/sync`) using the same REST conventions as the other
-[mianesp](https://github.com/mianos/mianesp) devices, plus a test-mode clock
-that steps itself from the upstream NTP server the DHCP server hands out
-(option 42). The HTTP surface and settings are mianesp's own components
-(`webserver`, `jsonwrapper`, `nvsstoragemanager`, `settingsbase`), not local
-copies of them.
+An NTP server on the ESP32-P4: **Ethernet bring-up + DHCP + ping**, the device's
+HTTP surface (`/healthz`, `/config`, `/config/reset`, `/ntp/sync`) using the
+same REST conventions as the other
+[mianesp](https://github.com/mianos/mianesp) devices, a test-mode clock that
+steps itself from the upstream NTP server the DHCP server hands out (option 42),
+and **a responder that serves that clock to the LAN on UDP/123** — over IPv4 and
+IPv6, with a stratum that admits what it does and does not know
+([Serving NTP](#serving-ntp-udp123)). The HTTP surface and settings are
+mianesp's own components (`webserver`, `jsonwrapper`, `nvsstoragemanager`,
+`settingsbase`), not local copies of them.
 
 Target board: **Waveshare ESP32-P4-ETH** (ESP32-P4NRW32, 32 MB flash,
 IP101GRI 10/100 PHY, RJ45). This is what is currently on
@@ -53,6 +55,13 @@ IPv6 came up beside IPv4 on the same netif with no change to the HTTP handlers:
 `2401:d002:120f:8701:82f1:b2ff:fedb:e228` advertised on this LAN, `ping6` from
 the Mac to both, and `/healthz` served over `http://[2401:d002:...]/healthz` as
 well as over IPv4 — see [IPv6](#ipv6).
+
+The responder serves NTP to both families from one dual-stack socket, and says
+what it is: with the upstream clock fresh it answers `li=0 stratum=3
+refid=131.84.1.1`, and macOS `sntp` takes it
+(`+0.025324 +/- 0.002325 131.84.1.107`). Booted with `timeSource=off` it answers
+`li=3 stratum=16 refid=INIT` and `sntp` refuses it with `Server not
+synchronized` — which is the point ([Serving NTP](#serving-ntp-udp123)).
 
 ## Build / flash
 
@@ -245,10 +254,12 @@ Deliberately not included:
   option 42 as a list of IPv4 addresses — so both `dhcp` and `static` clock modes
   stay on IPv4. `ntpServer` accepts and stores an IPv6 literal, but
   `ntp_time.cpp` logs `lwIP's SNTP client resolves A records only, so it cannot
-  sync from it` rather than failing silently.
-- **The responder socket**, which does not exist yet. When it does, bind
-  `AF_INET6` with `IPV6_V6ONLY=0`: one socket, both families, the way httpd
-  already does it.
+  sync from it` rather than failing silently. (The *responder* has no such
+  limitation: it answers IPv6 clients.)
+
+The responder socket this list used to defer to now exists, and is bound exactly
+as sketched here: `AF_INET6` with `IPV6_V6ONLY=0` on `::`, one socket for both
+families — see [Serving NTP](#serving-ntp-udp123).
 
 ### Cost, and switching it off on a small board
 
@@ -258,7 +269,8 @@ lwIP's build:
 | Build | bytes | Δ vs IPv6 off |
 |-------|------:|--------------:|
 | ESP32-P4, IPv6 off | 495,328 | — |
-| ESP32-P4, IPv6 + SLAAC (this firmware) | 533,552 | +38,224 (+7.7%) |
+| ESP32-P4, IPv6 + SLAAC | 533,552 | +38,224 (+7.7%) |
+| ESP32-P4, IPv6 + SLAAC + NTP responder (this firmware) | 539,616 | +44,288 (+8.9%) |
 | classic ESP32 (`modswitch`, mianesp stack), IPv6 off | 938,896 | — |
 | classic ESP32, IPv6 on as IDF ships it | 969,440 | +30,544 (+3.3%) |
 | classic ESP32, IPv6 + SLAAC | 969,456 | +30,560 (+3.3%) |
@@ -267,8 +279,9 @@ What that says:
 
 - **The cost is lwIP's IPv6 stack, not this feature.** ~30–38 KB for IPv6 at all;
   SLAAC on top of it is **16 bytes** — a flag in the netif and a couple of
-  branches that were compiled in either way. The app-side additions in this repo
-  are part of the P4 row and are a couple of kilobytes at most.
+  branches that were compiled in either way.
+- **The responder is 6,064 bytes** (533,552 → 539,616): the socket, the header
+  builder, the rate limiter and the `/healthz` fields, with no new dependency.
 - **Your ESP32 fleet is already paying it.** IDF 6 sets `CONFIG_LWIP_IPV6=y` by
   default, so those binaries have carried IPv6 since they moved to IDF 6 — they
   simply had nothing to give it an address. `modswitch` as shipped is the third
@@ -312,13 +325,14 @@ httpd's built-in plain-text page.
 
 ```console
 $ curl -s http://131.84.1.107/healthz
-{"uptime":24,"time":"2026-11-11T17:16:06+1100","time_set":true,
- "version":"bce2335","idf_ver":"v6.0.1","partition":"ota_1","heap_free":529548,
+{"uptime":29,"time":"2026-11-11T17:57:03+1100","time_set":true,
+ "version":"ac65668","idf_ver":"v6.0.1","partition":"ota_1","heap_free":524664,
  "hostname":"esp32p4-ntp","link_up":true,"ip":"131.84.1.107",
  "ipv6_linklocal":"fe80::82f1:b2ff:fedb:e228",
  "ipv6_global":"2401:d002:120f:8701:82f1:b2ff:fedb:e228",
  "ntp_source":"dhcp","ntp_server":"131.84.1.1",
- "ntp_reachable":true,"ntp_synced":true,"last_sync":1794377754}
+ "ntp_reachable":true,"ntp_synced":true,"last_sync":1794380203,
+ "serve_ntp":true,"ntp_stratum":3,"ntp_refid":"131.84.1.1","ntp_requests":0}
 ```
 
 The same JSON comes back over IPv6 — `/healthz` does not care which family the
@@ -334,6 +348,12 @@ RFC 5905 reachability register: non-zero means the server has answered. `ip` is
 omitted until the DHCP lease lands, and `ipv6_linklocal` / `ipv6_global` are
 omitted until each address exists.
 
+The last four fields are the responder's: `serve_ntp` is whether it is
+listening, `ntp_stratum` / `ntp_refid` are what a reply would claim *right now*
+(so they flip to `16` / `"INIT"` the moment the clock stops being fresh), and
+`ntp_requests` is how many requests it has answered since boot. They are absent
+while it is not running.
+
 `/config` takes and returns a flat JSON object. Values are strings; keys that
 are not registered are ignored, so an older/newer client will not break it:
 
@@ -343,11 +363,12 @@ are not registered are ignored, so an older/newer client will not break it:
 | `tz`       | `AEST-10AEDT,M10.1.0,M4.1.0/3`   | POSIX TZ used by `localtime()` for `/healthz`. Presentation only — NTP always serves UTC. |
 | `timeSource` | `dhcp`                         | `dhcp` takes the upstream NTP server from DHCP option 42, `static` polls `ntpServer`, `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
 | `ntpServer` | *(empty)*                       | Upstream NTP host or address, used only when `timeSource` is `static`. An IPv6 literal is stored but cannot sync — lwIP's SNTP client resolves A records only ([IPv6](#ipv6)). |
+| `serveNtp` | `on`                            | `off` stops the UDP/123 responder within a second and starts it again on `on`, no reboot. Serving an unlocked clock is safe by construction: it answers stratum 16 with LI 3, which tells clients to ignore it. |
 
 ```console
 $ curl -s -X POST -H 'Content-Type: application/json' \
        -d '{"hostname":"p4-ntp","tz":"UTC0"}' http://131.84.1.107/config
-{"hostname":"p4-ntp","tz":"UTC0","timeSource":"dhcp","ntpServer":""}
+{"hostname":"p4-ntp","tz":"UTC0","timeSource":"dhcp","ntpServer":"","serveNtp":"on"}
 
 $ curl -s http://131.84.1.107/healthz
 {"uptime":44,"time":"2026-11-11T02:38:44+0000","time_set":true, ... ,
@@ -486,14 +507,152 @@ The dependencies are mianesp components pulled over git (`main`), plus
 build downloads them into `managed_components/` (git-ignored), and it needs an
 SSH key with read access to `mianos/mianesp`.
 
+## Serving NTP (UDP/123)
+
+`NtpServer` (`main/ntp_server.cpp`) answers NTPv3/v4 client requests on port 123
+from one dual-stack socket: `AF_INET6`, `IPV6_V6ONLY=0`, bound to `::`, exactly
+as [IPv6](#ipv6) recommended before it existed. It starts on the first DHCP
+lease, next to the HTTP server, and serves the clock the section above set.
+
+The design is one seam wide. A reply builder that knows the protocol, and a
+`TimeRef` that knows where the time came from — `reference()` (stratum, refid,
+when it last synced, locked or not), `now()` (the timestamp to stamp), and
+`describe()` (one phrase for the boot log). Today the only implementation is
+`UpstreamTimeRef`, the SNTP clock above; GPS/PPS becomes a second one and the
+packet code does not change.
+
+### What it will say, and what it will not
+
+| Clock state | LI | stratum | refid | A client does |
+|-------------|----|--------:|-------|---------------|
+| locked: synced less than 1 h ago | 0 | 3 | the upstream's address | trusts it |
+| not locked | 3 | 16 | `INIT` | discards it |
+| over the rate limit | 0 | 0 | `RATE` | backs off |
+
+Stratum 3, not 2, and that is the honest number: lwIP's SNTP client does not
+keep the upstream's own stratum, so this device cannot know whether it is one or
+two hops from the reference. Claiming one hop more than a well-behaved internet
+server over-states the distance; claiming one less under-states it, and a client
+weights a closer server more heavily. Under-claiming is the safe error.
+
+The 1 h window is what makes "locked" mean something. `ntp_synced` in `/healthz`
+only records that the clock was set at some point; a responder that keeps saying
+stratum 3 after its upstream went away is serving drift. Past the window it
+answers `li=3 stratum=16` — RFC 5905's way of saying *do not use me* — and macOS
+`sntp` obliges:
+
+```console
+$ /usr/bin/sntp -t 2 131.84.1.107
+sntp: Exchange failed: Server not synchronized
+...
+sntp: Clock select failed
+        header: E4 (li:3 vn:4 mode:4)
+       stratum: 10 (16)
+           ref: 494E4954 (84.73.78.73)
+         t_ref: 00000000.00000000 (0.000000000)
+```
+
+(Captured with `timeSource=off` and a reboot, so nothing had set the clock. That
+is also how the `INIT` refid and the zero reference timestamp were verified.)
+
+### On the wire
+
+- **Answers mode 3 only, version 3 or 4.** A mode 4 packet (another server), a
+  mode 1 packet, version 2, or anything shorter than 48 bytes gets silence —
+  answering a mode 4 is how two servers end up talking to each other forever.
+- **Always 48 bytes out, never more than came in.** No MAC, no extension fields
+  echoed, so this cannot be used as a reflector.
+- **Origin timestamp is the client's transmit field byte for byte**, including
+  an all-zero one; receive and transmit are taken around the reply build.
+- **Precision `-20`** (about 1 µs — what this clock can distinguish), **root
+  delay 1 ms**, **root dispersion 1 ms + 15 ppm × time since the last sync**, so
+  a stale clock advertises its staleness instead of hiding it.
+- **refid** is the upstream's IPv4 address at stratum 3; a hostname upstream
+  gets a stable FNV-1a of the name instead of RFC 5905's MD5 (which lwIP cannot
+  give us the resolved bytes for). Above stratum 1 the field is informational —
+  it is how ntpd spots a loop — so this is a documented deviation, not a guess.
+- **Rate limit**: 8-packet burst per source address, then one request per 2 s,
+  then one `RATE` kiss-o'-death per second, then silence. Eight addresses are
+  remembered; the table recycles the least recently seen rather than growing.
+- **Timestamps are software**: lwIP has no `SO_TIMESTAMP`, so the receive stamp
+  is taken after `recvfrom()` returns. Until the hardware path exists (the EMAC's
+  PTP clock), that scheduler latency is part of the answer — which is why the
+  dispersion above is stated rather than implied.
+
+The log stays quiet on purpose — one line at start-up, one for the first request
+of a boot, then one a minute (these are the format strings in the code, with
+illustrative values):
+
+```console
+I (9124) ntp_server: serving on udp/123 (dual-stack), reference: upstream 131.84.1.1, stratum 3
+I (15320) ntp_server: first request from 131.84.1.95:60371: stratum 3
+I (75320) ntp_server: answered 12, KoD 1, dropped 3 in the last 60 s
+```
+
+### Verified on this unit
+
+macOS `sntp` against the board. The offset is the board's clock against this Mac
+— i.e. the upstream server's accuracy plus the step at sync — not a protocol
+error; `delay` 0.38 ms is the whole round trip over the LAN.
+
+```console
+$ /usr/bin/sntp -d 131.84.1.107
+        header: 24 (li:0 vn:4 mode:4)
+       stratum: 03 (3)
+          poll: 00 (1)
+     precision: FFFFFFEC (9.536743e-07)
+         delay: 0000.0041 (0.000991821)
+    dispersion: 0000.0057 (0.001327515)
+           ref: 83540101 (1.1.84.131)
+        offset: ... (0.033080500)
+         delay: ... (0.000383000)
++0.033080 +/- 0.002206 131.84.1.107 131.84.1.107
+```
+
+`ref: 83540101` is `131.84.1.1` on the wire, printed by sntp as a host-order
+integer; `dispersion` 1.33 ms is the 1 ms floor plus ~22 s of 15 ppm ageing.
+
+The rest of the matrix, from a 40-line Python client (raw sockets, `recv` with a
+1 s timeout):
+
+| Sent | Answer |
+|------|--------|
+| mode 3, vn 4, 48 B over IPv4 | 48 B: `li=0 vn=4 mode=4 stratum=3`, origin echoed |
+| the same over the global IPv6 address | identical |
+| mode 4 (server) | nothing |
+| mode 1 (symmetric active) | nothing |
+| vn 2 | nothing |
+| 12 bytes | nothing |
+| transmit timestamp all zeros | origin echoed as zeros |
+| 20 in a burst from one address | 9 answered, 4 `RATE`, 7 silent — the script waits 0.5 s per silent packet, so tokens refilled during the run |
+| after the burst, 2.5 s later | answered again |
+
+### Off, on, and what is deliberately missing
+
+`POST /config '{"serveNtp":"off"}'` stops it within a second (`/healthz` drops to
+`"serve_ntp":false`, `sntp` gets `recv failure`), and `on` rebinds the same
+socket without a reboot.
+
+Not in this milestone, on purpose:
+
+- **NTS** (RFC 8915) — needs TLS and a key exchange; a LAN server gains little.
+- **Broadcast / multicast** (RFC 5905 §9) — every client here polls.
+- **Interleaved mode** (RFC 9769) — the server must remember each client's last
+  transmit timestamp, which is not worth it before hardware stamping exists.
+- **A stratum-1 reference.** That is the next phase, and the seam is ready: GPS
+  over UART plus the PPS line, disciplining the EMAC's PTP clock, a `GpsTimeRef`
+  returning `stratum = 1` / `refid = "GPS"`, and `now()` reading that clock
+  instead of `CLOCK_REALTIME`. The responder itself does not change.
+
 ## Layout
 
 | File                    | Contents                                                        |
 |-------------------------|-----------------------------------------------------------------|
-| `main/main.cpp`         | EMAC + PHY bring-up, event handlers, boot order, web server start, OTA image confirmation |
-| `main/settings.[ch]pp`  | `Settings : SettingsBase` — the four device settings            |
+| `main/main.cpp`         | EMAC + PHY bring-up, event handlers, boot order, web server and responder start, OTA image confirmation |
+| `main/settings.[ch]pp`  | `Settings : SettingsBase` — the five device settings            |
 | `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync`, `/firmware` |
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
+| `main/ntp_server.[ch]pp`| `NtpServer` + `TimeRef`/`UpstreamTimeRef`: the UDP/123 responder, reply builder, rate limiter |
 | `main/net_state.[ch]pp` | read-only netif / link / IPv6-address accessors, fed by `main.cpp` |
 
 Written locally; everything else (JSON, NVS, settings machinery, the HTTP
@@ -531,6 +690,28 @@ server) is a mianesp component.
   run before `esp_eth_start()` or lwIP discards option 42. Check the boot order
   in `app_main()`, and that `CONFIG_LWIP_DHCP_GET_NTP_SRV=y` survived a
   `sdkconfig` edit (run `idf.py menuconfig` → Component config → LWIP → SNTP).
+- **A client says `Server not synchronized` / `Clock select failed`**: the
+  responder is answering `li=3 stratum=16`, deliberately — the clock is not
+  locked. Check `/healthz`: `ntp_synced` false, or `last_sync` older than an
+  hour. Fix the upstream, not the responder. Serving a 1970 clock with
+  `stratum=3` would be the actual bug.
+- **`serve_ntp` is `false`**: `serveNtp` is `off`. If it is `on` and still
+  `false`, the boot log has the reason: `bind udp/123: errno 98` means something
+  else owns the port on the device, `cannot start the responder task` means heap
+  (it wants 4 KB of stack). A failed start never takes the rest of the firmware
+  with it — HTTP keeps answering, which is how you get in to see why.
+- **`stratum` is 16 right after switching `timeSource` back to `dhcp`**: the
+  clock has not resynced because lwIP only learns option 42 on a DHCP bind — the
+  log says `option 42 arrives at the next DHCP bind (a reboot applies it now)`.
+  Nothing wrong with the responder; a lease renewal or reboot clears it.
+- **A client is getting `RATE` kiss-o'-death replies**: it is asking faster than
+  one packet per 2 s after its 8-packet burst. Confirm with
+  `ntp_requests` in `/healthz` against the client's own count; a monitoring
+  script hammering UDP/123 is the usual cause.
+- **`ntp_refid` is a number for a hostname upstream**: that is the FNV-1a of the
+  name, not its address — lwIP does not expose the address the SNTP client
+  resolved ([Serving NTP](#serving-ntp-udp123)). Set `ntpServer` to the literal
+  address if you want to see it there.
 - **`ipv6_linklocal` is missing from `/healthz`**: IPv6 never came up. Check the
   log for `IPv6 link-local: ...` right after `link up` — that line comes from
   the `esp_netif_create_ip6_linklocal()` call in `main.cpp`, and without it
@@ -565,10 +746,20 @@ server) is a mianesp component.
 
 ## Next step
 
-The NTP responder (UDP/123) on top of this netif, serving the clock the test
-mode just set — or, better, replacing it with real discipline (GPS/PPS) so the
-responder has a stable reference of its own. Its settings slot into the
-`Settings` constructor next to `hostname`, `timeSource` and `ntpServer`, and
-`/healthz` already reports whether the clock is set, from where, and when. Open
-it the way httpd already is — `socket(AF_INET6, SOCK_DGRAM)` with
-`IPV6_V6ONLY=0` — and the one socket answers IPv4 and IPv6 clients alike.
+A stratum-1 reference of its own: GPS over UART for time-of-day, the PPS line
+for the sub-microsecond edge, both disciplining the system clock instead of
+stepping it once from an upstream server. The responder is already shaped for
+it — a second `TimeRef` returning `stratum = 1` and `refid = "GPS"`, the leap
+indicator driven by the fix instead of by the freshness window, and `serveNtp`
+deciding whether the LAN gets it. The parts that are genuinely new work:
+
+- **A discipline loop**, not a step: a servo that slews the clock from PPS
+  instead of jumping it, so a client never sees the jump.
+- **The receive-side accuracy** the dispersion above admits to: the P4's EMAC
+  carries an IEEE 1588 timestamp unit (`esp_eth` mentions it; check what IDF
+  6.0 actually exposes before betting the design on it), which would replace
+  the post-`recvfrom()` stamp with a hardware one.
+- **Leap-second and holdover behaviour** worth stating out loud before the
+  server calls itself stratum 1.
+
+Until then this is a correct stratum-3 server, and honest about being one.

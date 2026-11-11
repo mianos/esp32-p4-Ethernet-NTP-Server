@@ -21,14 +21,19 @@
  *   5. serves the mianesp HTTP endpoints (/healthz, /config, /config/reset,
  *      /ntp/sync) over IPv4 and IPv6 alike, once there is an address to reach
  *      them on
- *   6. (test mode) steps the clock from an upstream SNTP server -- the one the
- *      DHCP server names in option 42, or one from /config -- so that the NTP
- *      responder in the next milestone has a real time to serve
- *   7. takes firmware updates over the MII/RJ45 link itself (POST /firmware,
+ *   6. steps the clock from an upstream SNTP server -- the one the DHCP server
+ *      names in option 42, or one from /config -- with POST /ntp/sync to force
+ *      a poll while a client is being debugged
+ *   7. serves NTP itself, UDP/123, dual-stack, on the clock from (6): stratum 3
+ *      while the upstream is the reference and 16 while it is not, so a client
+ *      is never told something this device does not know. That split is where
+ *      GPS/PPS plugs in (see ntp_server.h)
+ *   8. takes firmware updates over the MII/RJ45 link itself (POST /firmware,
  *      into the inactive slot) and confirms a freshly booted image once it is
  *      reachable, so a bad one rolls back instead of needing a cable
  *
- * It is intentionally small: it is the plumbing the NTP server will sit on.
+ * It is intentionally small: everything here is the plumbing the time service
+ * stands on.
  */
 
 #include <inttypes.h>
@@ -48,6 +53,7 @@
 #include "sdkconfig.h"
 
 #include "net_state.h"
+#include "ntp_server.h"
 #include "ntp_time.h"
 #include "settings.h"
 #include "web_server.h"
@@ -78,6 +84,7 @@ esp_eth_handle_t s_eth_handle;
 std::atomic<bool> s_have_ip{false};
 /* Only ever touched from the event task, so a plain bool is enough. */
 bool s_web_started = false;
+bool s_ntp_started = false;
 
 /* Read one PHY register through the SMI (MDC/MDIO) bus. */
 esp_err_t phyReadReg(uint32_t reg, uint32_t *val)
@@ -287,6 +294,17 @@ void gotIpEvent(void *, esp_event_base_t, int32_t, void *event_data)
             confirmRunningImage();
         } else {
             ESP_LOGE(TAG, "http server failed to start: %s", esp_err_to_name(err));
+        }
+    }
+
+    /* The responder binds :123 -- also an address-dependent thing. It serves
+     * whatever the clock is: stratum 3 from the upstream, or 16 with the leap
+     * indicator at 3 while the clock is not locked (i.e. "ignore me"). */
+    if (!s_ntp_started) {
+        if (NtpServer::instance().begin() == ESP_OK) {
+            s_ntp_started = true;
+        } else {
+            ESP_LOGE(TAG, "ntp responder failed to start on udp/123");
         }
     }
 }

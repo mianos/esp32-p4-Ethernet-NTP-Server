@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 
 #include "net_state.h"
+#include "ntp_server.h"
 #include "ntp_time.h"
 #include "settings.h"
 
@@ -47,6 +48,32 @@ WebContext s_web_context;
 bool clockIsSet()
 {
     return time(nullptr) >= 1577836800; /* 2020-01-01T00:00:00Z */
+}
+
+/* The refid field is four bytes that mean different things depending on the
+ * stratum: text ("GPS", "INIT", "RATE") at stratum 1 and for the kiss codes,
+ * an IPv4 address above stratum 1 (RFC 5905 section 7.3). Print whichever it
+ * is -- a hexadecimal blob answers none of the questions /healthz is asked. */
+std::string refIdText(uint32_t refId, uint8_t stratum)
+{
+    char bytes[4];
+    for (int i = 0; i < 4; ++i) {
+        bytes[i] = static_cast<char>((refId >> (24 - 8 * i)) & 0xFF);
+    }
+
+    if (stratum <= 1 || stratum >= 16) {
+        std::string text(bytes, sizeof(bytes));
+        while (!text.empty() && text.back() == '\0') {
+            text.pop_back();
+        }
+        return text;
+    }
+
+    char quad[16];
+    std::snprintf(quad, sizeof(quad), "%u.%u.%u.%u", static_cast<uint8_t>(bytes[0]),
+                  static_cast<uint8_t>(bytes[1]), static_cast<uint8_t>(bytes[2]),
+                  static_cast<uint8_t>(bytes[3]));
+    return quad;
 }
 
 }  // namespace
@@ -186,6 +213,17 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
     if (ntp.synced()) {
         json.AddItem("last_sync", static_cast<double>(ntp.lastSync()));
     }
+
+    /* The responder's half of the story: whether it is listening, what it would
+     * claim if asked right now, and how much it has answered since boot. */
+    const NtpServer &server = NtpServer::instance();
+    json.AddItem("serve_ntp", server.running());
+    if (server.running()) {
+        const TimeReference ref = server.reference();
+        json.AddItem("ntp_stratum", static_cast<double>(ref.stratum));
+        json.AddItem("ntp_refid", refIdText(ref.refId, ref.stratum));
+        json.AddItem("ntp_requests", static_cast<double>(server.requests()));
+    }
 }
 
 esp_err_t NtpWebServer::config_get_handler(httpd_req_t *req)
@@ -216,6 +254,8 @@ esp_err_t NtpWebServer::config_post_handler(httpd_req_t *req)
     }
     /* A changed timeSource/ntpServer takes effect now, not at the next boot. */
     NtpTime::instance().applySettings();
+    /* And so does serveNtp: off stops the responder, on starts it. */
+    NtpServer::instance().applySettings();
     ESP_LOGI(TAG, "POST /config from %s", caller.c_str());
 
     return sendJson(req, settings.toJson(), 200);
@@ -231,6 +271,7 @@ esp_err_t NtpWebServer::config_reset_post_handler(httpd_req_t *req)
     settings.log();
     apply_hostname(settings.hostname());
     NtpTime::instance().applySettings();
+    NtpServer::instance().applySettings(); /* serveNtp is back to its default */
     ESP_LOGW(TAG, "POST /config/reset from %s: back to compiled-in defaults", caller.c_str());
 
     JsonWrapper resp;

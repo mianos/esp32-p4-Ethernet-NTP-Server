@@ -15,7 +15,7 @@ constexpr const char *kNvsKey       = "config";
 
 /* The keys POST /config accepts. Anything else in the body is ignored, as it
  * always was. */
-constexpr const char *kKeys[] = {"hostname", "tz", "timeSource", "ntpServer"};
+constexpr const char *kKeys[] = {"hostname", "tz", "timeSource", "ntpServer", "serveNtp"};
 
 }  // namespace
 
@@ -33,6 +33,7 @@ Settings::Settings(NvsStorageManager &nvs)
     field("tz", m_tz);
     field("timeSource", m_timeSource);
     field("ntpServer", m_ntpServer);
+    field("serveNtp", m_serveNtp);
 
     /* A new TZ string takes effect immediately, including after POST
      * /config/reset. Safe to attach here: it only touches this object and the C
