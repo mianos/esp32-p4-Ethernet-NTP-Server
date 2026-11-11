@@ -40,6 +40,15 @@ bool haveLease()
            info.ip.addr != 0;
 }
 
+/* lwIP's SNTP client resolves its server with dns_gethostbyname(), i.e. A
+ * records only, so an IPv6 literal can never work however it is written: the
+ * name goes to DNS, and DNS here only ever answers with an IPv4 address.
+ * Catching it turns a silent "never syncs" into one line in the log. */
+bool looksLikeIpv6(const std::string &text)
+{
+    return text.find(':') != std::string::npos;
+}
+
 }  // namespace
 
 std::string isoTimestamp(time_t when)
@@ -108,6 +117,12 @@ esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
 
     if (source == Settings::TimeSource::Static) {
         m_server = server;
+        if (looksLikeIpv6(m_server)) {
+            ESP_LOGW(TAG, "ntpServer '%s' is an IPv6 address; lwIP's SNTP client "
+                          "resolves A records only, so it cannot sync from it -- "
+                          "use an IPv4 address or a host name",
+                     m_server.c_str());
+        }
     }
 
     /* esp_netif_sntp_init() copies these names into lwIP, so m_server only has

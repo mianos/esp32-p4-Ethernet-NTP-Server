@@ -56,7 +56,9 @@ public:
     static const char *timeSourceName(TimeSource source);
 
     /* Upstream NTP server for timeSource "static"; empty when unset. A hostname
-     * is fine as long as the DNS server from the lease answers. */
+     * is fine as long as the DNS server from the lease answers. An IPv6 literal
+     * is stored but cannot sync: lwIP's SNTP client resolves A records only
+     * (ntp_time.cpp logs a warning when it sees one). */
     const std::string &ntpServer() const { return m_ntpServer; }
 
     /* Apply whichever registered keys are present in `doc`; unknown keys and

@@ -23,6 +23,20 @@ CONFIG_PARTITION_TABLE_TWO_OTA_LARGE=y
 # breaks the network would need a USB cable to recover.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
+# IPv6 on the RJ45, alongside IPv4 rather than instead of it. lwIP in IDF 6 is
+# built with IPv6 on by default, but that alone leaves the netif with no IPv6
+# address at all: SLAAC is off, and esp_netif only creates the fe80:: link-local
+# when the application asks (main.cpp does, on every link-up). With SLAAC on,
+# the board also takes a global address from the router's advertisements.
+# Everything above lwIP is already dual-stack -- esp_http_server binds
+# in6addr_any -- so /healthz, /config and POST /firmware answer over either
+# family without the handlers knowing. DHCPv6 stays off: SLAAC covers a normal
+# LAN, and the option-42 clock source is IPv4-only regardless, because RFC 2132
+# defines it as a list of IPv4 addresses.
+CONFIG_LWIP_IPV6=y
+CONFIG_LWIP_IPV6_AUTOCONFIG=y
+CONFIG_LWIP_IPV6_NUM_ADDRESSES=3
+
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
 # Test-mode clock: ask the DHCP server for an NTP server (option 42) and poll it

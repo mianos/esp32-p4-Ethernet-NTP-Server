@@ -13,11 +13,14 @@
  * What this firmware does:
  *   1. brings up EMAC + IP101 in RMII mode (50 MHz REF_CLK comes from the PHY)
  *   2. starts the default ESP-IDF Ethernet netif, which runs a DHCP client
+ *      (IPv4) and, because sdkconfig.defaults turns SLAAC on, also takes a
+ *      global IPv6 address from the router's advertisements
  *   3. logs the lease (IP/netmask/gateway) as soon as it arrives
- *   4. answers ICMP echo requests -- lwIP replies to ping by default once the
- *      netif is up, no extra code needed
+ *   4. answers ICMP echo requests over both families -- lwIP replies to ping by
+ *      default once the netif is up, no extra code needed
  *   5. serves the mianesp HTTP endpoints (/healthz, /config, /config/reset,
- *      /ntp/sync) once there is an address to reach them on
+ *      /ntp/sync) over IPv4 and IPv6 alike, once there is an address to reach
+ *      them on
  *   6. (test mode) steps the clock from an upstream SNTP server -- the one the
  *      DHCP server names in option 42, or one from /config -- so that the NTP
  *      responder in the next milestone has a real time to serve
@@ -31,6 +34,7 @@
 #include <inttypes.h>
 
 #include <atomic>
+#include <string>
 
 #include "esp_check.h"
 #include "esp_eth.h"
@@ -198,6 +202,19 @@ void ethEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *ev
                  mac_addr[0], mac_addr[1], mac_addr[2],
                  mac_addr[3], mac_addr[4], mac_addr[5]);
         ESP_LOGI(TAG, "requesting DHCP lease ...");
+#if CONFIG_LWIP_IPV6
+        /* IPv6 has to be asked for: esp_netif does not create the fe80::
+         * link-local on its own, and without one lwIP has no source address for
+         * the Router Solicitation that would bring a SLAAC address back. Doing
+         * it on every link-up, as the IDF examples do, means a cable bounce
+         * re-arms it rather than leaving the board IPv4-only until reboot. */
+        if (esp_netif_t *netif = net_state::netif(); netif != nullptr) {
+            const esp_err_t err = esp_netif_create_ip6_linklocal(netif);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "IPv6 link-local: %s", esp_err_to_name(err));
+            }
+        }
+#endif
         break;
     }
     case ETHERNET_EVENT_DISCONNECTED:
@@ -274,6 +291,34 @@ void gotIpEvent(void *, esp_event_base_t, int32_t, void *event_data)
     }
 }
 
+/* IPv6 arrives on its own event, per address: esp_netif posts GOT_IP6 once DAD
+ * has cleared the fe80:: the link-up handler asked for, and again every time
+ * SLAAC adds or re-adds a global address from a router advertisement (prefix
+ * changes, router restart). Logging each one with the URL it makes reachable is
+ * the only way to learn the address without a packet capture -- a link-local
+ * one only works from the same segment, hence "[addr]" rather than a host name.
+ */
+#if CONFIG_LWIP_IPV6
+void gotIp6Event(void *, esp_event_base_t, int32_t, void *event_data)
+{
+    auto *event = static_cast<ip_event_got_ip6_t *>(event_data);
+
+    const char *type = "unknown";
+    switch (esp_netif_ip6_get_addr_type(&event->ip6_info.ip)) {
+    case ESP_IP6_ADDR_IS_GLOBAL:           type = "global"; break;
+    case ESP_IP6_ADDR_IS_LINK_LOCAL:       type = "link-local"; break;
+    case ESP_IP6_ADDR_IS_UNIQUE_LOCAL:     type = "unique-local"; break;
+    case ESP_IP6_ADDR_IS_SITE_LOCAL:       type = "site-local"; break;
+    case ESP_IP6_ADDR_IS_IPV4_MAPPED_IPV6: type = "v4-mapped"; break;
+    case ESP_IP6_ADDR_IS_UNKNOWN:          break;
+    }
+
+    const std::string addr = net_state::ipv6Text(event->ip6_info.ip);
+    ESP_LOGI(TAG, "IPv6 %s: %s", type, addr.c_str());
+    ESP_LOGI(TAG, "http over IPv6: http://[%s]/healthz", addr.c_str());
+}
+#endif
+
 /* -------------------------------------------------------------------------
  * Status task: says what the demo is waiting for, then goes quiet.
  * ---------------------------------------------------------------------- */
@@ -334,6 +379,9 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &ethEvent, nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &gotIpEvent, nullptr));
+#if CONFIG_LWIP_IPV6
+    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_GOT_IP6, &gotIp6Event, nullptr));
+#endif
 
     ESP_ERROR_CHECK(esp_eth_start(s_eth_handle));
 

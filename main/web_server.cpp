@@ -159,6 +159,20 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("ip", text);
     }
 
+#if CONFIG_LWIP_IPV6
+    /* The IPv6 half of the same story, and it does not arrive together with the
+     * lease: the fe80:: address appears once DAD clears it, the global one only
+     * after the router has answered a Router Solicitation. Each is omitted
+     * until it exists, so a board with no RA (or an IPv4-only build) simply
+     * does not have these keys. */
+    if (const std::string link_local = net_state::ipv6LinkLocal(); !link_local.empty()) {
+        json.AddItem("ipv6_linklocal", link_local);
+    }
+    if (const std::string global = net_state::ipv6Global(); !global.empty()) {
+        json.AddItem("ipv6_global", global);
+    }
+#endif
+
     /* The clock: where it is disciplined from, which upstream server is in use,
      * and whether it has actually been set rather than merely looking sane. */
     json.AddItem("ntp_source", ntp.sourceName());

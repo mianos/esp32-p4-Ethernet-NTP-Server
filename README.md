@@ -48,6 +48,12 @@ unit was moved `factory` → `ota_0` by USB, then `ota_0` → `ota_1` → `ota_0
 `POST /firmware` over the RJ45, including the fix that turned a rejected
 payload into a `400` rather than a `500`. Settings survived all of it.
 
+IPv6 came up beside IPv4 on the same netif with no change to the HTTP handlers:
+`fe80::82f1:b2ff:fedb:e228` link-local plus the SLAAC global
+`2401:d002:120f:8701:82f1:b2ff:fedb:e228` advertised on this LAN, `ping6` from
+the Mac to both, and `/healthz` served over `http://[2401:d002:...]/healthz` as
+well as over IPv4 — see [IPv6](#ipv6).
+
 ## Build / flash
 
 ```sh
@@ -67,12 +73,12 @@ cable. After that, `POST /firmware` installs builds over the network — see
 `/dev/cu.usbmodem5CF71255951` (override with `PORT=...`). Use the `/dev/cu.*`
 node on macOS: `/dev/tty.*` intermittently reports `EBUSY` here.
 
-The lwIP SNTP/DHCP options and the partition table (`TWO_OTA_LARGE`: `nvs`,
-`otadata`, `phy_init`, `ota_0` 1700 K, `ota_1` 1700 K) live in
-`sdkconfig.defaults`, which only seeds a *fresh* `sdkconfig`; an existing one
-keeps its old values, so after pulling a change like this run `rm sdkconfig`
-(or `idf.py menuconfig`) before building. `nvs` sits at `0x9000` in both the old
-single-app table and this one, so settings survive the swap.
+The lwIP SNTP/DHCP options, the IPv6/SLAAC options and the partition table
+(`TWO_OTA_LARGE`: `nvs`, `otadata`, `phy_init`, `ota_0` 1700 K, `ota_1` 1700 K)
+live in `sdkconfig.defaults`, which only seeds a *fresh* `sdkconfig`; an
+existing one keeps its old values, so after pulling a change like this run
+`rm sdkconfig` (or `idf.py menuconfig`) before building. `nvs` sits at `0x9000`
+in both the old single-app table and this one, so settings survive the swap.
 
 
 Console output goes to **UART0**, which on this board is wired to the USB-C
@@ -86,15 +92,18 @@ native USB-Serial/JTAG is not on that connector, which is why
 1. `esp_eth_mac_new_esp32()` + RMII pin map → EMAC up.
 2. `esp_eth_phy_new_generic()` → standard IEEE 802.3 PHY driver (IP101
    autonegotiates 10/100, full/half duplex).
-3. `ESP_NETIF_DEFAULT_ETH()` → DHCP client starts automatically.
-4. lwIP answers **ICMP echo** once the netif has an address, so the board is
-   pingable with no application code.
+3. `ESP_NETIF_DEFAULT_ETH()` → DHCP client starts automatically, and IPv6 comes
+   up beside it: a `fe80::` link-local on every link-up, plus a global address
+   from the router's advertisements (see [IPv6](#ipv6)).
+4. lwIP answers **ICMP echo** once the netif has an address, over IPv4 and IPv6,
+   so the board is pingable with no application code.
 5. Diagnostics kept on purpose: at boot it scans the 32 MDIO addresses and
    prints the PHY ID, and while there is no IP it prints `BMSR` every 5 s
    (`link` / `autoneg_done`). If MDIO is miswired you get
    `phy: MDIO read failed` instead — a one-line answer to "are my pins right?".
 6. Starts an HTTP server on port 80 with an address on the first DHCP lease
-   (see [HTTP API](#http-api)).
+   (see [HTTP API](#http-api)). `esp_http_server` binds `in6addr_any` once lwIP
+   has IPv6, so that one server is reachable over both families.
 7. Runs an SNTP **client** (`NtpTime`) that steps the clock once the lease
    arrives — from the server DHCP option 42 named, or from one configured by
    hand — so the NTP responder has real time to serve. See
@@ -111,28 +120,38 @@ not pull, because the P4 has no radio.
 ## Expected log (captured from this board)
 
 ```
-I (339) eth_demo: esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, upstream clock
-I (349) settings: no stored config, using defaults
-I (349) settings: hostname=esp32p4-ntp tz=AEST-10AEDT,M10.1.0,M4.1.0/3 timeSource=dhcp ntpServer=(unset)
-I (349) ntp_time: time source: dhcp (upstream from option 42, once the lease lands)
-I (899) eth_demo: MDIO addr 1: PHY ID 0x02430c54 (IP101 = 0x0243xxxx)
-I (899) eth_demo: phy: bmsr=0x7849 link=0 autoneg_done=0 bmcr=0x3100
-I (899) esp_eth.netif.netif_glue: 80:f1:b2:db:e2:28
-I (899) esp_eth.netif.netif_glue: ethernet attached to netif
-I (2909) eth_demo: Ethernet started
-I (2909) eth_demo: link up   (MAC 80:f1:b2:db:e2:28)
-I (2909) eth_demo: requesting DHCP lease ...
-I (7409) esp_netif_handlers: eth ip: 131.84.1.107, mask: 255.255.255.0, gw: 131.84.1.2
-I (7409) eth_demo: DHCP lease: ip 131.84.1.107  mask 255.255.255.0  gw 131.84.1.2
-I (7409) eth_demo: ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP
-I (7419) ntp_time: upstream time server: 192.0.2.1
-I (7420) WebServer: Starting server on port: 80
-I (7429) eth_demo: http: http://131.84.1.107/healthz  http://131.84.1.107/config
-I (8129) ntp_time: clock set from 192.0.2.1: 2026-11-11T13:38:15+1100
+I (375) eth_demo: esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, upstream clock
+I (385) settings: hostname=esp32p4-ntp tz=AEST-10AEDT,M10.1.0,M4.1.0/3 timeSource=dhcp ntpServer=(unset)
+I (385) ntp_time: time source: dhcp (upstream from option 42, once the lease lands)
+I (935) eth_demo: MDIO addr 1: PHY ID 0x02430c54 (IP101 = 0x0243xxxx)
+I (935) eth_demo: phy: bmsr=0x7849 link=0 autoneg_done=0 bmcr=0x3100
+I (935) esp_eth.netif.netif_glue: 80:f1:b2:db:e2:28
+I (935) esp_eth.netif.netif_glue: ethernet attached to netif
+I (2945) eth_demo: Ethernet started
+I (2945) eth_demo: link up   (MAC 80:f1:b2:db:e2:28)
+I (2945) eth_demo: requesting DHCP lease ...
+I (4385) eth_demo: IPv6 link-local: fe80::82f1:b2ff:fedb:e228
+I (4385) eth_demo: http over IPv6: http://[fe80::82f1:b2ff:fedb:e228]/healthz
+I (7445) esp_netif_handlers: eth ip: 131.84.1.107, mask: 255.255.255.0, gw: 131.84.1.2
+I (7445) eth_demo: DHCP lease: ip 131.84.1.107  mask 255.255.255.0  gw 131.84.1.2
+I (7445) eth_demo: ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP
+I (7455) ntp_time: upstream time server: 192.0.2.1
+I (7455) WebServer: Starting server on port: 80
+I (7465) eth_demo: http: http://131.84.1.107/healthz  http://131.84.1.107/config
+I (7515) eth_demo: OTA image confirmed: rollback to the previous slot cancelled
+I (7915) ntp_time: clock set from 192.0.2.1: 2026-11-11T17:24:10+1100
+I (11385) eth_demo: IPv6 global: 2401:d002:120f:8701:82f1:b2ff:fedb:e228
+I (11385) eth_demo: http over IPv6: http://[2401:d002:120f:8701:82f1:b2ff:fedb:e228]/healthz
 ```
 
 The upstream address is printed as `192.0.2.1` (TEST-NET-1) here rather than the
 address this LAN's DHCP server actually hands out.
+
+The two IPv6 lines arrive on their own schedule: the link-local at ~1.4 s after
+`link up` (Duplicate Address Detection clearing `fe80::`), the global one ~7 s
+after the lease (a Router Solicitation going out and the advertisement coming
+back). `OTA image confirmed` only appears on the first boot of an image that
+arrived over `POST /firmware`.
 
 Later boots show `settings: hostname=...` with no "no stored config" line, i.e.
 the NVS blob was found and applied.
@@ -160,6 +179,116 @@ PING 131.84.1.107 (131.84.1.107): 56 data bytes
 
 A reply means the whole path (PHY, RMII clocking, DHCP, lwIP, ICMP) works.
 
+## IPv6
+
+IPv4 is still the default path — the DHCP lease, and the option-42 clock source
+— and IPv6 runs beside it, not instead of it. Three config lines and two calls
+are the whole implementation:
+
+| Where | What |
+|-------|------|
+| `sdkconfig.defaults` | `CONFIG_LWIP_IPV6=y` (IDF's own default, spelled out because the rest depends on it), `CONFIG_LWIP_IPV6_AUTOCONFIG=y` for SLAAC, `CONFIG_LWIP_IPV6_NUM_ADDRESSES=3` |
+| `main.cpp`, `ETHERNET_EVENT_CONNECTED` | `esp_netif_create_ip6_linklocal()`. esp_netif does **not** create `fe80::` on its own, and without a source address lwIP has nothing to send the Router Solicitation from — so no RA comes back and there is no global address either. Called on every link-up, so a cable bounce re-arms it. |
+| `main.cpp`, `IP_EVENT_GOT_IP6` | logs each address as it lands, with the URL it makes reachable |
+
+Nothing above that needed changing:
+
+- `esp_http_server` binds `in6addr_any` whenever lwIP is built with IPv6, so
+  `/healthz`, `/config`, `/ntp/sync` and `POST /firmware` answer over IPv6 the
+  moment the netif has an address. Same handlers, same auth (none).
+- The mianesp `webserver` component never formats an address of its own: the
+  handlers get an `httpd_req_t`, and the base class logs the peer with
+  `getpeername()` into a `sockaddr_in6`, unwrapping v4-mapped ones, so IPv6
+  clients are named correctly with no change there either.
+- lwIP answers ICMPv6 echo and NDP by itself, exactly like ICMPv4.
+
+From this laptop (same board as the ping above):
+
+```console
+$ ping6 -c 3 -I en0 fe80::82f1:b2ff:fedb:e228
+16 bytes from fe80::82f1:b2ff:fedb:e228%en0, icmp_seq=2 hlim=255 time=9.399 ms
+--- fe80::82f1:b2ff:fedb:e228 ping6 statistics ---
+3 packets transmitted, 3 packets received, 0.0% packet loss
+
+$ ping6 -c 3 2401:d002:120f:8701:82f1:b2ff:fedb:e228
+3 packets transmitted, 3 packets received, 0.0% packet loss
+round-trip min/avg/max/std-dev = 0.827/1.139/1.474/0.265 ms
+
+$ curl -g -s http://131.84.1.107/healthz | tr , '\n' | grep ipv6
+ "ipv6_linklocal":"fe80::82f1:b2ff:fedb:e228"
+ "ipv6_global":"2401:d002:120f:8701:82f1:b2ff:fedb:e228"
+
+$ curl -g -s 'http://[2401:d002:120f:8701:82f1:b2ff:fedb:e228]/healthz' | head -c 80
+{"uptime":29,"time":"2026-11-11T17:16:11+1100","time_set":true,"version":"...
+
+$ curl -g -s 'http://[fe80::82f1:b2ff:fedb:e228%25en0]/healthz' | head -c 40
+{"uptime":29,"time":"2026-11-11T17:16:11+1100
+```
+
+Two client-side details: `curl` needs `-g` (brackets are glob characters to it)
+and the zone spelled `%25` rather than `%`; `ping6` takes `-I en0` instead. The
+link-local address only works from that segment — a router does not forward it.
+
+`/healthz` omits `ipv6_linklocal` and `ipv6_global` until each exists: the
+link-local appears once Duplicate Address Detection clears it (about a second
+after link-up), the global one only after a Router Advertisement. On a LAN with
+no IPv6 router you get the link-local and nothing else, which is also the answer
+to "why does ping6 work but curl to the global address not".
+
+Deliberately not included:
+
+- **DHCPv6.** SLAAC covers a board that wants one routable address and is what a
+  normal LAN hands out; DHCPv6-only numbering would need
+  `CONFIG_LWIP_IPV6_DHCP6=y` plus a hook to take the address it offers.
+- **An IPv6 upstream for the clock.** lwIP's SNTP client resolves its server
+  through `dns_gethostbyname()`, i.e. A records only, and RFC 2132 defines DHCP
+  option 42 as a list of IPv4 addresses — so both `dhcp` and `static` clock modes
+  stay on IPv4. `ntpServer` accepts and stores an IPv6 literal, but
+  `ntp_time.cpp` logs `lwIP's SNTP client resolves A records only, so it cannot
+  sync from it` rather than failing silently.
+- **The responder socket**, which does not exist yet. When it does, bind
+  `AF_INET6` with `IPV6_V6ONLY=0`: one socket, both families, the way httpd
+  already does it.
+
+### Cost, and switching it off on a small board
+
+Measured app sizes (`.bin` as flashed), same toolchain, IPv6 either in or out of
+lwIP's build:
+
+| Build | bytes | Δ vs IPv6 off |
+|-------|------:|--------------:|
+| ESP32-P4, IPv6 off | 495,328 | — |
+| ESP32-P4, IPv6 + SLAAC (this firmware) | 533,552 | +38,224 (+7.7%) |
+| classic ESP32 (`modswitch`, mianesp stack), IPv6 off | 938,896 | — |
+| classic ESP32, IPv6 on as IDF ships it | 969,440 | +30,544 (+3.3%) |
+| classic ESP32, IPv6 + SLAAC | 969,456 | +30,560 (+3.3%) |
+
+What that says:
+
+- **The cost is lwIP's IPv6 stack, not this feature.** ~30–38 KB for IPv6 at all;
+  SLAAC on top of it is **16 bytes** — a flag in the netif and a couple of
+  branches that were compiled in either way. The app-side additions in this repo
+  are part of the P4 row and are a couple of kilobytes at most.
+- **Your ESP32 fleet is already paying it.** IDF 6 sets `CONFIG_LWIP_IPV6=y` by
+  default, so those binaries have carried IPv6 since they moved to IDF 6 — they
+  simply had nothing to give it an address. `modswitch` as shipped is the third
+  row: 969,440 bytes with IPv6 compiled in and no SLAAC.
+- **Switching it off is not a config line away.** mianesp's `webserver`
+  component initialises a `sockaddr_in6` in `WebServer::callerAddress()`, and
+  lwIP only defines that type when IPv6 is on: an IPv4-only build of this tree
+  stops with `'sockaddr_in6' has initializer but incomplete type`. The numbers
+  above for "IPv6 off" were produced with a six-line `#if CONFIG_LWIP_IPV6`
+  fallback to `sockaddr_in` in a throwaway copy of that component — that is the
+  change it would take to make IPv4-only builds possible again.
+- The code in *this* repo is already guarded: `main.cpp`, `net_state.cpp` and
+  `web_server.cpp` put their IPv6 work behind `#if CONFIG_LWIP_IPV6`, so the
+  same sources serve an IPv4-only board at zero cost once the component allows
+  it.
+
+Verdict: leave IPv6 on. 30 KB is 1.6% of a 1.9 MB OTA slot on a 4 MB module —
+not worth a component patch and the loss of the IPv6 half of every endpoint —
+and on the P4 (32 MB, ~0.5 MB app) it is noise.
+
 ## HTTP API
 
 The endpoints follow the [mianesp](https://github.com/mianos/mianesp)
@@ -183,12 +312,18 @@ httpd's built-in plain-text page.
 
 ```console
 $ curl -s http://131.84.1.107/healthz
-{"uptime":32,"time":"2026-11-11T16:16:41+1100","time_set":true,
- "version":"67ea5fc","idf_ver":"v6.0.1","partition":"ota_0",
- "heap_free":529576,"hostname":"esp32p4-ntp","link_up":true,
- "ip":"131.84.1.107","ntp_source":"dhcp","ntp_server":"131.84.1.1",
- "ntp_reachable":true,"ntp_synced":true,"last_sync":1794374178}
+{"uptime":24,"time":"2026-11-11T17:16:06+1100","time_set":true,
+ "version":"bce2335","idf_ver":"v6.0.1","partition":"ota_1","heap_free":529548,
+ "hostname":"esp32p4-ntp","link_up":true,"ip":"131.84.1.107",
+ "ipv6_linklocal":"fe80::82f1:b2ff:fedb:e228",
+ "ipv6_global":"2401:d002:120f:8701:82f1:b2ff:fedb:e228",
+ "ntp_source":"dhcp","ntp_server":"131.84.1.1",
+ "ntp_reachable":true,"ntp_synced":true,"last_sync":1794377754}
 ```
+
+The same JSON comes back over IPv6 — `/healthz` does not care which family the
+request arrived on, and `ip`/`ipv6_*` describe the board, not the caller. See
+[IPv6](#ipv6) for the two address fields and how to reach them.
 
 `time_set` matters: there is no RTC, so the base `time` field is 1970 + uptime
 until something disciplines it. `time_set` says whether the clock is plausible
@@ -196,7 +331,8 @@ until something disciplines it. `time_set` says whether the clock is plausible
 *this* client set it, `last_sync` is the epoch it last set, `ntp_server` is the
 upstream actually in use (`null` until one is known) and `ntp_reachable` is the
 RFC 5905 reachability register: non-zero means the server has answered. `ip` is
-omitted until the DHCP lease lands.
+omitted until the DHCP lease lands, and `ipv6_linklocal` / `ipv6_global` are
+omitted until each address exists.
 
 `/config` takes and returns a flat JSON object. Values are strings; keys that
 are not registered are ignored, so an older/newer client will not break it:
@@ -206,7 +342,7 @@ are not registered are ignored, so an older/newer client will not break it:
 | `hostname` | `esp32p4-ntp`                    | netif hostname, and the name the DHCP client sends as option 12. A change reaches the lease at the next renewal. |
 | `tz`       | `AEST-10AEDT,M10.1.0,M4.1.0/3`   | POSIX TZ used by `localtime()` for `/healthz`. Presentation only — NTP always serves UTC. |
 | `timeSource` | `dhcp`                         | `dhcp` takes the upstream NTP server from DHCP option 42, `static` polls `ntpServer`, `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
-| `ntpServer` | *(empty)*                       | Upstream NTP host or address, used only when `timeSource` is `static`. |
+| `ntpServer` | *(empty)*                       | Upstream NTP host or address, used only when `timeSource` is `static`. An IPv6 literal is stored but cannot sync — lwIP's SNTP client resolves A records only ([IPv6](#ipv6)). |
 
 ```console
 $ curl -s -X POST -H 'Content-Type: application/json' \
@@ -358,7 +494,7 @@ SSH key with read access to `mianos/mianesp`.
 | `main/settings.[ch]pp`  | `Settings : SettingsBase` — the four device settings            |
 | `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync`, `/firmware` |
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
-| `main/net_state.[ch]pp` | read-only netif / link accessors, fed by `main.cpp`              |
+| `main/net_state.[ch]pp` | read-only netif / link / IPv6-address accessors, fed by `main.cpp` |
 
 Written locally; everything else (JSON, NVS, settings machinery, the HTTP
 server) is a mianesp component.
@@ -395,7 +531,23 @@ server) is a mianesp component.
   run before `esp_eth_start()` or lwIP discards option 42. Check the boot order
   in `app_main()`, and that `CONFIG_LWIP_DHCP_GET_NTP_SRV=y` survived a
   `sdkconfig` edit (run `idf.py menuconfig` → Component config → LWIP → SNTP).
-- **`POST /firmware` answers `500` `no OTA partition`**: the chip still has the
+- **`ipv6_linklocal` is missing from `/healthz`**: IPv6 never came up. Check the
+  log for `IPv6 link-local: ...` right after `link up` — that line comes from
+  the `esp_netif_create_ip6_linklocal()` call in `main.cpp`, and without it
+  esp_netif leaves the netif with no IPv6 address at all even though lwIP was
+  built for it. If the log line is there, the address is still in DAD: it shows
+  up a second later.
+- **`ping6` to the link-local works but the global address is unreachable**: no
+  Router Advertisement reached the board, so SLAAC had nothing to build an
+  address from. `ndp -rn` on macOS (or `ip -6 route` elsewhere) shows whether
+  that segment is advertised at all; a link-local ping only proves the wiring,
+  since the packet never leaves the L2 segment.
+- **`curl` says `bad range` or `URL rejected`**: an IPv6 literal needs brackets
+  *and* `-g` (curl treats `[` as a glob), and a link-local one needs the zone as
+  `%25`: `curl -g 'http://[fe80::82f1:b2ff:fedb:e228%25en0]/healthz'`.
+- **`/config` accepted an IPv6 `ntpServer` but the clock stays at 1970**: by
+  design — see the warning in the log and [IPv6](#ipv6); lwIP's SNTP client has
+  no AAAA path, so the upstream clock is IPv4-only.
   old single-app table (`GET /firmware` says `"ota": false`). Flash once over
   USB with the current `sdkconfig.defaults`; `idf.py flash` writes the new table
   and `ota_data_initial.bin` for you.
@@ -417,4 +569,6 @@ The NTP responder (UDP/123) on top of this netif, serving the clock the test
 mode just set — or, better, replacing it with real discipline (GPS/PPS) so the
 responder has a stable reference of its own. Its settings slot into the
 `Settings` constructor next to `hostname`, `timeSource` and `ntpServer`, and
-`/healthz` already reports whether the clock is set, from where, and when.
+`/healthz` already reports whether the clock is set, from where, and when. Open
+it the way httpd already is — `socket(AF_INET6, SOCK_DGRAM)` with
+`IPV6_V6ONLY=0` — and the one socket answers IPv4 and IPv6 clients alike.
