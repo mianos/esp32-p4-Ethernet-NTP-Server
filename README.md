@@ -12,8 +12,8 @@ mianesp's own components (`webserver`, `jsonwrapper`, `nvsstoragemanager`,
 `settingsbase`), not local copies of them.
 
 Target board: **Waveshare ESP32-P4-ETH** (ESP32-P4NRW32, 32 MB flash,
-IP101GRI 10/100 PHY, RJ45). This is what is currently on
-`/dev/cu.usbmodem5CF71255951` (chip reported by esptool: ESP32-P4 rev v3.2).
+IP101GRI 10/100 PHY, RJ45). It came up as an `/dev/cu.usbmodem*` node over the
+USB-C cable (chip reported by esptool: ESP32-P4 rev v3.2).
 
 The P4 has an on-chip 10/100 Ethernet MAC but **no PHY**, so the board's
 IP101GRI is driven over RMII. Pins are hard-coded in `main/eth_link.cpp`:
@@ -39,11 +39,11 @@ but if you ever swap boards, the `kEthPins` table at the top of
 ## Status: working
 
 Verified on this unit (2026-11-11): PHY `0x02430c54` at MDIO addr 1, link up,
-DHCP lease `131.84.1.107/24` gw `131.84.1.2`, `ping` from the Mac 4/4 replies
-at ~0.6 ms. HTTP endpoints answered on the same lease; `/config` survives a
-reboot (NVS), and `/config/reset` restores the compiled-in defaults. The clock
-steps from the DHCP-provided NTP server (option 42) about 2.7 s after the lease,
-and `/healthz` then reports `time_set: true` with a real date.
+DHCP lease `192.0.2.20/24` gw `192.0.2.1`, `ping` 4/4 replies at ~0.6 ms. HTTP
+endpoints answered on the same lease; `/config` survives a reboot (NVS), and
+`/config/reset` restores the compiled-in defaults. The clock steps from the
+DHCP-provided NTP server (option 42) about 2.7 s after the lease, and `/healthz`
+then reports `time_set: true` with a real date.
 
 Updates go over the network once the two-slot partition table is in place: this
 unit was moved `factory` → `ota_0` by USB, then `ota_0` → `ota_1` → `ota_0` by
@@ -51,15 +51,15 @@ unit was moved `factory` → `ota_0` by USB, then `ota_0` → `ota_1` → `ota_0
 payload into a `400` rather than a `500`. Settings survived all of it.
 
 IPv6 came up beside IPv4 on the same netif with no change to the HTTP handlers:
-`fe80::82f1:b2ff:fedb:e228` link-local plus the SLAAC global
-`2401:d002:120f:8701:82f1:b2ff:fedb:e228` advertised on this LAN, `ping6` from
-the Mac to both, and `/healthz` served over `http://[2401:d002:...]/healthz` as
-well as over IPv4 — see [IPv6](#ipv6).
+`fe80::200:5eff:fe00:5301` link-local plus the SLAAC global
+`2001:db8:1:1:200:5eff:fe00:5301` advertised on the LAN, `ping6` to both, and
+`/healthz` served over `http://[2001:db8:...]/healthz` as well as over IPv4 —
+see [IPv6](#ipv6).
 
 The responder serves NTP to both families from one dual-stack socket, and says
 what it is: with the upstream clock fresh it answers `li=0 stratum=3
-refid=131.84.1.1`, and macOS `sntp` takes it
-(`+0.014526 +/- 0.002399 131.84.1.107`). Booted with `timeSource=off` it answers
+refid=192.0.2.1`, and macOS `sntp` takes it
+(`+0.014526 +/- 0.002399 192.0.2.20`). Booted with `timeSource=off` it answers
 `li=3 stratum=16 refid=INIT` and `sntp` refuses it with `Server not
 synchronized` — which is the point ([Serving NTP](#serving-ntp-udp123)).
 
@@ -77,10 +77,11 @@ ROM bootloader speaks, so the two-slot partition table has to be written with a
 cable. After that, `POST /firmware` installs builds over the network — see
 [Updating over Ethernet](#updating-over-ethernet-ota).
 
-`build.sh` uses the ESP-IDF v6.0.1 install at
-`/Users/robertfowler/.espressif/v6.0.1/esp-idf` and the port
-`/dev/cu.usbmodem5CF71255951` (override with `PORT=...`). Use the `/dev/cu.*`
-node on macOS: `/dev/tty.*` intermittently reports `EBUSY` here.
+`build.sh` uses the ESP-IDF install `$IDF_PATH` points at (exported by
+`idf.py export`, or set it yourself) and auto-detects the board's serial node
+from `/dev/cu.usbmodem*`, so override with `PORT=...` if it picks the wrong one.
+Use the `/dev/cu.*` node on macOS: `/dev/tty.*` intermittently reports `EBUSY`
+here.
 
 The lwIP SNTP/DHCP options, the IPv6/SLAAC options and the partition table
 (`TWO_OTA_LARGE`: `nvs`, `otadata`, `phy_init`, `ota_0` 1700 K, `ota_1` 1700 K)
@@ -147,27 +148,30 @@ I (385) settings: hostname=esp32p4-ntp tz=AEST-10AEDT,M10.1.0,M4.1.0/3 timeSourc
 I (385) ntp_time: time source: dhcp (upstream from option 42, once the lease lands)
 I (935) eth_demo: MDIO addr 1: PHY ID 0x02430c54 (IP101 = 0x0243xxxx)
 I (935) eth_demo: phy: bmsr=0x7849 link=0 autoneg_done=0 bmcr=0x3100
-I (935) esp_eth.netif.netif_glue: 80:f1:b2:db:e2:28
+I (935) esp_eth.netif.netif_glue: 02:00:5e:00:53:01
 I (935) esp_eth.netif.netif_glue: ethernet attached to netif
 I (2945) eth_demo: Ethernet started
-I (2945) eth_demo: link up   (MAC 80:f1:b2:db:e2:28)
+I (2945) eth_demo: link up   (MAC 02:00:5e:00:53:01)
 I (2945) eth_demo: requesting DHCP lease ...
-I (4385) eth_demo: IPv6 link-local: fe80::82f1:b2ff:fedb:e228
-I (4385) eth_demo: http over IPv6: http://[fe80::82f1:b2ff:fedb:e228]/healthz
-I (7445) esp_netif_handlers: eth ip: 131.84.1.107, mask: 255.255.255.0, gw: 131.84.1.2
-I (7445) eth_demo: DHCP lease: ip 131.84.1.107  mask 255.255.255.0  gw 131.84.1.2
+I (4385) eth_demo: IPv6 link-local: fe80::200:5eff:fe00:5301
+I (4385) eth_demo: http over IPv6: http://[fe80::200:5eff:fe00:5301]/healthz
+I (7445) esp_netif_handlers: eth ip: 192.0.2.20, mask: 255.255.255.0, gw: 192.0.2.1
+I (7445) eth_demo: DHCP lease: ip 192.0.2.20  mask 255.255.255.0  gw 192.0.2.1
 I (7445) eth_demo: ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP
 I (7455) ntp_time: upstream time server: 192.0.2.1
 I (7455) WebServer: Starting server on port: 80
-I (7465) eth_demo: http: http://131.84.1.107/healthz  http://131.84.1.107/config
+I (7465) eth_demo: http: http://192.0.2.20/healthz  http://192.0.2.20/config
 I (7515) eth_demo: OTA image confirmed: rollback to the previous slot cancelled
 I (7915) ntp_time: clock set from 192.0.2.1: 2026-11-11T17:24:10+1100
-I (11385) eth_demo: IPv6 global: 2401:d002:120f:8701:82f1:b2ff:fedb:e228
-I (11385) eth_demo: http over IPv6: http://[2401:d002:120f:8701:82f1:b2ff:fedb:e228]/healthz
+I (11385) eth_demo: IPv6 global: 2001:db8:1:1:200:5eff:fe00:5301
+I (11385) eth_demo: http over IPv6: http://[2001:db8:1:1:200:5eff:fe00:5301]/healthz
 ```
 
-The upstream address is printed as `192.0.2.1` (TEST-NET-1) here rather than the
-address this LAN's DHCP server actually hands out.
+The addresses, MAC and IPv6 prefix in this log are documentation values rather
+than what this LAN handed out: `192.0.2.0/24` is TEST-NET-1 (RFC 5737),
+`2001:db8::/32` is the IPv6 documentation prefix (RFC 3849), and the MAC is a
+locally administered one. The link-local is that MAC's EUI-64, built the way the
+board builds it, so the three stay consistent if you compare them by hand.
 
 The two IPv6 lines arrive on their own schedule: the link-local at ~1.4 s after
 `link up` (Duplicate Address Detection clearing `fe80::`), the global one ~7 s
@@ -179,23 +183,24 @@ Later boots show `settings: hostname=...` with no "no stored config" line, i.e.
 the NVS blob was found and applied.
 
 Notes: `0x02430c54` is the IP101 PHY ID (addr 1, as strapped on the board);
-`bmsr=0x7849 link=0` before the cable is plugged in, `link=1` after. The P4
-uses its eFuse base MAC, `80:f1:b2:db:e2:28` on this unit.
+`bmsr=0x7849 link=0` before the cable is plugged in, `link=1` after. The P4 uses
+its eFuse base MAC; the one shown here is the documentation MAC the IPv6 lines
+are derived from.
 
 ## Test from your laptop
 
 ```sh
-ping -c 4 <leased-ip>           # on this network: 131.84.1.107
+ping -c 4 <leased-ip>           # the address the lease above printed
 ```
 
 Captured on this setup:
 
 ```
-PING 131.84.1.107 (131.84.1.107): 56 data bytes
-64 bytes from 131.84.1.107: icmp_seq=0 ttl=64 time=0.805 ms
-64 bytes from 131.84.1.107: icmp_seq=1 ttl=64 time=0.799 ms
+PING 192.0.2.20 (192.0.2.20): 56 data bytes
+64 bytes from 192.0.2.20: icmp_seq=0 ttl=64 time=0.805 ms
+64 bytes from 192.0.2.20: icmp_seq=1 ttl=64 time=0.799 ms
 ...
---- 131.84.1.107 ping statistics ---
+--- 192.0.2.20 ping statistics ---
 4 packets transmitted, 4 packets received, 0.0% packet loss
 ```
 
@@ -224,26 +229,26 @@ Nothing above that needed changing:
   clients are named correctly with no change there either.
 - lwIP answers ICMPv6 echo and NDP by itself, exactly like ICMPv4.
 
-From this laptop (same board as the ping above):
+From another host on the same segment as the ping above:
 
 ```console
-$ ping6 -c 3 -I en0 fe80::82f1:b2ff:fedb:e228
-16 bytes from fe80::82f1:b2ff:fedb:e228%en0, icmp_seq=2 hlim=255 time=9.399 ms
---- fe80::82f1:b2ff:fedb:e228 ping6 statistics ---
+$ ping6 -c 3 -I en0 fe80::200:5eff:fe00:5301
+16 bytes from fe80::200:5eff:fe00:5301%en0, icmp_seq=2 hlim=255 time=9.399 ms
+--- fe80::200:5eff:fe00:5301 ping6 statistics ---
 3 packets transmitted, 3 packets received, 0.0% packet loss
 
-$ ping6 -c 3 2401:d002:120f:8701:82f1:b2ff:fedb:e228
+$ ping6 -c 3 2001:db8:1:1:200:5eff:fe00:5301
 3 packets transmitted, 3 packets received, 0.0% packet loss
 round-trip min/avg/max/std-dev = 0.827/1.139/1.474/0.265 ms
 
-$ curl -g -s http://131.84.1.107/healthz | tr , '\n' | grep ipv6
- "ipv6_linklocal":"fe80::82f1:b2ff:fedb:e228"
- "ipv6_global":"2401:d002:120f:8701:82f1:b2ff:fedb:e228"
+$ curl -g -s http://192.0.2.20/healthz | tr , '\n' | grep ipv6
+ "ipv6_linklocal":"fe80::200:5eff:fe00:5301"
+ "ipv6_global":"2001:db8:1:1:200:5eff:fe00:5301"
 
-$ curl -g -s 'http://[2401:d002:120f:8701:82f1:b2ff:fedb:e228]/healthz' | head -c 80
+$ curl -g -s 'http://[2001:db8:1:1:200:5eff:fe00:5301]/healthz' | head -c 80
 {"uptime":29,"time":"2026-11-11T17:16:11+1100","time_set":true,"version":"...
 
-$ curl -g -s 'http://[fe80::82f1:b2ff:fedb:e228%25en0]/healthz' | head -c 40
+$ curl -g -s 'http://[fe80::200:5eff:fe00:5301%25en0]/healthz' | head -c 40
 {"uptime":29,"time":"2026-11-11T17:16:11+1100
 ```
 
@@ -337,15 +342,15 @@ httpd's built-in plain-text page.
 `/healthz` on this unit:
 
 ```console
-$ curl -s http://131.84.1.107/healthz
+$ curl -s http://192.0.2.20/healthz
 {"uptime":42,"time":"2026-11-11T18:07:30+1100","time_set":true,
  "version":"aa33def","idf_ver":"v6.0.1","partition":"ota_1","heap_free":524508,
- "hostname":"esp32p4-ntp","link_up":true,"ip":"131.84.1.107",
- "ipv6_linklocal":"fe80::82f1:b2ff:fedb:e228",
- "ipv6_global":"2401:d002:120f:8701:82f1:b2ff:fedb:e228",
- "ntp_source":"dhcp","ntp_server":"131.84.1.1",
+ "hostname":"esp32p4-ntp","link_up":true,"ip":"192.0.2.20",
+ "ipv6_linklocal":"fe80::200:5eff:fe00:5301",
+ "ipv6_global":"2001:db8:1:1:200:5eff:fe00:5301",
+ "ntp_source":"dhcp","ntp_server":"192.0.2.1",
  "ntp_reachable":true,"ntp_synced":true,"last_sync":1794380815,
- "serve_ntp":true,"ntp_stratum":3,"ntp_refid":"131.84.1.1","ntp_requests":5}
+ "serve_ntp":true,"ntp_stratum":3,"ntp_refid":"192.0.2.1","ntp_requests":5}
 ```
 
 The same JSON comes back over IPv6 — `/healthz` does not care which family the
@@ -380,14 +385,14 @@ are not registered are ignored, so an older/newer client will not break it:
 
 ```console
 $ curl -s -X POST -H 'Content-Type: application/json' \
-       -d '{"hostname":"p4-ntp","tz":"UTC0"}' http://131.84.1.107/config
+       -d '{"hostname":"p4-ntp","tz":"UTC0"}' http://192.0.2.20/config
 {"hostname":"p4-ntp","tz":"UTC0","timeSource":"dhcp","ntpServer":"","serveNtp":"on"}
 
-$ curl -s http://131.84.1.107/healthz
+$ curl -s http://192.0.2.20/healthz
 {"uptime":44,"time":"2026-11-11T02:38:44+0000","time_set":true, ... ,
- "hostname":"p4-ntp","link_up":true,"ip":"131.84.1.107", ...}
+ "hostname":"p4-ntp","link_up":true,"ip":"192.0.2.20", ...}
 
-$ curl -s -X POST http://131.84.1.107/config/reset
+$ curl -s -X POST http://192.0.2.20/config/reset
 {"status":"reset"}
 ```
 
@@ -398,10 +403,10 @@ endpoint: `POST /firmware` with the raw app image as the body writes it into the
 inactive slot and reboots into it.
 
 ```console
-$ curl --data-binary @build/esp32p4_ntp.bin http://131.84.1.107/firmware
+$ curl --data-binary @build/esp32p4_ntp.bin http://192.0.2.20/firmware
 {"written":531328,"partition":"ota_0","rebooting":true}
 
-$ sleep 20; curl -s http://131.84.1.107/firmware
+$ sleep 20; curl -s http://192.0.2.20/firmware
 {"version":"67ea5fc","idf_ver":"v6.0.1","built":"Nov 11 2026 16:12:36",
  "partition":"ota_0","confirmed":true,"ota":true,"next_partition":"ota_1","slot_size":1740800}
 ```
@@ -467,12 +472,12 @@ Ordering is the fiddly part, and both halves are load-bearing:
    bind`; a reboot applies it at once.
 
 ```console
-$ curl -s -X POST http://131.84.1.107/ntp/sync        # poll now, wait up to 5 s
+$ curl -s -X POST http://192.0.2.20/ntp/sync        # poll now, wait up to 5 s
 {"synced":true,"time":"2026-11-11T13:38:44+1100","ntp_server":"192.0.2.1"}
 
 $ curl -s -X POST -H 'Content-Type: application/json' \
        -d '{"timeSource":"static","ntpServer":"ntp.example.net"}' \
-       http://131.84.1.107/config
+       http://192.0.2.20/config
 {"hostname":"esp32p4-ntp","tz":"...","timeSource":"static","ntpServer":"ntp.example.net"}
 ```
 
@@ -489,19 +494,19 @@ is still slewing — hence the step.
 Errors (all captured on this unit):
 
 ```console
-$ curl -s -X POST http://131.84.1.107/healthz
+$ curl -s -X POST http://192.0.2.20/healthz
 {"error":"method not allowed on /healthz","statusCode":405}
-$ curl -s http://131.84.1.107/nope
+$ curl -s http://192.0.2.20/nope
 {"error":"no such endpoint: /nope","statusCode":404}
-$ curl -s -X POST -d '[]' http://131.84.1.107/config
+$ curl -s -X POST -d '[]' http://192.0.2.20/config
 {"error":"invalid JSON (expected an object)","statusCode":400}
-$ curl -s -X POST http://131.84.1.107/config
+$ curl -s -X POST http://192.0.2.20/config
 {"error":"JSON body required","statusCode":400}
-$ curl -s -X POST --data-binary @big.json http://131.84.1.107/config
+$ curl -s -X POST --data-binary @big.json http://192.0.2.20/config
 {"error":"request body too large","statusCode":413}
-$ curl -s -X POST http://131.84.1.107/ntp/sync      # with timeSource=off
+$ curl -s -X POST http://192.0.2.20/ntp/sync      # with timeSource=off
 {"error":"no time source: set timeSource to dhcp or static","statusCode":409}
-$ curl -s -X POST http://131.84.1.107/ntp/sync      # server silent for 5 s
+$ curl -s -X POST http://192.0.2.20/ntp/sync      # server silent for 5 s
 {"error":"no time sync from the upstream server","statusCode":504}
 ```
 
@@ -555,7 +560,7 @@ answers `li=3 stratum=16` — RFC 5905's way of saying *do not use me* — and m
 `sntp` obliges:
 
 ```console
-$ /usr/bin/sntp -t 2 131.84.1.107
+$ /usr/bin/sntp -t 2 192.0.2.20
 sntp: Exchange failed: Server not synchronized
 ...
 sntp: Clock select failed
@@ -609,8 +614,8 @@ of a boot, then one a minute (these are the format strings in the code, with
 illustrative values):
 
 ```console
-I (9124) ntp_server: serving on udp/123 (dual-stack), reference: upstream 131.84.1.1, stratum 3
-I (15320) ntp_server: first request from 131.84.1.95:60371: stratum 3
+I (9124) ntp_server: serving on udp/123 (dual-stack), reference: upstream 192.0.2.1, stratum 3
+I (15320) ntp_server: first request from 192.0.2.50:60371: stratum 3
 I (75320) ntp_server: answered 12, KoD 1, dropped 3 in the last 60 s
 ```
 
@@ -621,7 +626,7 @@ macOS `sntp` against the board. The offset is the board's clock against this Mac
 error; `delay` 0.38 ms is the whole round trip over the LAN.
 
 ```console
-$ /usr/bin/sntp -d 131.84.1.107
+$ /usr/bin/sntp -d 192.0.2.20
 selected:
 sntp_exchange {
         result: 0 (Success)
@@ -631,14 +636,14 @@ sntp_exchange {
      precision: FFFFFFEC (9.536743e-07)
          delay: 0000.0041 (0.000991821)
     dispersion: 0000.0067 (0.001571655)
-           ref: 83540101 (1.1.84.131)
+           ref: C0000201 (192.0.2.1)
          t_ref: EE9E928F.00000000 (4003369615.000000000)
         offset: ... (0.014526000)
          delay: ... (0.000342000)
-+0.014526 +/- 0.002399 131.84.1.107 131.84.1.107
++0.014526 +/- 0.002399 192.0.2.20 192.0.2.20
 ```
 
-`ref: 83540101` is `131.84.1.1` on the wire, printed by sntp as a host-order
+`ref: C0000201` is `192.0.2.1` on the wire, printed by sntp as a host-order
 integer; `dispersion` 1.57 ms is the 1 ms floor plus the ~38 s since the last
 sync at 15 ppm.
 
@@ -662,13 +667,13 @@ Start with a client that is already on the machine, because that is the shape of
 the question ("will anything accept my clock?"):
 
 ```console
-$ sntp 192.168.1.50                 # macOS, BSD, Linux (ntp package)
-+0.114044 +/- 0.002362 192.168.1.50 192.168.1.50
-$ sntp -d 192.168.1.50              # the same, with every header field decoded
+$ sntp 192.0.2.20                 # macOS, BSD, Linux (ntp package)
++0.114044 +/- 0.002362 192.0.2.20 192.0.2.20
+$ sntp -d 192.0.2.20              # the same, with every header field decoded
 ```
 
-`chronyd -Q 'server 192.168.1.50 iburst'` (as root) and
-`w32tm /stripchart /computer:192.168.1.50 /dataonly /samples:3` on Windows ask
+`chronyd -Q 'server 192.0.2.20 iburst'` (as root) and
+`w32tm /stripchart /computer:192.0.2.20 /dataonly /samples:3` on Windows ask
 the same question through different code.
 
 `tools/ntp_test.py <ip> [ipv6]` answers the other one — what is actually on the
@@ -677,7 +682,7 @@ truncated requests that must get silence, the origin-timestamp echo, the IPv6
 address, and a burst that trips the limiter. It prints one line per packet:
 
 ```console
-$ python3 tools/ntp_test.py 192.168.1.50 2401:db8::50
+$ python3 tools/ntp_test.py 192.0.2.20 2001:db8::50
 mode 3, vn 4                       len=48 li=0 vn=4 mode=4 stratum=3 prec=-20 delay=0.000992 disp=0.002121 refid=b'\x83T\x01\x01' origin_ok=True
 mode 4 (server)                    NO REPLY
 ...
@@ -698,11 +703,11 @@ The honesty path is worth testing too, because it is the one that matters when
 something is wrong:
 
 ```console
-$ curl -s -X POST http://192.168.1.50/config -d '{"timeSource":"off"}' >/dev/null
-$ sntp 192.168.1.50
+$ curl -s -X POST http://192.0.2.20/config -d '{"timeSource":"off"}' >/dev/null
+$ sntp 192.0.2.20
 sntp: Server not synchronized
-$ curl -s http://192.168.1.50/healthz | tr , '\n' | grep ntp_stratum     # 16
-$ curl -s -X POST http://192.168.1.50/config -d '{"timeSource":"dhcp"}' >/dev/null
+$ curl -s http://192.0.2.20/healthz | tr , '\n' | grep ntp_stratum     # 16
+$ curl -s -X POST http://192.0.2.20/config -d '{"timeSource":"dhcp"}' >/dev/null
 ```
 
 Switching back needs a DHCP bind before lwIP re-learns option 42 (a reboot, or a
@@ -816,7 +821,7 @@ server) is a mianesp component.
   since the packet never leaves the L2 segment.
 - **`curl` says `bad range` or `URL rejected`**: an IPv6 literal needs brackets
   *and* `-g` (curl treats `[` as a glob), and a link-local one needs the zone as
-  `%25`: `curl -g 'http://[fe80::82f1:b2ff:fedb:e228%25en0]/healthz'`.
+  `%25`: `curl -g 'http://[fe80::200:5eff:fe00:5301%25en0]/healthz'`.
 - **`/config` accepted an IPv6 `ntpServer` but the clock stays at 1970**: by
   design — see the warning in the log and [IPv6](#ipv6); lwIP's SNTP client has
   no AAAA path, so the upstream clock is IPv4-only.

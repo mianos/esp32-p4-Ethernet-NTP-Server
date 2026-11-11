@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Wire-level checks against the NTP responder, independent of any NTP client.
 
-    python3 tools/ntp_test.py 192.168.1.50
-    python3 tools/ntp_test.py 192.168.1.50 2401:db8::50    # also probe IPv6
+    python3 tools/ntp_test.py 192.0.2.20
+    python3 tools/ntp_test.py 192.0.2.20 2001:db8::50    # also probe IPv6
 
 sntp/chrony tell you whether a *client* accepts the server; this tells you what
 is on the wire, including the packets a real client never sends. It needs no

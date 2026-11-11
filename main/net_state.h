@@ -38,7 +38,7 @@ void setLinkUp(bool up);
 
 #if CONFIG_LWIP_IPV6
 /* An address in the compressed text form people write by hand
- * (fe80::82f1:b2ff:fedb:e228), not lwIP's eight-group format. */
+ * (fe80::200:5eff:fe00:5301), not lwIP's eight-group format. */
 std::string ipv6Text(const esp_ip6_addr_t &addr);
 
 /* The netif's addresses as text, empty when it has none yet. "Preferred"

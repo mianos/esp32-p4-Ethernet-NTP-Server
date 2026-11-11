@@ -51,7 +51,7 @@ public:
     /* The instant to stamp a reply with. */
     virtual void now(struct timespec &ts) const = 0;
 
-    /* One phrase for the boot log: "upstream 131.84.1.1", "GPS/PPS". */
+    /* One phrase for the boot log: "upstream 192.0.2.1", "GPS/PPS". */
     virtual std::string describe() const = 0;
 };
 

@@ -156,7 +156,7 @@ void addressKey(const sockaddr_storage &src, uint8_t out[kAddressKeySize])
     }
 }
 
-/* "131.84.1.95:123" or "[2401:...]:123", for the log only. */
+/* "192.0.2.50:123" or "[2001:db8::1]:123", for the log only. */
 std::string sourceText(const sockaddr_storage &src)
 {
     char text[64] = {};

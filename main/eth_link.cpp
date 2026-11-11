@@ -79,7 +79,7 @@ constexpr uint32_t    kStatusPollMs    = 5000;
 constexpr uint32_t    kStatusTaskStack = 3072;
 constexpr UBaseType_t kStatusTaskPrio  = 3;
 
-/* 80:f1:b2:db:e2:28 -- the form the rest of the documentation uses. */
+/* 02:00:5e:00:53:01 -- the form the rest of the documentation uses. */
 std::string macText(const std::array<uint8_t, 6> &mac)
 {
     char text[18];
