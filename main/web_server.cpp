@@ -1,14 +1,13 @@
 #include "web_server.h"
 
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <ctime>
 
-#include <strings.h>
+#include <optional>
+#include <string>
 
 #include "arpa/inet.h"
-#include "cJSON.h"
 #include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -23,8 +22,6 @@
 #include "settings.h"
 
 namespace {
-
-const char *TAG = "webserver";
 
 /* /config bodies are tiny — bound the input so a hostile Content-Length cannot
  * turn into a multi-kilobyte allocation. */
@@ -52,52 +49,51 @@ const char *statusLine(int status_code)
 }
 
 /* Peer address of the request, for logging who changed what. */
-void callerAddress(httpd_req_t *req, char *buf, size_t len)
+std::string callerAddress(httpd_req_t *req)
 {
     struct sockaddr_storage addr;
     socklen_t               addr_len = sizeof(addr);
 
     if (getpeername(httpd_req_to_sockfd(req), reinterpret_cast<struct sockaddr *>(&addr),
                     &addr_len) != 0) {
-        snprintf(buf, len, "?");
-        return;
-    }
-    if (addr.ss_family == AF_INET) {
-        inet_ntop(AF_INET, &reinterpret_cast<struct sockaddr_in *>(&addr)->sin_addr, buf, len);
-        return;
+        return "?";
     }
 
-    char v6[INET6_ADDRSTRLEN] = {0};
-    inet_ntop(AF_INET6, &reinterpret_cast<struct sockaddr_in6 *>(&addr)->sin6_addr, v6, sizeof(v6));
-    /* The server socket is dual-stack, so IPv4 peers arrive v4-mapped. */
-    if (strncasecmp(v6, "::ffff:", 7) == 0) {
-        snprintf(buf, len, "%s", v6 + 7);
-        return;
+    char text[INET6_ADDRSTRLEN] = {};
+    if (addr.ss_family == AF_INET) {
+        inet_ntop(AF_INET, &reinterpret_cast<struct sockaddr_in *>(&addr)->sin_addr,
+                  text, sizeof(text));
+        return text;
     }
-    snprintf(buf, len, "%s", v6);
+
+    inet_ntop(AF_INET6, &reinterpret_cast<struct sockaddr_in6 *>(&addr)->sin6_addr,
+              text, sizeof(text));
+    /* The server socket is dual-stack, so IPv4 peers arrive v4-mapped: newlib's
+     * inet_ntop() writes that prefix as "::FFFF:", hence the case-insensitive
+     * compare rather than std::string::starts_with(). */
+    std::string peer{text};
+    if (strncasecmp(peer.c_str(), "::ffff:", 7) == 0) {
+        peer.erase(0, 7);
+    }
+    return peer;
 }
 
-/* Reads exactly content_len bytes; nullptr if the body arrived short. */
-char *readBody(httpd_req_t *req)
+/* Reads exactly content_len bytes; nullopt if the body arrived short. */
+std::optional<std::string> readBody(httpd_req_t *req)
 {
-    char *body = static_cast<char *>(malloc(static_cast<size_t>(req->content_len) + 1));
-    if (body == nullptr) {
-        return nullptr;
-    }
+    std::string body(static_cast<size_t>(req->content_len), '\0');
 
-    int received = 0;
-    while (received < req->content_len) {
-        int got = httpd_req_recv(req, body + received, req->content_len - received);
+    size_t received = 0;
+    while (received < body.size()) {
+        int got = httpd_req_recv(req, body.data() + received, body.size() - received);
         if (got == HTTPD_SOCK_ERR_TIMEOUT) {
             continue;
         }
         if (got <= 0) {
-            free(body);
-            return nullptr;
+            return std::nullopt;
         }
-        received += got;
+        received += static_cast<size_t>(got);
     }
-    body[received] = '\0';
     return body;
 }
 
@@ -108,30 +104,6 @@ bool clockIsSet()
     return time(nullptr) >= 1577836800; /* 2020-01-01T00:00:00Z */
 }
 
-void localTimeString(time_t when, char *buf, size_t len)
-{
-    struct tm tm_now;
-    localtime_r(&when, &tm_now);
-    strftime(buf, len, "%Y-%m-%dT%H:%M:%S%z", &tm_now);
-}
-
-/* The DHCP client embeds the hostname in its requests (option 12), but it only
- * builds them at DISCOVER/REQUEST time, so a change here reaches the lease on
- * the next renewal. */
-void applyHostname(const char *hostname)
-{
-    esp_netif_t *netif = net_state::netif();
-    if (netif == nullptr) {
-        return;
-    }
-    esp_err_t err = esp_netif_set_hostname(netif, hostname);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "set hostname '%s': %s", hostname, esp_err_to_name(err));
-        return;
-    }
-    ESP_LOGI(TAG, "hostname now %s (DHCP sends it on the next lease)", hostname);
-}
-
 }  // namespace
 
 WebServer &WebServer::instance()
@@ -140,107 +112,106 @@ WebServer &WebServer::instance()
     return server;
 }
 
-esp_err_t WebServer::sendJson(httpd_req_t *req, cJSON *json, int status_code)
+/* The DHCP client embeds the hostname in its requests (option 12), but it only
+ * builds them at DISCOVER/REQUEST time, so a change here reaches the lease on
+ * the next renewal. */
+void WebServer::applyHostname(const std::string &hostname)
 {
-    if (json == nullptr) {
-        return httpd_resp_send_500(req);
+    esp_netif_t *netif = net_state::netif();
+    if (netif == nullptr) {
+        return;
     }
-    char *out = cJSON_PrintUnformatted(json);
-    cJSON_Delete(json);
-    if (out == nullptr) {
+
+    esp_err_t err = esp_netif_set_hostname(netif, hostname.c_str());
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "set hostname '%s': %s", hostname.c_str(), esp_err_to_name(err));
+        return;
+    }
+    ESP_LOGI(TAG, "hostname now %s (DHCP sends it on the next lease)", hostname.c_str());
+}
+
+esp_err_t WebServer::sendJson(httpd_req_t *req, json::Value doc, int status_code)
+{
+    const std::string body = json::print(doc);
+    if (body.empty()) {
         return httpd_resp_send_500(req);
     }
 
     httpd_resp_set_status(req, statusLine(status_code));
     httpd_resp_set_type(req, "application/json");
-    esp_err_t err = httpd_resp_sendstr(req, out);
-    free(out);
-    return err;
+    return httpd_resp_sendstr(req, body.c_str());
 }
 
-esp_err_t WebServer::sendError(httpd_req_t *req, int status_code, const char *message)
+esp_err_t WebServer::sendError(httpd_req_t *req, int status_code, const std::string &message)
 {
-    cJSON *json = cJSON_CreateObject();
-    if (json == nullptr) {
+    json::Value doc = json::makeObject();
+    if (!doc) {
         return httpd_resp_send_500(req);
     }
-    cJSON_AddStringToObject(json, "error", message);
-    cJSON_AddNumberToObject(json, "statusCode", status_code);
-    return sendJson(req, json, status_code);
+    json::addString(doc, "error", message);
+    json::addNumber(doc, "statusCode", status_code);
+    return sendJson(req, std::move(doc), status_code);
 }
 
-esp_err_t WebServer::notFound(httpd_req_t *req, httpd_err_code_t err)
+esp_err_t WebServer::notFound(httpd_req_t *req, httpd_err_code_t)
 {
-    (void)err;
-    /* req->uri is up to 512 bytes (CONFIG_HTTPD_MAX_URI_LEN), so the message
-     * buffer has to hold the whole path plus the prefix. */
-    char message[600];
-    snprintf(message, sizeof(message), "no such endpoint: %s", req->uri);
-    return sendError(req, 404, message);
+    return sendError(req, 404, "no such endpoint: " + std::string{req->uri});
 }
 
-esp_err_t WebServer::methodNotAllowed(httpd_req_t *req, httpd_err_code_t err)
+esp_err_t WebServer::methodNotAllowed(httpd_req_t *req, httpd_err_code_t)
 {
-    (void)err;
-    char message[600];
-    snprintf(message, sizeof(message), "method not allowed on %s", req->uri);
-    return sendError(req, 405, message);
+    return sendError(req, 405, "method not allowed on " + std::string{req->uri});
 }
 
 esp_err_t WebServer::healthz(httpd_req_t *req)
 {
-    cJSON *json = cJSON_CreateObject();
-    if (json == nullptr) {
+    json::Value doc = json::makeObject();
+    if (!doc) {
         return httpd_resp_send_500(req);
     }
 
-    char timebuf[32] = {0};
-    localTimeString(time(nullptr), timebuf, sizeof(timebuf));
+    json::addNumber(doc, "uptime", static_cast<double>(esp_timer_get_time() / 1000000ULL));
+    json::addString(doc, "time", isoTimestamp(time(nullptr)));
+    json::addBool(doc, "time_set", clockIsSet());
 
-    cJSON_AddNumberToObject(json, "uptime", static_cast<double>(esp_timer_get_time() / 1000000ULL));
-    cJSON_AddStringToObject(json, "time", timebuf);
-    cJSON_AddBoolToObject(json, "time_set", clockIsSet());
-
-    const esp_app_desc_t *desc = esp_app_get_description();
-    if (desc != nullptr) {
-        cJSON_AddStringToObject(json, "version", desc->version);
-        cJSON_AddStringToObject(json, "idf_ver", desc->idf_ver);
+    if (const esp_app_desc_t *desc = esp_app_get_description()) {
+        json::addString(doc, "version", desc->version);
+        json::addString(doc, "idf_ver", desc->idf_ver);
     }
     const esp_partition_t *running = esp_ota_get_running_partition();
-    cJSON_AddStringToObject(json, "partition", running != nullptr ? running->label : "?");
-    cJSON_AddNumberToObject(json, "heap_free", static_cast<double>(esp_get_free_heap_size()));
+    json::addString(doc, "partition", running != nullptr ? running->label : "?");
+    json::addNumber(doc, "heap_free", static_cast<double>(esp_get_free_heap_size()));
 
     const Settings &settings = Settings::instance();
     const NtpTime  &ntp      = NtpTime::instance();
 
-    cJSON_AddStringToObject(json, "hostname", settings.hostname());
-    cJSON_AddBoolToObject(json, "link_up", net_state::linkUp());
+    json::addString(doc, "hostname", settings.hostname());
+    json::addBool(doc, "link_up", net_state::linkUp());
 
     esp_netif_ip_info_t ip_info;
     esp_netif_t        *netif = net_state::netif();
     if (netif != nullptr && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK &&
         ip_info.ip.addr != 0) {
-        char ipbuf[16];
-        snprintf(ipbuf, sizeof(ipbuf), IPSTR, IP2STR(&ip_info.ip));
-        cJSON_AddStringToObject(json, "ip", ipbuf);
+        char text[16];
+        snprintf(text, sizeof(text), IPSTR, IP2STR(&ip_info.ip));
+        json::addString(doc, "ip", text);
     }
 
     /* The clock: where it is disciplined from, which upstream server is in use,
      * and whether it has actually been set rather than merely looking sane. */
-    cJSON_AddStringToObject(json, "ntp_source", ntp.sourceName());
-    char upstream[Settings::kStrLen];
-    if (ntp.upstreamText(upstream, sizeof(upstream)) == ESP_OK) {
-        cJSON_AddStringToObject(json, "ntp_server", upstream);
-        cJSON_AddBoolToObject(json, "ntp_reachable", ntp.upstreamReachable());
+    json::addString(doc, "ntp_source", ntp.sourceName());
+    if (const std::optional<std::string> upstream = ntp.upstreamName()) {
+        json::addString(doc, "ntp_server", *upstream);
+        json::addBool(doc, "ntp_reachable", ntp.upstreamReachable());
     } else {
-        cJSON_AddNullToObject(json, "ntp_server");
+        json::addNull(doc, "ntp_server");
     }
-    cJSON_AddBoolToObject(json, "ntp_synced", ntp.synced());
+    json::addBool(doc, "ntp_synced", ntp.synced());
     if (ntp.synced()) {
-        cJSON_AddNumberToObject(json, "last_sync", static_cast<double>(ntp.lastSync()));
+        json::addNumber(doc, "last_sync", static_cast<double>(ntp.lastSync()));
     }
 
-    return sendJson(req, json, 200);
+    return sendJson(req, std::move(doc), 200);
 }
 
 esp_err_t WebServer::configGet(httpd_req_t *req)
@@ -257,44 +228,38 @@ esp_err_t WebServer::configPost(httpd_req_t *req)
         return sendError(req, 413, "request body too large");
     }
 
-    char *body = readBody(req);
-    if (body == nullptr) {
+    const std::optional<std::string> body = readBody(req);
+    if (!body) {
         return sendError(req, 400, "request body truncated");
     }
 
-    cJSON *doc = cJSON_Parse(body);
-    free(body);
-    if (doc == nullptr || !cJSON_IsObject(doc)) {
-        cJSON_Delete(doc);
+    json::Value doc = json::parse(*body);
+    if (!doc || !cJSON_IsObject(doc.get())) {
         return sendError(req, 400, "invalid JSON (expected an object)");
     }
 
-    char caller[INET6_ADDRSTRLEN];
-    callerAddress(req, caller, sizeof(caller));
+    const std::string caller = callerAddress(req);
 
-    Settings &settings = Settings::instance();
-    char      hostname_before[Settings::kStrLen];
-    snprintf(hostname_before, sizeof(hostname_before), "%s", settings.hostname());
+    Settings         &settings        = Settings::instance();
+    const std::string hostname_before = settings.hostname();
 
     settings.applyJson(doc);
-    cJSON_Delete(doc);
     settings.save();
     settings.log();
 
-    if (strcmp(settings.hostname(), hostname_before) != 0) {
+    if (settings.hostname() != hostname_before) {
         applyHostname(settings.hostname());
     }
     /* A changed timeSource/ntpServer takes effect now, not at the next boot. */
     NtpTime::instance().applySettings();
-    ESP_LOGI(TAG, "POST /config from %s", caller);
+    ESP_LOGI(TAG, "POST /config from %s", caller.c_str());
 
     return sendJson(req, settings.toJson(), 200);
 }
 
 esp_err_t WebServer::configResetPost(httpd_req_t *req)
 {
-    char caller[INET6_ADDRSTRLEN];
-    callerAddress(req, caller, sizeof(caller));
+    const std::string caller = callerAddress(req);
 
     Settings &settings = Settings::instance();
     settings.resetDefaults();
@@ -302,48 +267,44 @@ esp_err_t WebServer::configResetPost(httpd_req_t *req)
     settings.log();
     applyHostname(settings.hostname());
     NtpTime::instance().applySettings();
-    ESP_LOGW(TAG, "POST /config/reset from %s: back to compiled-in defaults", caller);
+    ESP_LOGW(TAG, "POST /config/reset from %s: back to compiled-in defaults", caller.c_str());
 
-    cJSON *resp = cJSON_CreateObject();
-    if (resp == nullptr) {
+    json::Value resp = json::makeObject();
+    if (!resp) {
         return httpd_resp_send_500(req);
     }
-    cJSON_AddStringToObject(resp, "status", "reset");
-    return sendJson(req, resp, 200);
+    json::addString(resp, "status", "reset");
+    return sendJson(req, std::move(resp), 200);
 }
 
 esp_err_t WebServer::syncPost(httpd_req_t *req)
 {
-    char caller[INET6_ADDRSTRLEN];
-    callerAddress(req, caller, sizeof(caller));
+    const std::string caller = callerAddress(req);
 
-    NtpTime  &ntp = NtpTime::instance();
-    esp_err_t err = ntp.syncNow(pdMS_TO_TICKS(kSyncWaitMs));
+    NtpTime        &ntp = NtpTime::instance();
+    const esp_err_t err = ntp.syncNow(pdMS_TO_TICKS(kSyncWaitMs));
     if (err == ESP_ERR_INVALID_STATE) {
         return sendError(req, 409, "no time source: set timeSource to dhcp or static");
     }
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "POST /ntp/sync from %s: %s", caller, esp_err_to_name(err));
+        ESP_LOGW(TAG, "POST /ntp/sync from %s: %s", caller.c_str(), esp_err_to_name(err));
         return sendError(req, 504, "no time sync from the upstream server");
     }
 
-    cJSON *json = cJSON_CreateObject();
-    if (json == nullptr) {
+    const std::string now = isoTimestamp(time(nullptr));
+
+    json::Value doc = json::makeObject();
+    if (!doc) {
         return httpd_resp_send_500(req);
     }
-
-    char timebuf[32] = {0};
-    localTimeString(time(nullptr), timebuf, sizeof(timebuf));
-
-    cJSON_AddBoolToObject(json, "synced", true);
-    cJSON_AddStringToObject(json, "time", timebuf);
-    char upstream[Settings::kStrLen];
-    if (ntp.upstreamText(upstream, sizeof(upstream)) == ESP_OK) {
-        cJSON_AddStringToObject(json, "ntp_server", upstream);
+    json::addBool(doc, "synced", true);
+    json::addString(doc, "time", now);
+    if (const std::optional<std::string> upstream = ntp.upstreamName()) {
+        json::addString(doc, "ntp_server", *upstream);
     }
-    ESP_LOGI(TAG, "POST /ntp/sync from %s: %s", caller, timebuf);
+    ESP_LOGI(TAG, "POST /ntp/sync from %s: %s", caller.c_str(), now.c_str());
 
-    return sendJson(req, json, 200);
+    return sendJson(req, std::move(doc), 200);
 }
 
 esp_err_t WebServer::registerRoutes()
@@ -354,7 +315,7 @@ esp_err_t WebServer::registerRoutes()
         esp_err_t    (*handler)(httpd_req_t *req);
     };
 
-    static const Route routes[] = {
+    static constexpr Route routes[] = {
         {"/healthz",      HTTP_GET,  healthz},
         {"/config",       HTTP_GET,  configGet},
         {"/config",       HTTP_POST, configPost},
@@ -386,8 +347,8 @@ esp_err_t WebServer::begin()
         return ESP_OK;
     }
 
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.server_port = 80;
+    httpd_config_t config  = HTTPD_DEFAULT_CONFIG();
+    config.server_port     = 80;
     /* Keep one wedged client from holding the only socket. */
     config.lru_purge_enable = true;
     config.max_uri_handlers = 8;
@@ -411,3 +372,5 @@ esp_err_t WebServer::begin()
 
     return ESP_OK;
 }
+
+

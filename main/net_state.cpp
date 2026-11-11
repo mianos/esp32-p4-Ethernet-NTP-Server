@@ -3,10 +3,8 @@
 namespace net_state {
 namespace {
 
-esp_netif_t *s_netif = nullptr;
-/* Written from the ETH_EVENT handler, read from the httpd task: a plain flag is
- * all the precision a status readout needs. */
-volatile bool s_link_up = false;
+esp_netif_t       *s_netif = nullptr;
+std::atomic<bool> s_link_up{false};
 
 }  // namespace
 
@@ -22,12 +20,12 @@ void setNetif(esp_netif_t *netif)
 
 bool linkUp()
 {
-    return s_link_up;
+    return s_link_up.load(std::memory_order_relaxed);
 }
 
 void setLinkUp(bool up)
 {
-    s_link_up = up;
+    s_link_up.store(up, std::memory_order_relaxed);
 }
 
 }  // namespace net_state

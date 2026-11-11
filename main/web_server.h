@@ -15,14 +15,17 @@
  * paths and wrong methods get the same JSON shape rather than httpd's built-in
  * plain-text page.
  *
- * httpd calls the handlers as C function pointers, so they are static members
- * with the instance reachable through instance().
+ * httpd calls the handlers as C function pointers, so they are static members:
+ * the instance state is a single httpd_handle_t, reached through instance().
  */
 #pragma once
 
-#include "cJSON.h"
+#include <string>
+
 #include "esp_err.h"
 #include "esp_http_server.h"
+
+#include "json.h"
 
 class WebServer {
 public:
@@ -32,6 +35,8 @@ public:
     esp_err_t begin();
 
 private:
+    static constexpr const char *TAG = "webserver";
+
     WebServer() = default;
 
     esp_err_t registerRoutes();
@@ -45,10 +50,12 @@ private:
     static esp_err_t notFound(httpd_req_t *req, httpd_err_code_t err);
     static esp_err_t methodNotAllowed(httpd_req_t *req, httpd_err_code_t err);
 
-    /* Sends `json` as the body and takes ownership of it. */
-    static esp_err_t sendJson(httpd_req_t *req, cJSON *json, int status_code);
-    static esp_err_t sendError(httpd_req_t *req, int status_code, const char *message);
+    /* Point the DHCP client's option-12 name at a renamed device. */
+    static void applyHostname(const std::string &hostname);
+
+    /* Sends `doc` as the body and takes ownership of it. */
+    static esp_err_t sendJson(httpd_req_t *req, json::Value doc, int status_code);
+    static esp_err_t sendError(httpd_req_t *req, int status_code, const std::string &message);
 
     httpd_handle_t m_server = nullptr;
 };
-

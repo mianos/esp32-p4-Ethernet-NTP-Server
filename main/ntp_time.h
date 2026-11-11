@@ -24,12 +24,18 @@
 #include <ctime>
 
 #include <atomic>
+#include <optional>
+#include <string>
 
 #include "esp_event.h"
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
 
 #include "settings.h"
+
+/* Local ISO-8601 timestamp ("2026-11-11T13:43:22+1100"), the format /healthz,
+ * POST /ntp/sync and the sync log line all use. */
+std::string isoTimestamp(time_t when);
 
 class NtpTime {
 public:
@@ -54,23 +60,28 @@ public:
     bool synced() const { return m_last_sync.load(std::memory_order_relaxed) != 0; }
 
     /* Epoch seconds of the last sync, 0 if never. */
-    time_t lastSync() const { return static_cast<time_t>(m_last_sync.load(std::memory_order_relaxed)); }
+    time_t lastSync() const
+    {
+        return static_cast<time_t>(m_last_sync.load(std::memory_order_relaxed));
+    }
 
     /* RFC 5905 reachability register of the current server: non-zero means it
      * has answered at least once since the last shift-out. */
     bool upstreamReachable() const;
 
-    /* Current upstream server as text ("192.0.2.1" or a hostname).
-     * ESP_ERR_NOT_FOUND when the client has no server yet. */
-    esp_err_t upstreamText(char *buf, size_t len) const;
+    /* Current upstream server as text ("192.0.2.1" or a hostname); nullopt
+     * while the client has no server or is not running. */
+    std::optional<std::string> upstreamName() const;
 
-    const char *sourceName() const { return Settings::timeSourceName(m_source); }
+    std::string          sourceName() const { return Settings::timeSourceName(m_source); }
     Settings::TimeSource source() const { return m_source; }
 
 private:
+    static constexpr const char *TAG = "ntp_time";
+
     NtpTime() = default;
 
-    esp_err_t start(Settings::TimeSource source, const char *server);
+    esp_err_t start(Settings::TimeSource source, const std::string &server);
     void      stop();
 
     static void onSyncEvent(void *arg, esp_event_base_t base,
@@ -78,7 +89,6 @@ private:
 
     Settings::TimeSource   m_source  = Settings::TimeSource::Off;
     bool                   m_running = false;
-    char                   m_server[Settings::kStrLen] = {0};
-
+    std::string            m_server;
     std::atomic<long long> m_last_sync{0};
 };

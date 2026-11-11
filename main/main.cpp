@@ -27,7 +27,7 @@
 
 #include <inttypes.h>
 
-#include <cstring>
+#include <atomic>
 
 #include "esp_check.h"
 #include "esp_eth.h"
@@ -66,8 +66,10 @@ constexpr int kEthRmiiCrsDvGpio  = 28;
 const char *TAG = "eth_demo";
 
 esp_eth_handle_t s_eth_handle;
-volatile bool    s_have_ip;
-bool             s_web_started;
+/* Written by the IP/ETH event handlers, read by the status task. */
+std::atomic<bool> s_have_ip{false};
+/* Only ever touched from the event task, so a plain bool is enough. */
+bool s_web_started = false;
 
 /* Read one PHY register through the SMI (MDC/MDIO) bus. */
 esp_err_t phyReadReg(uint32_t reg, uint32_t *val)
@@ -185,7 +187,7 @@ void ethEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *ev
 
     switch (event_id) {
     case ETHERNET_EVENT_CONNECTED: {
-        uint8_t mac_addr[6] = {0};
+        uint8_t mac_addr[6] = {};
         esp_eth_ioctl(s_eth_handle, ETH_CMD_G_MAC_ADDR, mac_addr);
         net_state::setLinkUp(true);
         ESP_LOGI(TAG, "link up   (MAC %02x:%02x:%02x:%02x:%02x:%02x)",
@@ -195,7 +197,7 @@ void ethEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *ev
         break;
     }
     case ETHERNET_EVENT_DISCONNECTED:
-        s_have_ip = false;
+        s_have_ip.store(false, std::memory_order_relaxed);
         net_state::setLinkUp(false);
         ESP_LOGW(TAG, "link down");
         break;
@@ -210,16 +212,12 @@ void ethEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *ev
     }
 }
 
-void gotIpEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+void gotIpEvent(void *, esp_event_base_t, int32_t, void *event_data)
 {
-    (void)arg;
-    (void)event_base;
-    (void)event_id;
+    auto       *event   = static_cast<ip_event_got_ip_t *>(event_data);
+    const auto *ip_info = &event->ip_info;
 
-    ip_event_got_ip_t         *event   = static_cast<ip_event_got_ip_t *>(event_data);
-    const esp_netif_ip_info_t *ip_info = &event->ip_info;
-
-    s_have_ip = true;
+    s_have_ip.store(true, std::memory_order_relaxed);
     ESP_LOGI(TAG, "DHCP lease: ip " IPSTR "  mask " IPSTR "  gw " IPSTR,
              IP2STR(&ip_info->ip), IP2STR(&ip_info->netmask), IP2STR(&ip_info->gw));
     ESP_LOGI(TAG, "ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP");
@@ -245,12 +243,11 @@ void gotIpEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *
 /* -------------------------------------------------------------------------
  * Status task: says what the demo is waiting for, then goes quiet.
  * ---------------------------------------------------------------------- */
-void statusTask(void *arg)
+void statusTask(void *)
 {
-    (void)arg;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(5000));
-        if (!s_have_ip) {
+        if (!s_have_ip.load(std::memory_order_relaxed)) {
             ESP_LOGI(TAG, "waiting for link + DHCP lease (is the RJ45 plugged in?)");
             phyLogStatus();
         }
@@ -296,7 +293,7 @@ extern "C" void app_main(void)
     /* DHCP option 12 is built when the client's first DISCOVER goes out, which
      * happens once the netif comes up -- so the hostname has to be in place
      * before esp_eth_start(), not after the first lease. */
-    ESP_ERROR_CHECK(esp_netif_set_hostname(netif, Settings::instance().hostname()));
+    ESP_ERROR_CHECK(esp_netif_set_hostname(netif, Settings::instance().hostname().c_str()));
 
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(s_eth_handle);
     ESP_ERROR_CHECK(esp_netif_attach(netif, glue));

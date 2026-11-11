@@ -1,21 +1,19 @@
 #include "settings.h"
 
-#include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <ctime>
+#include <utility>
 
 #include "esp_log.h"
 #include "nvs.h"
 
 namespace {
 
-const char *TAG = "settings";
-
 constexpr const char *kNvsNamespace = "settings";
 constexpr const char *kNvsKey       = "config";
+
 /* A config blob is a handful of short strings; anything larger is junk and is
- * not worth a heap allocation to find that out. */
+ * not worth parsing to find that out. */
 constexpr size_t kMaxBlobBytes = 512;
 
 }  // namespace
@@ -26,66 +24,47 @@ Settings &Settings::instance()
     return settings;
 }
 
-Settings::Settings() : m_count(0)
+Settings::Settings()
 {
-    /* Compiled-in defaults: what a fresh unit runs, and what
-     * POST /config/reset restores. */
-    copy(m_values.hostname, "esp32p4-ntp");
-    copy(m_values.tz, "AEST-10AEDT,M10.1.0,M4.1.0/3");
-    copy(m_values.timeSource, "dhcp");
-    copy(m_values.ntpServer, "");
-
+    /* Compiled-in defaults live in Settings::Values; registering each member
+     * here snapshots it as the value POST /config/reset restores. */
     add("hostname", m_values.hostname);
     add("tz", m_values.tz);
     add("timeSource", m_values.timeSource);
     add("ntpServer", m_values.ntpServer);
 }
 
-void Settings::copy(char *dst, const char *src)
+void Settings::add(const char *key, std::string &ref)
 {
-    snprintf(dst, kStrLen, "%s", src);
+    m_fields.push_back({key, &ref, ref});
 }
 
-void Settings::add(const char *key, char *value)
+void Settings::begin()
 {
-    if (m_count >= kMaxFields) {
-        ESP_LOGE(TAG, "field table full, ignoring '%s'", key);
-        return;
-    }
-    Field &field = m_fields[m_count++];
-    field.key    = key;
-    field.value  = value;
-    copy(field.def, value);
+    load();
+    applyTimezone();
+    log();
 }
 
-const char *Settings::get(const char *key) const
+void Settings::log() const
 {
-    for (size_t i = 0; i < m_count; i++) {
-        if (strcmp(m_fields[i].key, key) == 0) {
-            return m_fields[i].value;
+    std::string line;
+    for (const Field &field : m_fields) {
+        if (!line.empty()) {
+            line += ' ';
         }
+        line += field.key + '=';
+        line += field.ref->empty() ? std::string{"(unset)"} : *field.ref;
     }
-    return "";
-}
-
-bool Settings::set(const char *key, const char *value)
-{
-    for (size_t i = 0; i < m_count; i++) {
-        if (strcmp(m_fields[i].key, key) == 0) {
-            copy(m_fields[i].value, value);
-            return true;
-        }
-    }
-    return false;
+    ESP_LOGI(TAG, "%s", line.c_str());
 }
 
 Settings::TimeSource Settings::timeSource() const
 {
-    const char *mode = get("timeSource");
-    if (strcmp(mode, "dhcp") == 0) {
+    if (m_values.timeSource == "dhcp") {
         return TimeSource::Dhcp;
     }
-    if (strcmp(mode, "static") == 0) {
+    if (m_values.timeSource == "static") {
         return TimeSource::Static;
     }
     return TimeSource::Off;
@@ -105,46 +84,51 @@ const char *Settings::timeSourceName(TimeSource source)
  * leaves localtime() on UTC, so it needs no validation of its own. */
 void Settings::applyTimezone() const
 {
-    setenv("TZ", m_values.tz, 1);
+    setenv("TZ", m_values.tz.c_str(), 1);
     tzset();
 }
 
-cJSON *Settings::toJson() const
+json::Value Settings::toJson() const
 {
-    cJSON *doc = cJSON_CreateObject();
-    if (doc == nullptr) {
-        return nullptr;
+    json::Value doc = json::makeObject();
+    if (!doc) {
+        return doc;
     }
-    for (size_t i = 0; i < m_count; i++) {
-        cJSON_AddStringToObject(doc, m_fields[i].key,
-                                m_fields[i].value[0] ? m_fields[i].value : "");
+    for (const Field &field : m_fields) {
+        json::addString(doc, field.key.c_str(), *field.ref);
     }
     return doc;
 }
 
-bool Settings::applyJson(const cJSON *doc)
+bool Settings::applyJson(const json::Value &doc)
 {
+    if (!doc) {
+        return false;
+    }
+
     bool changed = false;
 
-    for (size_t i = 0; i < m_count; i++) {
-        Field       &field = m_fields[i];
-        const cJSON *item  = cJSON_GetObjectItemCaseSensitive(doc, field.key);
+    for (Field &field : m_fields) {
+        const cJSON *item = cJSON_GetObjectItemCaseSensitive(doc.get(), field.key.c_str());
         if (item == nullptr) {
-            continue; /* POST /config accepts any subset of the keys */
+            continue;  // POST /config accepts any subset of the keys
         }
         if (!cJSON_IsString(item) || item->valuestring == nullptr) {
-            ESP_LOGW(TAG, "'%s' ignored: expected a string", field.key);
+            ESP_LOGW(TAG, "'%s' ignored: expected a string", field.key.c_str());
             continue;
         }
-        if (strcmp(item->valuestring, field.value) == 0) {
+
+        std::string value{item->valuestring};
+        if (value == *field.ref) {
             continue;
         }
-        if (strlen(item->valuestring) >= kStrLen) {
-            ESP_LOGW(TAG, "'%s' truncated to %u characters",
-                     field.key, static_cast<unsigned>(kStrLen - 1));
+        if (value.size() > kMaxValueLen) {
+            ESP_LOGW(TAG, "'%s' truncated to %u characters", field.key.c_str(),
+                     static_cast<unsigned>(kMaxValueLen));
+            value.resize(kMaxValueLen);
         }
-        copy(field.value, item->valuestring);
-        changed = true;
+        *field.ref = std::move(value);
+        changed    = true;
     }
 
     if (changed) {
@@ -155,10 +139,8 @@ bool Settings::applyJson(const cJSON *doc)
 
 void Settings::save() const
 {
-    cJSON *doc = toJson();
-    char  *raw = doc ? cJSON_PrintUnformatted(doc) : nullptr;
-    cJSON_Delete(doc);
-    if (raw == nullptr) {
+    const std::string raw = json::print(toJson());
+    if (raw.empty()) {
         ESP_LOGE(TAG, "failed to serialise config");
         return;
     }
@@ -166,13 +148,12 @@ void Settings::save() const
     esp_err_t    err = ESP_FAIL;
     nvs_handle_t nvs;
     if (nvs_open(kNvsNamespace, NVS_READWRITE, &nvs) == ESP_OK) {
-        err = nvs_set_str(nvs, kNvsKey, raw);
+        err = nvs_set_str(nvs, kNvsKey, raw.c_str());
         if (err == ESP_OK) {
             err = nvs_commit(nvs);
         }
         nvs_close(nvs);
     }
-    free(raw);
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "failed to persist config: %s", esp_err_to_name(err));
@@ -181,27 +162,10 @@ void Settings::save() const
 
 void Settings::resetDefaults()
 {
-    for (size_t i = 0; i < m_count; i++) {
-        copy(m_fields[i].value, m_fields[i].def);
+    for (Field &field : m_fields) {
+        *field.ref = field.def;
     }
     applyTimezone();
-}
-
-void Settings::log() const
-{
-    char   line[256] = {0};
-    size_t used      = 0;
-
-    for (size_t i = 0; i < m_count && used < sizeof(line); i++) {
-        int n = snprintf(line + used, sizeof(line) - used, "%s%s=%s",
-                         used ? " " : "", m_fields[i].key,
-                         m_fields[i].value[0] ? m_fields[i].value : "(unset)");
-        if (n < 0) {
-            break;
-        }
-        used += static_cast<size_t>(n);
-    }
-    ESP_LOGI(TAG, "%s", line);
 }
 
 void Settings::load()
@@ -220,28 +184,20 @@ void Settings::load()
         return;
     }
 
-    char *raw = static_cast<char *>(malloc(len));
-    if (raw == nullptr) {
-        nvs_close(nvs);
-        ESP_LOGE(TAG, "out of memory reading config, using defaults");
+    std::string raw(len, '\0');
+    err = nvs_get_str(nvs, kNvsKey, raw.data(), &len);
+    nvs_close(nvs);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "reading stored config: %s", esp_err_to_name(err));
         return;
     }
-    err = nvs_get_str(nvs, kNvsKey, raw, &len);
-    nvs_close(nvs);
+    /* len includes the terminator nvs_get_str wrote. */
+    raw.resize(len > 0 ? len - 1 : 0);
 
-    cJSON *doc = (err == ESP_OK) ? cJSON_Parse(raw) : nullptr;
-    if (doc == nullptr) {
+    json::Value doc = json::parse(raw);
+    if (!doc) {
         ESP_LOGW(TAG, "stored config unparseable, using defaults");
-    } else {
-        applyJson(doc);
-        cJSON_Delete(doc);
+        return;
     }
-    free(raw);
-}
-
-void Settings::begin()
-{
-    load();
-    applyTimezone();
-    log();
+    applyJson(doc);
 }

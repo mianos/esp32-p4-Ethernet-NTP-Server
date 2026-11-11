@@ -220,6 +220,11 @@ Ordering is the fiddly part, and both halves are load-bearing:
 2. `onGotIp()` re-polls on the lease, because the first poll at boot may have
    gone out before the option-42 address existed. In `dhcp` mode with no option
    42 in the lease it warns once: `no NTP server in the lease (option 42)`.
+3. Switching back to `dhcp` while a lease is already held cannot pick option 42
+   up until the next DHCP bind — lwIP only hands the address to SNTP at that
+   point, so `/ntp/sync` answers 504 in the meantime and `/healthz` shows
+   `ntp_server: null`. The switch logs `option 42 arrives at the next DHCP
+   bind`; a reboot applies it at once.
 
 ```console
 $ curl -s -X POST http://131.84.1.107/ntp/sync        # poll now, wait up to 5 s
@@ -261,7 +266,7 @@ $ curl -s -X POST http://131.84.1.107/ntp/sync      # server silent for 5 s
 ```
 
 Body size is capped at 4 KB, and string values are capped at 63 characters
-(`Settings::kStrLen`); longer values are truncated and logged.
+(`Settings::kMaxValueLen`); longer values are truncated and logged.
 
 Settings live as one JSON blob in NVS (namespace `settings`, key `config`),
 which is why they survive a reboot. The layout is the C++ counterpart of
@@ -282,6 +287,7 @@ into `managed_components/` (git-ignored).
 | `main/web_server.[ch]pp`| `WebServer`: `/healthz`, `/config`, `/config/reset`, `/ntp/sync` |
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
 | `main/net_state.[ch]pp` | read-only netif / link accessors, fed by `main.cpp`              |
+| `main/json.h`           | `json::Value`: cJSON behind a `unique_ptr`, so nothing hand-frees |
 
 ## Troubleshooting
 

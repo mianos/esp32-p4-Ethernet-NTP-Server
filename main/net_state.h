@@ -3,9 +3,12 @@
  *
  * main.cpp owns the netif and keeps the PHY link flag up to date from the
  * ETH_EVENT handler; the HTTP server only reads both, so it can report
- * "link_up" and the leased address without a second source of truth.
+ * "link_up" and the leased address without a second source of truth. The flag
+ * is written on the event task and read on the httpd task, hence std::atomic.
  */
 #pragma once
+
+#include <atomic>
 
 #include "esp_netif.h"
 
@@ -22,4 +25,3 @@ void setNetif(esp_netif_t *netif);
 void setLinkUp(bool up);
 
 }  // namespace net_state
-
