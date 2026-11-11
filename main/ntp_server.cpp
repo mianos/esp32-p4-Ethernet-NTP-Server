@@ -81,9 +81,16 @@ constexpr time_t kLockWindowS = 3600;
  * Only eight sources are remembered, which is a deliberate bound -- the oldest
  * entry is recycled, so a flood from many addresses degrades to answering the
  * newest ones rather than growing the table.
+ *
+ * The burst is 16 because that is what a *person* testing with sntp costs: sntp
+ * fires five queries per run, so two runs back to back are ten packets, and a
+ * limit that bites during ordinary manual testing teaches the wrong lesson. The
+ * sustained rate is what actually protects the device, and 1 per 2 s is already
+ * ~30x more permissive than any real daemon (chronyd, timesyncd and ntpd all
+ * poll every 32-1024 s).
  */
 
-constexpr int      kBucketDepth    = 8;
+constexpr int      kBucketDepth    = 16;
 constexpr uint32_t kRefillEveryMs  = 2000;
 constexpr int      kBucketSlots    = 8;
 constexpr uint32_t kKodIntervalMs  = 1000;

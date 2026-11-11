@@ -571,9 +571,11 @@ is also how the `INIT` refid and the zero reference timestamp were verified.)
   gets a stable FNV-1a of the name instead of RFC 5905's MD5 (which lwIP cannot
   give us the resolved bytes for). Above stratum 1 the field is informational —
   it is how ntpd spots a loop — so this is a documented deviation, not a guess.
-- **Rate limit**: 8-packet burst per source address, then one request per 2 s,
+- **Rate limit**: 16-packet burst per source address, then one request per 2 s,
   then one `RATE` kiss-o'-death per second, then silence. Eight addresses are
   remembered; the table recycles the least recently seen rather than growing.
+  The burst is sized for people, not for clients: `sntp` sends five queries per
+  invocation, so two runs back to back (the obvious thing to try) stay answered.
 - **Timestamps are software**: lwIP has no `SO_TIMESTAMP`, so the receive stamp
   is taken after `recvfrom()` returns. Until the hardware path exists (the EMAC's
   PTP clock), that scheduler latency is part of the answer — which is why the
@@ -617,8 +619,7 @@ sntp_exchange {
 integer; `dispersion` 1.57 ms is the 1 ms floor plus the ~38 s since the last
 sync at 15 ppm.
 
-The rest of the matrix, from a 40-line Python client (raw sockets, `recv` with a
-1 s timeout):
+The rest of the matrix, from `tools/ntp_test.py` (raw sockets, no dependencies, `recv` with a 1 s timeout):
 
 | Sent | Answer |
 |------|--------|
@@ -629,10 +630,62 @@ The rest of the matrix, from a 40-line Python client (raw sockets, `recv` with a
 | vn 2 | nothing |
 | 12 bytes | nothing |
 | transmit timestamp all zeros | origin echoed as zeros |
-| 20 in a burst from one address | 9 answered, 4 `RATE`, 7 silent — the script waits 0.5 s per silent packet, so tokens refilled during the run |
+| 20 in a burst from one address | 16 answered, 2 `RATE`, 2 silent — the script waits 0.5 s per silent packet, so tokens refilled during the run |
 | after the burst, 2.5 s later | answered again |
 
-### Off, on, and what is deliberately missing
+### Testing it
+
+Start with a client that is already on the machine, because that is the shape of
+the question ("will anything accept my clock?"):
+
+```console
+$ sntp 192.168.1.50                 # macOS, BSD, Linux (ntp package)
++0.114044 +/- 0.002362 192.168.1.50 192.168.1.50
+$ sntp -d 192.168.1.50              # the same, with every header field decoded
+```
+
+`chronyd -Q 'server 192.168.1.50 iburst'` (as root) and
+`w32tm /stripchart /computer:192.168.1.50 /dataonly /samples:3` on Windows ask
+the same question through different code.
+
+`tools/ntp_test.py <ip> [ipv6]` answers the other one — what is actually on the
+wire, including the packets a real client never sends: mode 4 / mode 1 / vn 2 /
+truncated requests that must get silence, the origin-timestamp echo, the IPv6
+address, and a burst that trips the limiter. It prints one line per packet:
+
+```console
+$ python3 tools/ntp_test.py 192.168.1.50 2401:db8::50
+mode 3, vn 4                       len=48 li=0 vn=4 mode=4 stratum=3 prec=-20 delay=0.000992 disp=0.002121 refid=b'\x83T\x01\x01' origin_ok=True
+mode 4 (server)                    NO REPLY
+...
+answered=16 kod=2 silent=2
+```
+
+Two things to know before concluding something is broken:
+
+- **`sntp` is five queries, not one.** Three back-to-back runs fit inside the
+  16-packet burst; a tighter loop gets `RATE` and then a second of silence. Wait
+  a few seconds — or run the test from another machine — before believing it.
+- **`/healthz` is the witness.** `ntp_requests` should climb by one per packet
+  you sent, `ntp_stratum`/`ntp_refid` should read 3 and the upstream's address
+  while locked, and `serve_ntp` should be `true`. If the counter climbs and the
+  client still fails, the problem is in the client or the header, not the path.
+
+The honesty path is worth testing too, because it is the one that matters when
+something is wrong:
+
+```console
+$ curl -s -X POST http://192.168.1.50/config -d '{"timeSource":"off"}' >/dev/null
+$ sntp 192.168.1.50
+sntp: Server not synchronized
+$ curl -s http://192.168.1.50/healthz | tr , '\n' | grep ntp_stratum     # 16
+$ curl -s -X POST http://192.168.1.50/config -d '{"timeSource":"dhcp"}' >/dev/null
+```
+
+Switching back needs a DHCP bind before lwIP re-learns option 42 (a reboot, or a
+lease renewal); until then the clock is unlocked and the responder keeps saying
+stratum 16, which is correct.
+
 
 `POST /config '{"serveNtp":"off"}'` stops it within a second (`/healthz` drops to
 `"serve_ntp":false`, `sntp` gets `recv failure`), and `on` rebinds the same
@@ -659,6 +712,7 @@ Not in this milestone, on purpose:
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
 | `main/ntp_server.[ch]pp`| `NtpServer` + `TimeRef`/`UpstreamTimeRef`: the UDP/123 responder, reply builder, rate limiter |
 | `main/net_state.[ch]pp` | read-only netif / link / IPv6-address accessors, fed by `main.cpp` |
+| `tools/ntp_test.py`     | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
 
 Written locally; everything else (JSON, NVS, settings machinery, the HTTP
 server) is a mianesp component.
@@ -710,9 +764,11 @@ server) is a mianesp component.
   log says `option 42 arrives at the next DHCP bind (a reboot applies it now)`.
   Nothing wrong with the responder; a lease renewal or reboot clears it.
 - **A client is getting `RATE` kiss-o'-death replies**: it is asking faster than
-  one packet per 2 s after its 8-packet burst. Confirm with
-  `ntp_requests` in `/healthz` against the client's own count; a monitoring
-  script hammering UDP/123 is the usual cause.
+  one packet per 2 s after its 16-packet burst. macOS `sntp` sends five queries
+  per invocation, so a loop of `sntp` runs will get there — wait a few seconds
+  between runs, or drive it with `tools/ntp_test.py`, which sends one packet at
+  a time and prints what came back. Confirm with `ntp_requests` in `/healthz`
+  against the client's own count.
 - **`ntp_refid` is a number for a hostname upstream**: that is the FNV-1a of the
   name, not its address — lwIP does not expose the address the SNTP client
   resolved ([Serving NTP](#serving-ntp-udp123)). Set `ntpServer` to the literal
