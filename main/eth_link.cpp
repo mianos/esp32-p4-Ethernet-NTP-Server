@@ -76,6 +76,11 @@ constexpr uint32_t kMdioAddresses = 32;
 constexpr uint32_t kPhyIdAbsent = 0xffff;
 
 constexpr uint32_t    kStatusPollMs    = 5000;
+/* The driver polls the link over MDIO by itself every 2 s, and IDF's SMI path
+ * has no mutex: two readers can return each other's data, or ESP_ERR_INVALID_STATE.
+ * So the registers are read once every six ticks (30 s) while the "waiting"
+ * line keeps its 5 s rhythm. */
+constexpr uint32_t    kPhyStatusEvery  = 6;
 constexpr uint32_t    kStatusTaskStack = 3072;
 constexpr UBaseType_t kStatusTaskPrio  = 3;
 
@@ -257,12 +262,17 @@ esp_err_t EthernetLink::attachNetif()
 
     /* DHCP option 12 is built when the client's first DISCOVER goes out, which
      * happens once the netif comes up -- so the hostname has to be in place
-     * before esp_eth_start(), not after the first lease. */
-    const esp_err_t err =
-        esp_netif_set_hostname(m_netif, Settings::instance().hostname().c_str());
+     * before esp_eth_start(), not after the first lease.
+     *
+     * Deliberately not fatal. app_main() turns a begin() error into an abort,
+     * and a device that cannot boot has no way back in -- so a stored hostname
+     * must not be able to stop it. Settings caps the name at esp_netif's own
+     * limit (32), which makes this a backstop rather than the fix. */
+    const std::string &hostname = Settings::instance().hostname();
+    const esp_err_t    err      = esp_netif_set_hostname(m_netif, hostname.c_str());
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_netif_set_hostname failed: %s", esp_err_to_name(err));
-        return err;
+        ESP_LOGW(TAG, "esp_netif_set_hostname('%s'): %s -- keeping lwIP's default",
+                 hostname.c_str(), esp_err_to_name(err));
     }
 
     /* The glue is handed to the netif, which owns it from here. */
@@ -322,7 +332,8 @@ void EthernetLink::logPhyStatus()
     const std::optional<uint32_t> bmsr = readPhyReg(kPhyRegBmsr);
     const std::optional<uint32_t> bmcr = readPhyReg(kPhyRegBmcr);
     if (!bmsr || !bmcr) {
-        ESP_LOGW(TAG, "phy: MDIO read failed (check MDC/MDIO wiring)");
+        ESP_LOGW(TAG, "phy: MDIO read failed (check MDC/MDIO wiring; the driver "
+                      "reads MDIO too, so a busy bus looks the same)");
         return;
     }
     ESP_LOGI(TAG, "phy: bmsr=0x%04" PRIx32 " link=%d autoneg_done=%d bmcr=0x%04" PRIx32,
@@ -460,13 +471,16 @@ void EthernetLink::statusTaskEntry(void *arg)
 
 void EthernetLink::statusLoop()
 {
+    uint32_t tick = 0;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(kStatusPollMs));
         if (m_haveIp.load(std::memory_order_relaxed)) {
             continue; /* the lease is in: quiet, but still watching */
         }
         ESP_LOGI(TAG, "waiting for link + DHCP lease (is the RJ45 plugged in?)");
-        logPhyStatus();
+        if (tick++ % kPhyStatusEvery == 0) {
+            logPhyStatus();
+        }
     }
 }
 

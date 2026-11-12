@@ -14,6 +14,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <string>
 
@@ -25,6 +26,13 @@ public:
     /* Longest a string setting may hold. POST /config truncates anything
      * longer and logs it, rather than growing NVS without bound. */
     static constexpr size_t kMaxValueLen = 63;
+
+    /* ...except the hostname, which has its own, smaller cap: it is handed
+     * straight to esp_netif_set_hostname(), and that refuses anything over
+     * ESP_NETIF_HOSTNAME_MAX_SIZE (32). The refusal is not cosmetic: at boot
+     * there is no one to tell and no second interface to recover over, so a
+     * value of that size must never reach NVS in the first place. */
+    static constexpr size_t kMaxHostnameLen = 32;
 
     /* Where the system clock gets its time from. Test scaffolding: the real
      * disciplining path (GPS/PPS, or the responder trusting its own reference)
@@ -65,7 +73,7 @@ public:
      * device that is not locked answers with stratum 16 and leap indicator 3,
      * which tells every client to ignore it, so leaving this on cannot mislead
      * anything -- it can only spend electricity. */
-    bool serveNtp() const { return m_serveNtp == "on"; }
+    bool serveNtp() const { return m_serveNtpOn.load(std::memory_order_relaxed); }
 
     /* Apply whichever registered keys are present in `doc`; unknown keys and
      * wrong-typed values are ignored. Long values are truncated to
@@ -88,4 +96,11 @@ private:
     std::string m_timeSource = "dhcp";
     std::string m_ntpServer;
     std::string m_serveNtp   = "on";
+
+    /* The parsed answer, because the two sides are on different tasks: the
+     * responder asks serveNtp() from its Ethernet event handler, while POST
+     * /config rewrites the string above on the HTTP task. Keeping the answer in
+     * an atomic means that read never touches the string. Seeded in begin()
+     * and refreshed by the onChange hook the constructor installs. */
+    std::atomic<bool> m_serveNtpOn{true};
 };

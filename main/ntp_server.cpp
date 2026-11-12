@@ -39,7 +39,6 @@ constexpr uint32_t kNtpUnixDelta = 2208988800u;
 
 constexpr uint8_t kModeClient = 3; /* the only mode this device answers */
 constexpr uint8_t kModeServer = 4;
-constexpr uint8_t kVersionOut = 4;
 
 constexpr uint8_t kStratumUnlocked = 16; /* "unsynchronised": ignore this server */
 constexpr uint8_t kLeapNoWarning   = 0;
@@ -69,10 +68,12 @@ constexpr uint32_t kRootDelay = 65; /* 1 ms */
  * demote this server instead of trusting a clock nobody is correcting. */
 constexpr double kDispersionPpm = 15.0;
 
-/* How recent the last sync has to be for the clock to count as locked. The
- * upstream polls far more often than this; the window only has to catch the
- * case where discipline has stopped altogether. */
-constexpr time_t kLockWindowS = 3600;
+/* How recent the last sync has to be for the clock to count as locked: fifteen
+ * missed polls of NtpTime's one-a-minute interval. The window has to be
+ * comfortably wider than the poll interval, or a healthy server flaps to stratum
+ * 16 between polls; it still catches discipline stopping altogether, because at
+ * 15 ppm this window is 13 ms of drift, which rootDispersion() advertises. */
+constexpr time_t kLockWindowS = 900;
 
 /* ---- Rate limiting ----------------------------------------------------
  * A LAN full of clients polling at minpoll is fine; one client in a loop is
@@ -302,7 +303,9 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
     const uint8_t  leap    = (kod || ref.locked) ? kLeapNoWarning : kLeapAlarm;
     const uint32_t refId   = kod ? kRefIdRate : ref.refId;
 
-    out[0] = static_cast<uint8_t>((leap << 6) | (kVersionOut << 3) | kModeServer);
+    /* The version echoes the request's: that is what ntpd does and what RFC 5905
+     * asks for, and a v3-only client is entitled to reject a v4 reply. */
+    out[0] = static_cast<uint8_t>((leap << 6) | ((req.version & 0x07) << 3) | kModeServer);
     out[1] = stratum;
     out[2] = req.poll;
     out[3] = kPrecision;
@@ -434,6 +437,17 @@ esp_err_t NtpServer::begin()
     if (m_running.load(std::memory_order_relaxed)) {
         return ESP_OK;
     }
+    if (m_task != nullptr) {
+        /* Still shutting down after serveNtp went off: starting a second task
+         * here is how two of them end up on one socket. The next lease retries. */
+        ESP_LOGW(TAG, "responder task is still stopping");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (m_sock >= 0) {
+        /* Left over from a stop that timed out: nothing owns it now. */
+        close(m_sock);
+        m_sock = -1;
+    }
     if (!Settings::instance().serveNtp()) {
         ESP_LOGI(TAG, "not serving: serveNtp is off");
         return ESP_OK;
@@ -526,9 +540,22 @@ esp_err_t NtpServer::applySettings()
     }
     ESP_LOGW(TAG, "serveNtp is off: stopping the responder");
     /* The task is asleep in recvfrom() for at most a second; wait for it so a
-     * quick off/on toggle cannot end up with two of them. */
+     * quick off/on toggle cannot end up with two of them. The socket is this
+     * side's to close -- the task only ever reads it -- so closing it here
+     * cannot pull the descriptor out from under a task that is still running. */
+    const int sock = m_sock;
     for (int i = 0; i < 30 && m_task != nullptr; ++i) {
         vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    if (m_task != nullptr) {
+        /* Still inside recvfrom(): leave the socket alone and let the next
+         * begin() clean it up rather than closing a descriptor in use. */
+        ESP_LOGW(TAG, "responder task has not stopped yet");
+        return ESP_ERR_TIMEOUT;
+    }
+    m_sock = -1;
+    if (sock >= 0) {
+        close(sock);
     }
     return ESP_OK;
 }
@@ -540,6 +567,10 @@ TimeReference NtpServer::reference() const
 
 void NtpServer::serveLoop()
 {
+    /* This task's socket, taken by value: the member may be replaced by a
+     * restart, and a task that closed "m_sock" on the way out would then close
+     * its successor's socket. */
+    const int   sock = m_sock;
     RateLimiter limiter;
     uint32_t    answered = 0, kodSent = 0, dropped = 0;      /* cumulative */
     uint32_t    winAnswered = 0, winKod = 0, winDropped = 0; /* since report */
@@ -553,7 +584,7 @@ void NtpServer::serveLoop()
         /* Room for extension fields, so a long request is still parsed from its
          * first 48 bytes instead of being dropped as unrecognised. */
         uint8_t   packet[kPacketBytes * 2] = {};
-        const int len = recvfrom(m_sock, packet, sizeof(packet), 0,
+        const int len = recvfrom(sock, packet, sizeof(packet), 0,
                                  reinterpret_cast<sockaddr *>(&from), &fromLen);
 
         /* lwIP has no SO_TIMESTAMP, so this read after the syscall is the
@@ -591,7 +622,7 @@ void NtpServer::serveLoop()
                     uint8_t reply[kPacketBytes] = {};
                     buildReply(reply, req, ref, kod, received, transmitted);
 
-                    if (sendto(m_sock, reply, sizeof(reply), 0,
+                    if (sendto(sock, reply, sizeof(reply), 0,
                                reinterpret_cast<const sockaddr *>(&from), fromLen) < 0) {
                         ESP_LOGW(TAG, "sendto: errno %d", errno);
                     } else if (kod) {
@@ -626,8 +657,8 @@ void NtpServer::serveLoop()
         }
     }
 
-    close(m_sock);
-    m_sock = -1;
+    /* The socket belongs to the owner (applySettings), which closes it once this
+     * handle is gone; only the handle is cleared here. */
     m_task = nullptr;
     ESP_LOGI(TAG, "responder stopped");
     vTaskDelete(nullptr);

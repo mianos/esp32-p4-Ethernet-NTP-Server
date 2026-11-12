@@ -456,6 +456,12 @@ polling an upstream SNTP server and **stepping** (not slewing) the system clock;
 | `CONFIG_LWIP_DHCP_MAX_NTP_SERVERS=2` | keep primary and backup from one lease |
 | `CONFIG_LWIP_SNTP_MAX_SERVERS=2`   | matching SNTP slot count |
 
+`NtpTime::start()` sets the re-poll interval to 60 s (`esp_sntp_set_sync_interval`)
+instead of lwIP's default hour, so the responder's freshness window
+([Serving NTP](#serving-ntp-udp123)) has fifteen polls of margin rather than
+none: with the default, one lost reply would flip the server to stratum 16 for a
+whole cycle.
+
 Ordering is the fiddly part, and both halves are load-bearing:
 
 1. `NtpTime::begin()` runs **before** `esp_eth_start()`, because lwIP only keeps
@@ -510,8 +516,16 @@ $ curl -s -X POST http://192.0.2.20/ntp/sync      # server silent for 5 s
 {"error":"no time sync from the upstream server","statusCode":504}
 ```
 
-Body size is capped at 4 KB, and string values are capped at 63 characters
-(`Settings::kMaxValueLen`); longer values are truncated and logged.
+Body size is capped at 4 KB, and string values at 63 characters
+(`Settings::kMaxValueLen`); longer values are truncated and logged. `hostname`
+has its own, smaller cap of 32 (`Settings::kMaxHostnameLen`), because
+`esp_netif_set_hostname()` refuses anything longer — and refuses it at boot,
+where the failure is fatal, so the limit is applied where the value is stored
+rather than where it is used. That name travels twice in the DHCP request
+(option 12 and ESP-IDF's vendor-class-identifier hook), which is why
+`sdkconfig.defaults` also raises `CONFIG_LWIP_DHCP_OPTIONS_LEN` to 128: at the
+default 69 the option area fits 14 characters, and anything longer makes lwIP
+drop an option and print an `LWIP_ERROR` on every boot.
 
 Settings live as one JSON blob in NVS (namespace `settings`, key `config`),
 which is why they survive a reboot. `Settings` is a mianesp `SettingsBase`
@@ -543,7 +557,7 @@ packet code does not change.
 
 | Clock state | LI | stratum | refid | A client does |
 |-------------|----|--------:|-------|---------------|
-| locked: synced less than 1 h ago | 0 | 3 | the upstream's address | trusts it |
+| locked: synced less than 15 min ago | 0 | 3 | the upstream's address | trusts it |
 | not locked | 3 | 16 | `INIT` | discards it |
 | over the rate limit | 0 | 0 | `RATE` | backs off |
 
@@ -553,9 +567,10 @@ two hops from the reference. Claiming one hop more than a well-behaved internet
 server over-states the distance; claiming one less under-states it, and a client
 weights a closer server more heavily. Under-claiming is the safe error.
 
-The 1 h window is what makes "locked" mean something. `ntp_synced` in `/healthz`
-only records that the clock was set at some point; a responder that keeps saying
-stratum 3 after its upstream went away is serving drift. Past the window it
+The window is what makes "locked" mean something: fifteen missed polls of
+`NtpTime`'s one-a-minute interval. `ntp_synced` in `/healthz` only records that
+the clock was set at some point; a responder that keeps saying stratum 3 after
+its upstream went away is serving drift. Past the window it
 answers `li=3 stratum=16` — RFC 5905's way of saying *do not use me* — and macOS
 `sntp` obliges:
 
@@ -575,16 +590,19 @@ is also how the `INIT` refid and the zero reference timestamp were verified.)
 
 ### On the wire
 
-- **Answers mode 3 only, version 3 or 4.** A mode 4 packet (another server), a
-  mode 1 packet, version 2, or anything shorter than 48 bytes gets silence —
-  answering a mode 4 is how two servers end up talking to each other forever.
+- **Answers mode 3 only, version 3 or 4, and replies in the request's version.**
+  A mode 4 packet (another server), a mode 1 packet, version 2, or anything
+  shorter than 48 bytes gets silence — answering a mode 4 is how two servers end
+  up talking to each other forever.
 - **Always 48 bytes out, never more than came in.** No MAC, no extension fields
   echoed, so this cannot be used as a reflector.
 - **Origin timestamp is the client's transmit field byte for byte**, including
   an all-zero one; receive and transmit are taken around the reply build.
 - **Precision `-20`** (about 1 µs — what this clock can distinguish), **root
   delay 1 ms**, **root dispersion 1 ms + 15 ppm × time since the last sync**, so
-  a stale clock advertises its staleness instead of hiding it.
+  a stale clock advertises its staleness instead of hiding it. The delay is the
+  one field that leans optimistic: it is a floor, not a measurement, because
+  lwIP exposes neither the upstream's root delay nor our round trip to it.
 - **refid** is the upstream's IPv4 address at stratum 3; a hostname upstream
   gets a stable FNV-1a of the name instead of RFC 5905's MD5 (which lwIP cannot
   give us the resolved bytes for). Above stratum 1 the field is informational —
@@ -694,10 +712,11 @@ Two things to know before concluding something is broken:
 - **`sntp` is five queries, not one.** Three back-to-back runs fit inside the
   16-packet burst; a tighter loop gets `RATE` and then a second of silence. Wait
   a few seconds — or run the test from another machine — before believing it.
-- **`/healthz` is the witness.** `ntp_requests` should climb by one per packet
-  you sent, `ntp_stratum`/`ntp_refid` should read 3 and the upstream's address
-  while locked, and `serve_ntp` should be `true`. If the counter climbs and the
-  client still fails, the problem is in the client or the header, not the path.
+- **`/healthz` is the witness.** `ntp_requests` climbs by one per packet it
+  actually answered (a KoD and a dropped packet do not count), `ntp_stratum` and
+  `ntp_refid` should read 3 and the upstream's address while locked, and
+  `serve_ntp` should be `true`. If the counter climbs and the client still
+  fails, the problem is in the client or the header, not the path.
 
 The honesty path is worth testing too, because it is the one that matters when
 something is wrong:
@@ -786,9 +805,9 @@ server) is a mianesp component.
   `sdkconfig` edit (run `idf.py menuconfig` → Component config → LWIP → SNTP).
 - **A client says `Server not synchronized` / `Clock select failed`**: the
   responder is answering `li=3 stratum=16`, deliberately — the clock is not
-  locked. Check `/healthz`: `ntp_synced` false, or `last_sync` older than an
-  hour. Fix the upstream, not the responder. Serving a 1970 clock with
-  `stratum=3` would be the actual bug.
+  locked. Check `/healthz`: `ntp_synced` false, or `last_sync` older than
+  fifteen minutes. Fix the upstream, not the responder. Serving a 1970 clock
+  with `stratum=3` would be the actual bug.
 - **`serve_ntp` is `false`**: `serveNtp` is `off`. If it is `on` and still
   `false`, the boot log has the reason: `bind udp/123: errno 98` means something
   else owns the port on the device, `cannot start the responder task` means heap
@@ -825,7 +844,8 @@ server) is a mianesp component.
 - **`/config` accepted an IPv6 `ntpServer` but the clock stays at 1970**: by
   design — see the warning in the log and [IPv6](#ipv6); lwIP's SNTP client has
   no AAAA path, so the upstream clock is IPv4-only.
-  old single-app table (`GET /firmware` says `"ota": false`). Flash once over
+- **`POST /firmware` answers `500` "no OTA partition"**: the board is still on
+  the old single-app table (`GET /firmware` says `"ota": false`). Flash once over
   USB with the current `sdkconfig.defaults`; `idf.py flash` writes the new table
   and `ota_data_initial.bin` for you.
 - **`POST /firmware` answers `409`**: the running image has not confirmed itself

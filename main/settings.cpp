@@ -1,6 +1,7 @@
 #include "settings.h"
 
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 
 #include "NvsStorageManager.h"
@@ -39,11 +40,17 @@ Settings::Settings(NvsStorageManager &nvs)
      * /config/reset. Safe to attach here: it only touches this object and the C
      * library. */
     onChange("tz", [this] { applyTimezone(); });
+    onChange("serveNtp", [this] {
+        m_serveNtpOn.store(m_serveNtp == "on", std::memory_order_relaxed);
+    });
 }
 
 void Settings::begin()
 {
     load();           // stored blob over the defaults (SettingsBase)
+    /* The onChange hook only fires for a field that actually changed, so a
+     * stored "on" (the default) would never reach the atomic without this. */
+    m_serveNtpOn.store(m_serveNtp == "on", std::memory_order_relaxed);
     applyTimezone();  // before the first timestamped log line
     log();            // "hostname=... tz=... timeSource=... ntpServer=..."
 }
@@ -88,10 +95,13 @@ void Settings::applyJson(const JsonWrapper &doc)
             }
             continue;
         }
-        if (value.size() > kMaxValueLen) {
-            ESP_LOGW(TAG, "'%s' truncated to %u characters", key,
-                     static_cast<unsigned>(kMaxValueLen));
-            value.resize(kMaxValueLen);
+        /* The hostname has a smaller cap than the rest: esp_netif_set_hostname()
+         * refuses more than 32 bytes, and at boot that refusal is fatal, so the
+         * limit has to be applied where the value is stored. */
+        const size_t limit = std::strcmp(key, "hostname") == 0 ? kMaxHostnameLen : kMaxValueLen;
+        if (value.size() > limit) {
+            ESP_LOGW(TAG, "'%s' truncated to %u characters", key, static_cast<unsigned>(limit));
+            value.resize(limit);
         }
         capped.AddItem(key, value);
     }

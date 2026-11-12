@@ -9,10 +9,10 @@ is on the wire, including the packets a real client never sends. It needs no
 dependencies beyond python3.
 
 One warning that will otherwise look like a bug: the burst section deliberately
-trips the rate limiter for your address (8 burst, then 1 packet per 2 s). Run
-this script no more often than about once a minute, and avoid running `sntp`
-right after it -- macOS sntp sends five queries per invocation, so back-to-back
-runs answer with a RATE kiss-of-death and then silence for a second.
+trips the rate limiter for your address (a 16-packet burst, then 1 packet per
+2 s). Run this script no more often than about once a minute, and avoid running
+`sntp` right after it -- macOS sntp sends five queries per invocation, so
+back-to-back runs answer with a RATE kiss-of-death and then silence for a second.
 """
 import argparse
 import socket
@@ -67,6 +67,7 @@ def main():
 
     print("== a request a client would send ==")
     show("mode 3, vn 4", ask(args.host, request()))
+    show("mode 3, vn 3 (reply carries vn 3)", ask(args.host, request(version=3)))
 
     print("\n== requests that must stay silent ==")
     show("mode 4 (server)", ask(args.host, request(mode=4)))

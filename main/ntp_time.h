@@ -30,6 +30,7 @@
 #include "esp_event.h"
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "settings.h"
 
@@ -73,8 +74,11 @@ public:
      * while the client has no server or is not running. */
     std::optional<std::string> upstreamName() const;
 
-    std::string          sourceName() const { return Settings::timeSourceName(m_source); }
-    Settings::TimeSource source() const { return m_source; }
+    std::string sourceName() const
+    {
+        return Settings::timeSourceName(m_source.load(std::memory_order_relaxed));
+    }
+    Settings::TimeSource source() const { return m_source.load(std::memory_order_relaxed); }
 
 private:
     static constexpr const char *TAG = "ntp_time";
@@ -87,8 +91,27 @@ private:
     static void onSyncEvent(void *arg, esp_event_base_t base,
                             int32_t event_id, void *event_data);
 
-    Settings::TimeSource   m_source  = Settings::TimeSource::Off;
-    bool                   m_running = false;
-    std::string            m_server;
-    std::atomic<long long> m_last_sync{0};
+    /* The upstream name is read on the responder task (every reply, for the
+     * refid) while two other tasks rewrite it: the HTTP task on a POST /config
+     * restart, the event task on a DHCP renewal. A std::string cannot be read
+     * across that -- stop() clears it and frees the buffer for any name past
+     * libstdc++'s 15-char SSO limit -- so it lives behind m_serverLock. The two
+     * scalars are atomics instead. */
+    std::string serverCopy() const;
+    void        setServer(const std::string &server);
+
+    /* lwIP's sntp_setservername() keeps the pointer it is given rather than
+     * copying it, so what is handed to esp_netif_sntp_init() is this buffer and
+     * not m_server: written only in start(), i.e. only after stop() has stopped
+     * the client that was reading the previous contents. */
+    static constexpr size_t kMaxServerName = 64;
+
+    std::atomic<Settings::TimeSource> m_source{Settings::TimeSource::Off};
+    std::atomic<bool>                 m_running{false};
+    /* Taken with the singleton and never given back: this object lives as long
+     * as the device. */
+    mutable SemaphoreHandle_t         m_serverLock = xSemaphoreCreateMutex();
+    std::string                       m_server;            /* guarded by m_serverLock */
+    char                              m_lwipServer[kMaxServerName] = {};
+    std::atomic<long long>            m_last_sync{0};
 };

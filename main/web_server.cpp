@@ -245,8 +245,12 @@ esp_err_t NtpWebServer::config_post_handler(httpd_req_t *req)
     Settings         &settings        = Settings::instance();
     const std::string hostname_before = settings.hostname();
 
+    /* NVS is flash: only pay for a write when the config actually changed. */
+    const std::string before = settings.toJson().ToString();
     settings.applyJson(doc);
-    settings.save();
+    if (settings.toJson().ToString() != before) {
+        settings.save();
+    }
     settings.log();
 
     if (settings.hostname() != hostname_before) {

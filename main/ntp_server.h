@@ -36,7 +36,7 @@
 struct TimeReference {
     bool     locked   = false; /* false => stratum 16 + leap indicator 3 */
     uint8_t  stratum  = 16;    /* 1 with a real reference; 3 from upstream SNTP */
-    uint32_t refId    = 0;     /* NTP reference id, network order */
+    uint32_t refId    = 0;     /* NTP reference id, host order: store32() writes it */
     time_t   lastSync = 0;     /* when the reference last agreed with us */
 };
 

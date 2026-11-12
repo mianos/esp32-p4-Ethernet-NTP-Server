@@ -45,3 +45,11 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_LWIP_DHCP_GET_NTP_SRV=y
 CONFIG_LWIP_DHCP_MAX_NTP_SERVERS=2
 CONFIG_LWIP_SNTP_MAX_SERVERS=2
+
+# The DHCP request has to carry the hostname twice (option 12, and ESP-IDF's
+# vendor-class-identifier hook falls back to it), plus the client id: the option
+# area needs 41 + 2*strlen(hostname) bytes. The default 69 (used when
+# LWIP_DHCP_DISABLE_VENDOR_CLASS_ID is on) fits a 14-character name, so anything
+# longer makes lwIP drop an option and print an LWIP_ERROR at every boot --
+# which is what a 32-character hostname (Settings::kMaxHostnameLen) does.
+CONFIG_LWIP_DHCP_OPTIONS_LEN=128
