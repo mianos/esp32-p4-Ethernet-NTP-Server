@@ -17,10 +17,15 @@
  *   3. esp_netif_init() and the default event loop. EthernetLink registers
  *      handlers on that loop and creates its netif on that stack, so both come
  *      first.
- *   4. NtpTime::begin(). Arms the SNTP client before the first DHCP DISCOVER:
+ *   4. GpsTime::begin(). UART1 and the PPS interrupt: the stratum-1 reference,
+ *      armed before anything asks it for the time. It needs no network, so it
+ *      can come first, and a board with no receiver on those pins simply never
+ *      locks instead of failing here.
+ *   5. NtpTime::begin(). Arms the SNTP client before the first DHCP DISCOVER:
  *      lwIP only keeps an option-42 NTP server if sntp_servermode_dhcp() is on
- *      when the ACK is processed.
- *   5. EthernetLink::begin(). Driver, PHY diagnostic, netif, handlers, status
+ *      when the ACK is processed. It yields the clock to the GPS when
+ *      timeSource is "gps".
+ *   6. EthernetLink::begin(). Driver, PHY diagnostic, netif, handlers, status
  *      task, esp_eth_start(). Everything after that is event-driven: link up,
  *      the lease (which starts the web server and the responder and confirms an
  *      OTA'd image), then IPv6 addresses as DAD and SLAAC deliver them.
@@ -37,6 +42,7 @@
 #include "nvs_flash.h"
 
 #include "eth_link.h"
+#include "gps_time.h"
 #include "ntp_time.h"
 #include "settings.h"
 
@@ -63,13 +69,17 @@ void initNvs()
 
 extern "C" void app_main()
 {
-    ESP_LOGI(TAG, "esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, upstream clock");
+    ESP_LOGI(TAG, "esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, NTP from GPS/PPS or upstream");
 
     initNvs();
     Settings::instance().begin();
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* The receiver's UART and PPS line first: a fix takes tens of seconds to
+     * settle, so the sooner it is listening the sooner the clock is real. */
+    ESP_ERROR_CHECK(GpsTime::instance().begin());
 
     /* Armed before the first DHCP DISCOVER: lwIP only keeps an option-42 NTP
      * server if sntp_servermode_dhcp() is on when the ACK is processed. */

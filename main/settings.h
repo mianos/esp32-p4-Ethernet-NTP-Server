@@ -34,13 +34,14 @@ public:
      * value of that size must never reach NVS in the first place. */
     static constexpr size_t kMaxHostnameLen = 32;
 
-    /* Where the system clock gets its time from. Test scaffolding: the real
-     * disciplining path (GPS/PPS, or the responder trusting its own reference)
-     * replaces it later. */
+    /* Where the system clock gets its time from. "gps" is the stratum-1 path:
+     * the u-blox receiver on UART1, disciplined by its PPS line (gps_time.cpp).
+     * The others are the upstream SNTP client. */
     enum class TimeSource {
         Off,    // leave the clock alone: it runs from reset
         Dhcp,   // ask the DHCP server for option 42
         Static, // poll ntpServer()
+        Gps,    // u-blox over UART plus PPS
     };
 
     static Settings &instance();
@@ -57,10 +58,17 @@ public:
      * always serves UTC regardless of it. */
     const std::string &tz() const { return m_tz; }
 
-    /* The stored timeSource text: "off", "dhcp", "static", or junk left by a
-     * hand-edited blob (timeSource() maps that to Off). */
+    /* The stored timeSource text: "off", "dhcp", "static", "gps", or junk left
+     * by a hand-edited blob (timeSource() maps that to Off). */
     const std::string &timeSourceText() const { return m_timeSource; }
-    TimeSource         timeSource() const;
+
+    /* The parsed answer, not the string: the responder task asks this on every
+     * reply (to pick the TimeRef) while POST /config rewrites the string above
+     * on the HTTP task. Reading a std::string across that is a data race -- and
+     * a 20-character junk value would be a heap buffer being freed under the
+     * reader -- so the enum lives in an atomic, seeded in begin() and refreshed
+     * by the onChange hook, exactly like serveNtp() below. */
+    TimeSource timeSource() const { return m_timeSourceEnum.load(std::memory_order_relaxed); }
     static const char *timeSourceName(TimeSource source);
 
     /* Upstream NTP server for timeSource "static"; empty when unset. A hostname
@@ -96,6 +104,15 @@ private:
     std::string m_timeSource = "dhcp";
     std::string m_ntpServer;
     std::string m_serveNtp   = "on";
+
+    /* "off", "dhcp", "static", "gps": anything else is Off. Used to seed
+     * m_timeSourceEnum in begin() and on every change. */
+    static TimeSource parseTimeSource(const std::string &text);
+
+    /* See timeSource(). Seeded in begin() and refreshed by the constructor's
+     * onChange hook, for the same reason m_serveNtpOn exists: the reader and the
+     * writer are on different tasks. */
+    std::atomic<TimeSource> m_timeSourceEnum{TimeSource::Dhcp};
 
     /* The parsed answer, because the two sides are on different tasks: the
      * responder asks serveNtp() from its Ethernet event handler, while POST

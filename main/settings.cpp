@@ -40,6 +40,9 @@ Settings::Settings(NvsStorageManager &nvs)
      * /config/reset. Safe to attach here: it only touches this object and the C
      * library. */
     onChange("tz", [this] { applyTimezone(); });
+    onChange("timeSource", [this] {
+        m_timeSourceEnum.store(parseTimeSource(m_timeSource), std::memory_order_relaxed);
+    });
     onChange("serveNtp", [this] {
         m_serveNtpOn.store(m_serveNtp == "on", std::memory_order_relaxed);
     });
@@ -48,20 +51,25 @@ Settings::Settings(NvsStorageManager &nvs)
 void Settings::begin()
 {
     load();           // stored blob over the defaults (SettingsBase)
-    /* The onChange hook only fires for a field that actually changed, so a
-     * stored "on" (the default) would never reach the atomic without this. */
+    /* The onChange hooks only fire for a field that actually changed, so a
+     * stored value equal to the default would never reach the atomics without
+     * this. */
+    m_timeSourceEnum.store(parseTimeSource(m_timeSource), std::memory_order_relaxed);
     m_serveNtpOn.store(m_serveNtp == "on", std::memory_order_relaxed);
     applyTimezone();  // before the first timestamped log line
     log();            // "hostname=... tz=... timeSource=... ntpServer=..."
 }
 
-Settings::TimeSource Settings::timeSource() const
+Settings::TimeSource Settings::parseTimeSource(const std::string &text)
 {
-    if (m_timeSource == "dhcp") {
+    if (text == "dhcp") {
         return TimeSource::Dhcp;
     }
-    if (m_timeSource == "static") {
+    if (text == "static") {
         return TimeSource::Static;
+    }
+    if (text == "gps") {
+        return TimeSource::Gps;
     }
     return TimeSource::Off;
 }
@@ -71,6 +79,7 @@ const char *Settings::timeSourceName(TimeSource source)
     switch (source) {
     case TimeSource::Dhcp:   return "dhcp";
     case TimeSource::Static: return "static";
+    case TimeSource::Gps:    return "gps";
     case TimeSource::Off:    break;
     }
     return "off";

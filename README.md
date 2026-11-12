@@ -3,8 +3,9 @@
 An NTP server on the ESP32-P4: **Ethernet bring-up + DHCP + ping**, the device's
 HTTP surface (`/healthz`, `/config`, `/config/reset`, `/ntp/sync`) using the
 same REST conventions as the other
-[mianesp](https://github.com/mianos/mianesp) devices, a test-mode clock that
-steps itself from the upstream NTP server the DHCP server hands out (option 42),
+[mianesp](https://github.com/mianos/mianesp) devices, **a stratum-1 reference of
+its own** — a u-blox LEA-8 on UART1, disciplined by its PPS line, with the
+upstream SNTP client kept as the other source ([GPS](#gps-ublox-lea-8--pps)) —
 and **a responder that serves that clock to the LAN on UDP/123** — over IPv4 and
 IPv6, with a stratum that admits what it does and does not know
 ([Serving NTP](#serving-ntp-udp123)). The HTTP surface and settings are
@@ -63,6 +64,16 @@ refid=192.0.2.1`, and macOS `sntp` takes it
 `li=3 stratum=16 refid=INIT` and `sntp` refuses it with `Server not
 synchronized` — which is the point ([Serving NTP](#serving-ntp-udp123)).
 
+With the u-blox receiver wired (PPS on GPIO14, UART1 on 15/16) and
+`timeSource=gps`, it is a stratum-1 server instead: `li=0 stratum=1
+refid=GPS` over both families, locked 1.4 s after boot — before the lease
+lands — and `/healthz` reported `gps_fix:3`, `gps_sats:5`,
+`gps_pps_age_ms:301`, `gps_offset_us:29` while this was being written. Asked at
+the same moment, macOS `sntp` put the board and the upstream server 2 ms apart
+(`+0.136669 ± 0.001914` vs `+0.138697 ± 0.006242`): the two references agree to
+within the LAN's own measurement noise, and the board's clock is the one that is
+not drifting ([GPS](#gps-ublox-lea-8--pps)).
+
 ## Build / flash
 
 ```sh
@@ -114,19 +125,21 @@ native USB-Serial/JTAG is not on that connector, which is why
 6. Starts an HTTP server on port 80 with an address on the first DHCP lease
    (see [HTTP API](#http-api)). `esp_http_server` binds `in6addr_any` once lwIP
    has IPv6, so that one server is reachable over both families.
-7. Runs an SNTP **client** (`NtpTime`) that steps the clock once the lease
-   arrives — from the server DHCP option 42 named, or from one configured by
-   hand — so the NTP responder has real time to serve. See
-   [Clock (test mode)](#clock-test-mode).
+7. Starts a u-blox receiver's reference — UART1 plus the PPS interrupt — and,
+   when `timeSource=gps`, serves its clock: a stratum-1 reference on the board
+   itself ([GPS](#gps-ublox-lea-8--pps)). With `timeSource=dhcp`/`static` the
+   SNTP **client** (`NtpTime`) steps the clock instead, from the server DHCP
+   option 42 named or one configured by hand, so the responder still has real
+   time to serve ([Clock (test mode)](#clock-test-mode)).
 
 The app code is C++ (`.cpp` + classes) on top of those components: `Settings`
 is a `settingsbase`/`SettingsBase` subclass, the HTTP handlers are
-`NtpWebServer : webserver`/`WebServer`, and `Settings`, `NtpTime`, `NtpServer`,
-`NtpWebServer` and `EthernetLink` are singletons reached through `instance()`,
-with httpd's and esp_event's C callbacks as static members that take the
-instance from the `arg` pointer. `webserver` is the network-agnostic base — the
-WiFi endpoints (`/reset`, `/set_hostname`) live in `wifiwebserver`, which this
-firmware does not pull, because the P4 has no radio.
+`NtpWebServer : webserver`/`WebServer`, and `Settings`, `NtpTime`, `GpsTime`,
+`NtpServer`, `NtpWebServer` and `EthernetLink` are singletons reached through
+`instance()`, with httpd's, esp_event's and the GPIO interrupts' C callbacks as
+static members that take the instance from the `arg` pointer. `webserver` is the
+network-agnostic base — the WiFi endpoints (`/reset`, `/set_hostname`) live in
+`wifiwebserver`, which this firmware does not pull, because the P4 has no radio.
 
 `EthernetLink` is also where the C idioms go: the board's pads are one
 `constexpr RmiiPins kEthPins` table copied in by `applyPinMap()`, the MAC and
@@ -143,29 +156,42 @@ boot sequence reads as five calls because of it.
 ## Expected log (captured from this board)
 
 ```
-I (375) eth_demo: esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, upstream clock
-I (385) settings: hostname=esp32p4-ntp tz=AEST-10AEDT,M10.1.0,M4.1.0/3 timeSource=dhcp ntpServer=(unset)
-I (385) ntp_time: time source: dhcp (upstream from option 42, once the lease lands)
-I (935) eth_demo: MDIO addr 1: PHY ID 0x02430c54 (IP101 = 0x0243xxxx)
-I (935) eth_demo: phy: bmsr=0x7849 link=0 autoneg_done=0 bmcr=0x3100
-I (935) esp_eth.netif.netif_glue: 02:00:5e:00:53:01
-I (935) esp_eth.netif.netif_glue: ethernet attached to netif
-I (2945) eth_demo: Ethernet started
-I (2945) eth_demo: link up   (MAC 02:00:5e:00:53:01)
-I (2945) eth_demo: requesting DHCP lease ...
-I (4385) eth_demo: IPv6 link-local: fe80::200:5eff:fe00:5301
-I (4385) eth_demo: http over IPv6: http://[fe80::200:5eff:fe00:5301]/healthz
-I (7445) esp_netif_handlers: eth ip: 192.0.2.20, mask: 255.255.255.0, gw: 192.0.2.1
-I (7445) eth_demo: DHCP lease: ip 192.0.2.20  mask 255.255.255.0  gw 192.0.2.1
-I (7445) eth_demo: ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP
-I (7455) ntp_time: upstream time server: 192.0.2.1
-I (7455) WebServer: Starting server on port: 80
-I (7465) eth_demo: http: http://192.0.2.20/healthz  http://192.0.2.20/config
-I (7515) eth_demo: OTA image confirmed: rollback to the previous slot cancelled
-I (7915) ntp_time: clock set from 192.0.2.1: 2026-11-11T17:24:10+1100
-I (11385) eth_demo: IPv6 global: 2001:db8:1:1:200:5eff:fe00:5301
-I (11385) eth_demo: http over IPv6: http://[2001:db8:1:1:200:5eff:fe00:5301]/healthz
+I (366) eth_demo: esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, NTP from GPS/PPS or upstream
+I (376) settings: hostname=esp32p4-ntp tz=AEST-10AEDT,M10.1.0,M4.1.0/3 timeSource=gps ntpServer=(unset) serveNtp=on
+I (376) gps_time: UART1 9600 8N1 (esp TX 15 -> module RX, esp RX 16 <- module TX), PPS on GPIO14
+I (386) ntp_time: time source: gps (u-blox over UART, PPS on GPIO14)
+I (516) gps_time: UBX frames arriving at 9600 baud
+I (516) gps_time: module accepted the configuration (NAV-PVT at 1 Hz, NMEA off)
+I (926) eth_demo: MDIO addr 1: PHY ID 0x02430c54 (IP101 = 0x0243xxxx)
+I (926) eth_demo: phy: bmsr=0x7849 link=0 autoneg_done=0 bmcr=0x3100
+I (926) esp_eth.netif.netif_glue: 02:00:5e:00:53:01
+I (926) esp_eth.netif.netif_glue: ethernet attached to netif
+I (1476) gps_time: 3D fix, 4 satellites, UTC 2026-11-13T10:36:47+1100 (nano -114001)
+I (1476) gps_time: clock set from the GPS (2026-11-13T10:36:47+1100): CLOCK_REALTIME now agrees with what the responder serves
+I (1476) gps_time: locked: stratum 1 from here on (PPS edges so far: 1)
+I (3236) eth_demo: Ethernet started
+I (3236) eth_demo: link up   (MAC 02:00:5e:00:53:01)
+I (3236) eth_demo: requesting DHCP lease ...
+I (4376) eth_demo: IPv6 link-local: fe80::200:5eff:fe00:5301
+I (4376) eth_demo: http over IPv6: http://[fe80::200:5eff:fe00:5301]/healthz
+I (7736) esp_netif_handlers: eth ip: 192.0.2.20, mask: 255.255.255.0, gw: 192.0.2.1
+I (7736) eth_demo: DHCP lease: ip 192.0.2.20  mask 255.255.255.0  gw 192.0.2.1
+I (7736) eth_demo: ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP
+I (7746) WebServer: Starting server on port: 80
+I (7756) eth_demo: http: http://192.0.2.20/healthz  http://192.0.2.20/config
+I (7766) ntp_server: serving on udp/123 (dual-stack), reference: GPS/PPS, 3D fix, 5 satellites, stratum 1
+I (11376) eth_demo: IPv6 global: 2001:db8:1:1:200:5eff:fe00:5301
+I (11376) eth_demo: http over IPv6: http://[2001:db8:1:1:200:5eff:fe00:5301]/healthz
 ```
+
+The clock is real before the network is: the receiver has a fix at 1.5 s and the
+first PPS edge is paired with it in the same breath, so by the time the lease
+arrives the responder's opening line already says `stratum 1`. `nano` is the
+receiver's own sub-second offset for that solution — a few hundred microseconds
+either side of zero, which is the evidence that a NAV-PVT and a PPS edge describe
+the same instant. On a boot with `timeSource=dhcp` instead, the GPS still runs
+and logs the fix, it just does not steer anything, and the responder starts at
+`stratum 16` until SNTP has set the clock.
 
 The addresses, MAC and IPv6 prefix in this log are documentation values rather
 than what this LAN handed out: `192.0.2.0/24` is TEST-NET-1 (RFC 5737),
@@ -288,10 +314,16 @@ lwIP's build:
 |-------|------:|--------------:|
 | ESP32-P4, IPv6 off | 495,328 | — |
 | ESP32-P4, IPv6 + SLAAC | 533,552 | +38,224 (+7.7%) |
-| ESP32-P4, IPv6 + SLAAC + NTP responder (this firmware) | 539,600 | +44,272 (+8.9%) |
+| ESP32-P4, IPv6 + SLAAC + NTP responder | 539,600 | +44,272 (+8.9%) |
+| ESP32-P4, the same + GPS reference (this firmware) | 583,216 | +87,888 (+17.7%) |
 | classic ESP32 (`modswitch`, mianesp stack), IPv6 off | 938,896 | — |
 | classic ESP32, IPv6 on as IDF ships it | 969,440 | +30,544 (+3.3%) |
 | classic ESP32, IPv6 + SLAAC | 969,456 | +30,560 (+3.3%) |
+
+The GPS row is +43 KB, and almost none of it is `gps_time.cpp`, whose own code is
+under 4 KB. `esp_driver_uart`'s `uart.c` alone is 31 KB at this toolchain's `-Og`,
+and the GPIO ISR service adds the rest — driver code this firmware did not
+previously link. That is 2.5% of a 1.7 MB app slot for a stratum-1 reference.
 
 What that says:
 
@@ -335,7 +367,7 @@ httpd's built-in plain-text page.
 | GET    | `/config`       | current settings                                 |
 | POST   | `/config`       | apply any subset of the keys, persist, echo back |
 | POST   | `/config/reset` | restore compiled-in defaults and persist         |
-| POST   | `/ntp/sync`     | force an upstream poll, wait up to 5 s for it    |
+| POST   | `/ntp/sync`     | force an upstream poll, wait up to 5 s for it (with `timeSource=gps`: report the lock) |
 | GET    | `/firmware`     | build + slot info for the running image          |
 | POST   | `/firmware`     | write the body into the inactive OTA slot, reboot into it |
 
@@ -366,6 +398,12 @@ RFC 5905 reachability register: non-zero means the server has answered. `ip` is
 omitted until the DHCP lease lands, and `ipv6_linklocal` / `ipv6_global` are
 omitted until each address exists.
 
+With `timeSource=gps` the same object answers the same question about the other
+source: `ntp_server` is `null` (nothing is polled, so there is no upstream),
+`ntp_synced` is the receiver's lock, and `gps_fix` (u-blox fix type: 0 none,
+2 2D, 3 3D), `gps_sats`, `gps_pps_age_ms` and `gps_offset_us` describe the
+receiver itself — see [GPS](#gps-ublox-lea-8--pps) for what those numbers mean.
+
 The last four fields are the responder's: `serve_ntp` is whether it is
 listening, `ntp_stratum` / `ntp_refid` are what a reply would claim *right now*
 (so they flip to `16` / `"INIT"` the moment the clock stops being fresh), and
@@ -379,7 +417,7 @@ are not registered are ignored, so an older/newer client will not break it:
 |------------|----------------------------------|--------|
 | `hostname` | `esp32p4-ntp`                    | netif hostname, and the name the DHCP client sends as option 12. A change reaches the lease at the next renewal. |
 | `tz`       | `AEST-10AEDT,M10.1.0,M4.1.0/3`   | POSIX TZ used by `localtime()` for `/healthz`. Presentation only — NTP always serves UTC. |
-| `timeSource` | `dhcp`                         | `dhcp` takes the upstream NTP server from DHCP option 42, `static` polls `ntpServer`, `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
+| `timeSource` | `dhcp`                         | `dhcp` takes the upstream NTP server from DHCP option 42, `static` polls `ntpServer`, `gps` disciplines the clock from the u-blox receiver over UART plus its PPS line ([GPS](#gps-ublox-lea-8--pps)), `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
 | `ntpServer` | *(empty)*                       | Upstream NTP host or address, used only when `timeSource` is `static`. An IPv6 literal is stored but cannot sync — lwIP's SNTP client resolves A records only ([IPv6](#ipv6)). |
 | `serveNtp` | `on`                            | `off` stops the UDP/123 responder within a second and starts it again on `on`, no reboot. Serving an unlocked clock is safe by construction: it answers stratum 16 with LI 3, which tells clients to ignore it. |
 
@@ -446,9 +484,11 @@ object is recompiled; use `version` (the git describe stamp) to identify a build
 ## Clock (test mode)
 
 There is no RTC on this board, so until something disciplines it `time()` is
-1970 + uptime — useless for an NTP *server*. `NtpTime` fixes that for now by
-polling an upstream SNTP server and **stepping** (not slewing) the system clock;
-`sdkconfig.defaults` is the map:
+1970 + uptime — useless for an NTP *server*. Two things fix that now: the GPS
+above (the real reference, `timeSource=gps`) and `NtpTime`, the upstream SNTP
+client, which is what `timeSource=dhcp` or `static` still uses — and what runs
+when there is no receiver on the pins. It polls and **steps** (not slews) the
+system clock; `sdkconfig.defaults` is the map:
 
 | Setting                            | Why |
 |------------------------------------|-----|
@@ -488,14 +528,15 @@ $ curl -s -X POST -H 'Content-Type: application/json' \
 ```
 
 With `timeSource=off` (or `static` and an empty `ntpServer`) `/ntp/sync` answers
-`409 {"error":"no time source: set timeSource to dhcp or static"}`; a poll that
-gets no answer within 5 s is `504 {"error":"no time sync from the upstream
+`409 {"error":"no time source: set timeSource to dhcp, static or gps"}`; a poll
+that gets no answer within 5 s is `504 {"error":"no time sync from the upstream
 server"}`. Names are resolved with the DNS server from the lease, so
 `ntpServer` can be a hostname.
 
-This is scaffolding: the real discipline path (GPS/PPS, or serving from a
-disciplined source) replaces it, and the responder must not serve a clock that
-is still slewing — hence the step.
+This path is the fallback, not the reference: it steps the clock from somebody
+else's server and cannot say how far away that server is. The stratum-1 path is
+the GPS ([GPS](#gps-ublox-lea-8--pps)), and the responder must not serve a clock
+that is still slewing — hence the step here rather than a slew.
 
 Errors (all captured on this unit):
 
@@ -511,7 +552,7 @@ $ curl -s -X POST http://192.0.2.20/config
 $ curl -s -X POST --data-binary @big.json http://192.0.2.20/config
 {"error":"request body too large","statusCode":413}
 $ curl -s -X POST http://192.0.2.20/ntp/sync      # with timeSource=off
-{"error":"no time source: set timeSource to dhcp or static","statusCode":409}
+{"error":"no time source: set timeSource to dhcp, static or gps","statusCode":409}
 $ curl -s -X POST http://192.0.2.20/ntp/sync      # server silent for 5 s
 {"error":"no time sync from the upstream server","statusCode":504}
 ```
@@ -539,25 +580,177 @@ The dependencies are mianesp components pulled over git (`main`), plus
 build downloads them into `managed_components/` (git-ignored), and it needs an
 SSH key with read access to `mianos/mianesp`.
 
+## GPS (u-blox LEA-8 + PPS)
+
+The reference the server exists for. `timeSource=gps` makes the board a
+stratum-1 server: the date and time come from a u-blox LEA-8 over UART, the second
+boundary from its timepulse, and `CLOCK_REALTIME` is slewed to match.
+
+| Signal     | GPIO | Direction                          | Carries |
+|------------|------|------------------------------------|---------|
+| module TX  | 16   | into the P4 (UART1 RX)             | `UBX-NAV-PVT`, once a second: UTC date/time, fix type, satellite count |
+| module RX  | 15   | out of the P4 (UART1 TX)           | configuration — eight short frames at boot |
+| module PPS | 14   | into the P4, rising edge, interrupt | the top of the second |
+
+UART1 at 9600 8N1, no flow control, which is the module's factory default. The
+three pins are `kTxPin` / `kRxPin` / `kPpsPin` at the top of `main/gps_time.cpp`;
+nothing else in the firmware touches them.
+
+### Which wire does what
+
+The UART says *which* second it is. The PPS says *when* that second started. That
+split is the whole accuracy story, and it is why the receiver is not simply read
+over the serial port:
+
+- a NAV-PVT frame is 92 bytes and arrives a few tens of milliseconds after the
+  boundary. It cannot tell you where in the second you are, so a server built on
+  the UART alone would be tens of milliseconds out — worse than the upstream SNTP
+  clock it would be replacing;
+- the PPS edge is the other half: the interrupt handler stamps
+  `esp_timer_get_time()` as it fires, so what limits it is interrupt latency
+  (microseconds), not the frame time.
+
+Walk through one second:
+
+1. **Edge.** The ISR stamps the monotonic clock and bumps a counter. It runs from
+   IRAM (`CONFIG_ESP_TIMER_IN_IRAM` makes the counter IRAM-safe), so an OTA write
+   disabling the flash cache for a few milliseconds cannot turn an edge into a
+   crash. Edges less than 0.5 s apart are ignored: that is header-pin bounce, or a
+   module reconfiguring its pulse, not a second passing.
+2. **Frame.** NAV-PVT arrives, the checksum is verified (a frame that fails it is
+   dropped, never guessed at), and if the newest edge is under 900 ms old and has
+   not already been paired, the two become an **anchor**: `(UTC second, monotonic
+   instant)`.
+3. **Serve.** Every timestamp the responder puts on the wire is the anchor plus
+   elapsed monotonic time. `GpsTimeRef::now()` does not read `CLOCK_REALTIME` at
+   all, so an `adjtime()` correction in flight can never reach a reply, and two
+   replies cannot go backwards.
+4. **Steer.** The same anchor corrects the system clock, because the log lines,
+   `/healthz` and the HTTP `Date` header read it: a step when there is no previous
+   fix or the offset is over 250 ms, otherwise `adjtime()` with the residual — a
+   few tens of microseconds a second, which IDF applies in seconds, not minutes.
+
+The 900 ms pairing window is the honest part of step 2. If a frame arrives later
+than that, it is not describing the edge that was stamped — the edge was missed,
+or the receiver is late — and pairing it anyway would put the anchor a whole
+second out. Such a second is skipped instead; if that keeps happening, the lock
+expires, which is the correct answer.
+
+### What the module has to be set to
+
+The firmware configures the receiver over UART at every boot, with
+`UBX-CFG-MSG`: `NAV-PVT` once a second on UART1, and the NMEA sentences (GGA,
+GLL, GSA, GSV, RMC, VTG, ZDA) off so the line carries only what is read here.
+
+It is deliberately **not** followed by `UBX-CFG-CFG`: saving that to the
+receiver's flash would outlive the firmware and take the module's own defaults
+away from `u-center`. Eight short frames per boot is the cheaper trade.
+
+The timepulse is left at the module's default — 1 Hz, UTC-aligned, rising edge at
+the top of the second. If it has been changed with `u-center`, `UBX-CFG-TP5` wants
+`syncMode` UTC and a 1 s period; a pulse that is not on the UTC boundary would
+make this server confidently wrong, which is the one failure worth checking first.
+
+**Baud rate.** 9600 is tried first. With no valid UBX frame in 4 s the firmware
+moves to 38400, 115200, 57600 and 19200, then starts over — a receiver that has
+been through `u-center` once is usually not on 9600 any more, and sweeping five
+baud rates at boot is cheaper for everyone than a datasheet. The rate that
+produced frames is logged.
+
+### Lock, holdover, and what a client sees
+
+| Clock state | LI | stratum | refid | A client does |
+|-------------|----|--------:|-------|---------------|
+| fix ≥ 2D, valid time, PPS edge under 3 s old | 0 | 1 | `GPS` | trusts it |
+| anything else: no fix, no edge, edge stale | 3 | 16 | `INIT` | discards it |
+
+Three missed edges is the entire holdover, on purpose. Without the PPS the second
+boundary is unknown and the error grows at the crystal's rate; the UART could
+still date a second, but only to within its own frame latency, and a server that
+claims stratum 1 with tens of milliseconds of slop is worse than one that says
+"do not use me". A module that stops pulsing demotes this server within three
+seconds, loudly.
+
+There is no silent fallback to SNTP either. `timeSource` names the authoritative
+source; if that source is unhealthy the answer is stratum 16, not a stratum whose
+meaning quietly changed. Switching back is one `POST /config`, and it takes effect
+without a reboot: `NtpServer` holds a single `TimeRef` that asks `Settings` on
+every call and forwards to the GPS or the upstream implementation, so the serving
+task never has a pointer swapped under it.
+
+A receiver that is absent, mis-wired or talking a protocol this does not parse is
+a log line and a stratum-16 reference — not a boot failure. That matters on a
+headless board whose only other interface is the RJ45.
+
+### Accuracy, and the parts that are not
+
+- **The edge** is stamped in the interrupt handler, so the limit is interrupt
+  latency: single-digit microseconds. Not sub-microsecond — that needs a hardware
+  counter, which the P4 has, and which is the next step below.
+- **Between edges** the anchor is extended with `esp_timer_get_time()` (1 µs
+  resolution, ~15 ppm crystal), so the worst case is a few tens of microseconds
+  just before the next edge, and it is corrected at every edge rather than
+  accumulating.
+- **The reply stamps** (`t2`/`t3`) are still software: taken after `recvfrom()` and
+  before `sendto()`, so a client also measures the LAN path and scheduler latency
+  ([Serving NTP](#serving-ntp-udp123) is explicit about that). A disciplined
+  reference removes the *clock* error; it cannot remove the *transport* error.
+- **Leap seconds** are the receiver's job. The u-blox UTC fields already include
+  them, so the epoch built here is the same one lwIP's SNTP client sets, LI is 0,
+  and nothing is smeared: a leap second shows up as the module stepping its UTC,
+  which the next anchor follows.
+- **What a client is told about the error** uses the same arithmetic as the
+  upstream reference: 1 ms root delay, dispersion growing at 15 ppm with the age
+  of the last anchor — 15 µs after a second, 45 µs at the edge of the three-second
+  lock window. The clock is right; the dispersion is the number that says how
+  right.
+
+### Enabling it, and what it looks like
+
+```console
+$ curl -s -X POST -H 'Content-Type: application/json' \
+       -d '{"timeSource":"gps"}' http://192.0.2.20/config
+{"hostname":"esp32p4-ntp","tz":"...","timeSource":"gps","ntpServer":"","serveNtp":"on"}
+
+$ curl -s http://192.0.2.20/healthz
+{ ... "ntp_source":"gps","ntp_server":null,"ntp_synced":true,"last_sync":1794526208,
+  "gps_fix":3,"gps_sats":5,"gps_pps_age_ms":775,"gps_offset_us":30,
+  "serve_ntp":true,"ntp_stratum":1,"ntp_refid":"GPS","ntp_requests":17}
+
+$ curl -s -X POST http://192.0.2.20/ntp/sync     # nothing to poll: it reports the lock
+{"synced":true,"time":"2026-11-13T10:30:25+1100","source":"gps","gps_fix":3,"gps_sats":5}
+```
+
+`gps_pps_age_ms` counts 0→1000 every second: a value near 1000 means the last edge
+is a whole second old, which is normal just before the next one arrives.
+`gps_offset_us` is how far `CLOCK_REALTIME` was from the anchor at the last edge —
+a few tens of microseconds here, and the number the slew is working on.
+`ntp_synced` is the lock, not "was set once", so a receiver that loses its fix
+changes its mind within three seconds.
+
 ## Serving NTP (UDP/123)
 
 `NtpServer` (`main/ntp_server.cpp`) answers NTPv3/v4 client requests on port 123
 from one dual-stack socket: `AF_INET6`, `IPV6_V6ONLY=0`, bound to `::`, exactly
 as [IPv6](#ipv6) recommended before it existed. It starts on the first DHCP
-lease, next to the HTTP server, and serves the clock the section above set.
+lease, next to the HTTP server, and serves the clock whichever source above set —
+`stratum 3` from the upstream SNTP client, `stratum 1` from the GPS.
 
 The design is one seam wide. A reply builder that knows the protocol, and a
 `TimeRef` that knows where the time came from — `reference()` (stratum, refid,
 when it last synced, locked or not), `now()` (the timestamp to stamp), and
-`describe()` (one phrase for the boot log). Today the only implementation is
-`UpstreamTimeRef`, the SNTP clock above; GPS/PPS becomes a second one and the
-packet code does not change.
+`describe()` (one phrase for the boot log). There are two implementations,
+`UpstreamTimeRef` and `GpsTimeRef`, and the packet code does not know which one
+answered. Which one it is comes from `Settings::timeSource()`, re-read behind a
+`SelectedTimeRef` on every call so `POST /config` can change it while the
+responder is running.
 
 ### What it will say, and what it will not
 
 | Clock state | LI | stratum | refid | A client does |
 |-------------|----|--------:|-------|---------------|
-| locked: synced less than 15 min ago | 0 | 3 | the upstream's address | trusts it |
+| GPS locked: fix, valid time, PPS edge under 3 s old | 0 | 1 | `GPS` | trusts it |
+| upstream locked: synced less than 15 min ago | 0 | 3 | the upstream's address | trusts it |
 | not locked | 3 | 16 | `INIT` | discards it |
 | over the rate limit | 0 | 0 | `RATE` | backs off |
 
@@ -565,7 +758,9 @@ Stratum 3, not 2, and that is the honest number: lwIP's SNTP client does not
 keep the upstream's own stratum, so this device cannot know whether it is one or
 two hops from the reference. Claiming one hop more than a well-behaved internet
 server over-states the distance; claiming one less under-states it, and a client
-weights a closer server more heavily. Under-claiming is the safe error.
+weights a closer server more heavily. Under-claiming is the safe error. With the
+GPS the question does not arise — the reference *is* here, so the server says 1
+([GPS](#gps-ublox-lea-8--pps)).
 
 The window is what makes "locked" mean something: fifteen missed polls of
 `NtpTime`'s one-a-minute interval. `ntp_synced` in `/healthz` only records that
@@ -607,6 +802,8 @@ is also how the `INIT` refid and the zero reference timestamp were verified.)
   gets a stable FNV-1a of the name instead of RFC 5905's MD5 (which lwIP cannot
   give us the resolved bytes for). Above stratum 1 the field is informational —
   it is how ntpd spots a loop — so this is a documented deviation, not a guess.
+  At stratum 1 from the GPS it is the four bytes `"GPS\0"`, which is the value
+  RFC 5905 lists for a GNSS reference.
 - **Rate limit**: 16-packet burst per source address, then one request per 2 s,
   then one `RATE` kiss-o'-death per second, then silence. Eight addresses are
   remembered; the table recycles the least recently seen rather than growing.
@@ -640,8 +837,34 @@ I (75320) ntp_server: answered 12, KoD 1, dropped 3 in the last 60 s
 ### Verified on this unit
 
 macOS `sntp` against the board. The offset is the board's clock against this Mac
-— i.e. the upstream server's accuracy plus the step at sync — not a protocol
-error; `delay` 0.38 ms is the whole round trip over the LAN.
+— i.e. the reference's accuracy plus the step at sync — not a protocol error;
+`delay` 0.38 ms is the whole round trip over the LAN.
+
+```console
+$ /usr/bin/sntp -d 192.0.2.20          # timeSource=gps
+sntp_exchange {
+        result: 0 (Success)
+        header: 24 (li:0 vn:4 mode:4)
+       stratum: 01 (1)
+     precision: FFFFFFEC (9.536743e-07)
+         delay: 0000.0041 (0.000991821)
+    dispersion: 0000.0041 (0.000991821)
+           ref: 47505300 ("GPS ")
+         t_ref: EEA0CCF7.00000000 (4003515639.000000000)
+            t2: EEA0CCF8.1BF359FF (4003515640.109181999)
+            t3: EEA0CCF8.1BF6B1A2 (4003515640.109232999)
+        offset: ... (0.152326500)        # this laptop's clock error, not the board's
+         delay: ... (0.001443000)
+}
+```
+
+`ref: 47505300` is `"GPS\0"`, the RFC 5905 stratum-1 refid. `t_ref` has a zero
+fraction because it is an anchor: the integer second the last PPS edge marked.
+`dispersion` is the 1 ms floor with nothing added, since the anchor is at most a
+second old — compare with the upstream case below, where it grows at 15 ppm with
+the time since the last poll.
+
+With `timeSource=dhcp` instead:
 
 ```console
 $ /usr/bin/sntp -d 192.0.2.20
@@ -669,14 +892,15 @@ The rest of the matrix, from `tools/ntp_test.py` (raw sockets, no dependencies, 
 
 | Sent | Answer |
 |------|--------|
-| mode 3, vn 4, 48 B over IPv4 | 48 B: `li=0 vn=4 mode=4 stratum=3`, origin echoed |
+| mode 3, vn 4, 48 B over IPv4 | 48 B: `li=0 vn=4 mode=4 stratum=1`, `refid=GPS`, origin echoed |
 | the same over the global IPv6 address | identical |
+| mode 3, vn 3 | `vn=3` in the reply, same fields |
 | mode 4 (server) | nothing |
 | mode 1 (symmetric active) | nothing |
 | vn 2 | nothing |
 | 12 bytes | nothing |
 | transmit timestamp all zeros | origin echoed as zeros |
-| 20 in a burst from one address | 16 answered, 2 `RATE`, 2 silent — the script waits 0.5 s per silent packet, so tokens refilled during the run |
+| 20 in a burst from one address | 16 answered, then `RATE`, then silence — the script waits 0.5 s per silent packet, so tokens refilled during the run |
 | after the burst, 2.5 s later | answered again |
 
 ### Testing it
@@ -744,27 +968,26 @@ Not in this milestone, on purpose:
 - **Broadcast / multicast** (RFC 5905 §9) — every client here polls.
 - **Interleaved mode** (RFC 9769) — the server must remember each client's last
   transmit timestamp, which is not worth it before hardware stamping exists.
-- **A stratum-1 reference.** That is the next phase, and the seam is ready: GPS
-  over UART plus the PPS line, a `GpsTimeRef` returning `stratum = 1` /
-  `refid = "GPS"`, and `serveNtp` deciding whether the LAN gets it. The responder
-  itself does not change. The one design choice to make deliberately is *which*
-  clock the servo steers: `CLOCK_REALTIME` with `adjtime()` (everything on the
-  device agrees with what is served, but the correction passes through the OS
-  and the PPS edge is timestamped at interrupt latency), or the EMAC's PTP clock
-  with `esp_eth_mac_adj_ptp_time()` (a hardware counter one PPS edge can steer
-  in ppb, read straight out of `now()`, at the cost of a second clock to keep in
-  step with the logs).
+- **A frequency-locked servo.** The PPS gives a frequency measurement for free
+  (the slope of the offsets between anchors), but nothing here estimates it: the
+  system clock is corrected every second with `adjtime()` instead, so the crystal
+  is never taught to run at the right rate. That is enough to keep the *served*
+  time within tens of microseconds, and it is not enough to hold frequency in
+  holdover beyond the three-second window — which is why the window is three
+  seconds rather than three hours.
 
 ## Layout
 
 | File                    | Contents                                                        |
 |-------------------------|-----------------------------------------------------------------|
-| `main/main.cpp`         | boot order only: NVS, settings, netif + event loop, the clock, then the link |
+| `main/main.cpp`         | boot order only: NVS, settings, netif + event loop, the GPS, the clock, then the link |
 | `main/eth_link.[ch]pp`  | `EthernetLink`: EMAC + PHY bring-up, pin map, PHY diagnostics, event handlers, netif, status task, web server and responder start, OTA image confirmation |
 | `main/settings.[ch]pp`  | `Settings : SettingsBase` — the five device settings            |
 | `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync`, `/firmware` |
-| `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for the test-mode clock          |
-| `main/ntp_server.[ch]pp`| `NtpServer` + `TimeRef`/`UpstreamTimeRef`: the UDP/123 responder, reply builder, rate limiter |
+| `main/time_ref.h`       | `TimeRef` / `TimeReference`: what the responder may claim, and the interface both sources implement |
+| `main/gps_time.[ch]pp`  | `GpsTime` + `GpsTimeRef`: UART1 and the PPS interrupt, the UBX `NAV-PVT` parser, the anchor, the slew of `CLOCK_REALTIME` |
+| `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for `timeSource=dhcp`/`static`    |
+| `main/ntp_server.[ch]pp`| `NtpServer` + `UpstreamTimeRef` + `SelectedTimeRef`: the UDP/123 responder, reply builder, rate limiter |
 | `main/net_state.[ch]pp` | read-only netif / link / IPv6-address accessors, fed by `eth_link.cpp` |
 | `tools/ntp_test.py`     | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
 
@@ -862,24 +1085,28 @@ server) is a mianesp component.
 
 ## Next step
 
-A stratum-1 reference of its own: GPS over UART for time-of-day, the PPS line
-for the sub-microsecond edge, both disciplining a local clock rather than
-stepping the system clock once from an upstream server. The responder is already
-shaped for it — a second `TimeRef` returning `stratum = 1` and `refid = "GPS"`,
-the leap indicator driven by the fix instead of by the freshness window, and
-`serveNtp` deciding whether the LAN gets it. The parts that are genuinely new
-work:
+The reference is here; what is left is making the *edges* as good as the clock.
 
-- **A discipline loop**, not a step: a servo that slews the clock from PPS
-  instead of jumping it, so a client never sees the jump.
 - **The receive-side accuracy** the dispersion above admits to. It is *not* a
   call away: the EMAC's IEEE 1588 unit is exposed as a steerable clock
   (`esp_eth_mac_adj_ptp_time()`, `get_ptp_time()`), not as a per-frame
   timestamp, and lwIP has no `SO_TIMESTAMP` — so a hardware `t2` needs a driver
   patch that surfaces the DMA descriptor's stamp ([what the API actually
-  offers](#serving-ntp-udp123)). Worth doing only after the servo, because a
-  disciplined local clock is the larger error term today.
-- **Leap-second and holdover behaviour** worth stating out loud before the
-  server calls itself stratum 1.
+  offers](#serving-ntp-udp123)).
+- **A frequency servo**, not just a phase correction. The PPS measures the
+  crystal for free — it is the slope of `gps_offset_us` between anchors — and
+  nothing here uses it: `adjtime()` fixes the phase every second and never teaches
+  the oscillator its rate. A ppm estimate feeding `esp_eth_mac_adj_ptp_freq()`
+  (ppb) or a slower `adjtime()` schedule is what would turn the three-second
+  holdover window into an hour.
+- **Sub-microsecond PPS capture.** The ISR stamp is interrupt latency:
+  single-digit microseconds. The EMAC's PTP counter is a hardware clock that can
+  be read from the same edge and steered in ppb, which is the same change as the
+  servo above — and the reason to do both at once.
+- **Leap seconds worth stating out loud.** NAV-PVT does not carry the leap
+  indicator; `TIM-TP` does, and it is also the message that announces a pending
+  leap second. Reading it would let this server set LI=1 for the minute before a
+  leap instead of always saying "no warning".
 
-Until then this is a correct stratum-3 server, and honest about being one.
+Until then this is a correct stratum-1 server: its clock is good to a few
+microseconds, and its replies are honest about everything it cannot measure.

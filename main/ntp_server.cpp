@@ -13,6 +13,7 @@
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
 
+#include "gps_time.h"
 #include "ntp_time.h"
 #include "settings.h"
 
@@ -54,7 +55,6 @@ constexpr uint8_t kPrecision = 0xEC;
  * that under-estimates the distance to us is the one that gets hurt. */
 constexpr uint8_t kStratumFromUpstream = 3;
 
-constexpr uint32_t kRefIdInit = (static_cast<uint32_t>('I') << 24) | ('N' << 16) | ('I' << 8) | 'T';
 constexpr uint32_t kRefIdRate = (static_cast<uint32_t>('R') << 24) | ('A' << 16) | ('T' << 8) | 'E';
 
 /* Root delay and dispersion, 16.16 fixed point. The delay is a standing guess:
@@ -416,9 +416,36 @@ private:
 
 }  // namespace
 
+/* Which reference is served is a setting, and a setting can change while the
+ * responder is running (POST /config); swapping the TimeRef the serving task is
+ * using would hand it a dangling pointer. So the object it holds never changes:
+ * it asks Settings on every call and forwards to one of two stateless wrappers,
+ * which is also what keeps `serveNtp` and the clock source independent. */
+class SelectedTimeRef : public TimeRef {
+public:
+    TimeReference reference() const override { return active().reference(); }
+
+    void now(struct timespec &ts) const override { active().now(ts); }
+
+    std::string describe() const override { return active().describe(); }
+
+private:
+    static TimeRef &active()
+    {
+        static const std::unique_ptr<TimeRef> upstream = makeUpstreamTimeRef();
+        static const std::unique_ptr<TimeRef> gps      = makeGpsTimeRef();
+        return Settings::instance().timeSource() == Settings::TimeSource::Gps ? *gps : *upstream;
+    }
+};
+
 std::unique_ptr<TimeRef> makeUpstreamTimeRef()
 {
     return std::unique_ptr<TimeRef>(new UpstreamTimeRef());
+}
+
+std::unique_ptr<TimeRef> makeTimeRef()
+{
+    return std::unique_ptr<TimeRef>(new SelectedTimeRef());
 }
 
 NtpServer &NtpServer::instance()
@@ -502,7 +529,7 @@ esp_err_t NtpServer::begin()
     }
 
     if (!m_ref) {
-        m_ref = makeUpstreamTimeRef();
+        m_ref = makeTimeRef();
     }
 
     m_sock = sock;

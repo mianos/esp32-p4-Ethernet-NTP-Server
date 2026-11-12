@@ -4,8 +4,8 @@
  * This is the milestone the rest of the firmware was plumbing for. What it
  * serves is decided by a TimeRef, and that split is the whole design: the reply
  * builder knows the protocol and nothing about where the time came from, so the
- * discipline path (GPS/PPS next) plugs in behind the same three calls instead
- * of editing the packet code.
+ * discipline path (GPS/PPS, in gps_time.cpp) plugs in behind the same three
+ * calls instead of editing the packet code.
  *
  * Honesty is a protocol requirement, not politeness. A stratum 1 server whose
  * GPS has lost lock must advertise stratum 16 with the leap indicator at 3 --
@@ -15,10 +15,10 @@
  *   locked      stratum = TimeRef's, leap indicator 0, refid names the reference
  *   not locked  stratum 16,              leap indicator 3, refid "INIT"
  *
- * Until GPS/PPS lands, the only TimeRef is the upstream server's clock, which
- * makes this a stratum 3 server: the upstream's own stratum is not visible
- * through lwIP's SNTP client, and claiming closer than we know is the worse
- * error of the two.
+ * Two TimeRefs exist: the upstream SNTP clock (stratum 3, the default) and the
+ * GPS/PPS reference (stratum 1, gps_time.cpp). Settings::timeSource decides
+ * which one is served, and the responder itself does not know the difference --
+ * that is the point of the split.
  */
 #pragma once
 
@@ -32,34 +32,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-/* What the responder may claim, and what it needs to say it. */
-struct TimeReference {
-    bool     locked   = false; /* false => stratum 16 + leap indicator 3 */
-    uint8_t  stratum  = 16;    /* 1 with a real reference; 3 from upstream SNTP */
-    uint32_t refId    = 0;     /* NTP reference id, host order: store32() writes it */
-    time_t   lastSync = 0;     /* when the reference last agreed with us */
-};
+#include "time_ref.h"
 
-/* Where the time comes from. One implementation today (the upstream SNTP
- * clock); GPS/PPS becomes a second one and the responder does not change. */
-class TimeRef {
-public:
-    virtual ~TimeRef() = default;
-
-    virtual TimeReference reference() const = 0;
-
-    /* The instant to stamp a reply with. */
-    virtual void now(struct timespec &ts) const = 0;
-
-    /* One phrase for the boot log: "upstream 192.0.2.1", "GPS/PPS". */
-    virtual std::string describe() const = 0;
-};
-
-/* The only reference there is until the GPS arrives. Locked means the clock was
- * set from an upstream server recently enough to still be worth serving: "was
- * set once, at boot" is not a lock, and a responder that cannot tell the
- * difference will hand out a drifting clock with a straight face. */
+/* The upstream SNTP clock as a TimeRef. Locked means the clock was set from an
+ * upstream server recently enough to still be worth serving: "was set once, at
+ * boot" is not a lock, and a responder that cannot tell the difference will
+ * hand out a drifting clock with a straight face. */
 std::unique_ptr<TimeRef> makeUpstreamTimeRef();
+
+/* The reference the responder actually serves: whichever Settings::timeSource()
+ * names, re-read on every call so POST /config takes effect without swapping
+ * anything out from under the serving task. */
+std::unique_ptr<TimeRef> makeTimeRef();
 
 class NtpServer {
 public:

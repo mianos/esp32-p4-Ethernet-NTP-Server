@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "gps_time.h"
 #include "net_state.h"
 #include "ntp_server.h"
 #include "ntp_time.h"
@@ -201,17 +202,35 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
 #endif
 
     /* The clock: where it is disciplined from, which upstream server is in use,
-     * and whether it has actually been set rather than merely looking sane. */
+     * and whether it has actually been set rather than merely looking sane.
+     * With timeSource=gps there is no upstream to name: the receiver's own state
+     * replaces that half, and ntp_synced means "the configured source is
+     * locked", which for the GPS is a fix plus a fresh PPS edge. */
     json.AddItem("ntp_source", ntp.sourceName());
-    if (const std::optional<std::string> upstream = ntp.upstreamName()) {
-        json.AddItem("ntp_server", *upstream);
-        json.AddItem("ntp_reachable", ntp.upstreamReachable());
-    } else {
+    if (ntp.source() == Settings::TimeSource::Gps) {
+        const GpsTime::Status gps = GpsTime::instance().status();
         json.AddNull("ntp_server");
-    }
-    json.AddItem("ntp_synced", ntp.synced());
-    if (ntp.synced()) {
-        json.AddItem("last_sync", static_cast<double>(ntp.lastSync()));
+        json.AddItem("ntp_synced", gps.locked);
+        if (gps.lastFix != 0) {
+            json.AddItem("last_sync", static_cast<double>(gps.lastFix));
+        }
+        json.AddItem("gps_fix", static_cast<double>(gps.fixType));
+        json.AddItem("gps_sats", static_cast<double>(gps.satellites));
+        if (gps.ppsAgeUs >= 0) {
+            json.AddItem("gps_pps_age_ms", static_cast<double>(gps.ppsAgeUs / 1000));
+        }
+        json.AddItem("gps_offset_us", static_cast<double>(gps.offsetUs));
+    } else {
+        if (const std::optional<std::string> upstream = ntp.upstreamName()) {
+            json.AddItem("ntp_server", *upstream);
+            json.AddItem("ntp_reachable", ntp.upstreamReachable());
+        } else {
+            json.AddNull("ntp_server");
+        }
+        json.AddItem("ntp_synced", ntp.synced());
+        if (ntp.synced()) {
+            json.AddItem("last_sync", static_cast<double>(ntp.lastSync()));
+        }
     }
 
     /* The responder's half of the story: whether it is listening, what it would
@@ -287,10 +306,33 @@ esp_err_t NtpWebServer::sync_post_handler(httpd_req_t *req)
 {
     const std::string caller = callerAddress(req);
 
+    /* The GPS is not polled: it reports once a second whether anyone asks or
+     * not, so "sync now" has nothing to trigger. It still has an answer worth
+     * giving -- is the clock disciplined at this moment -- so the same reply
+     * shape is built from the receiver's state rather than refused. */
+    if (Settings::instance().timeSource() == Settings::TimeSource::Gps) {
+        const GpsTime::Status gps = GpsTime::instance().status();
+        if (!gps.locked) {
+            ESP_LOGW(TAG, "POST /ntp/sync from %s: no GPS lock", caller.c_str());
+            return sendJsonError(req, 504, "no GPS fix with PPS: the clock is not disciplined");
+        }
+
+        const std::string now = isoTimestamp(time(nullptr));
+        JsonWrapper       doc;
+        doc.AddItem("synced", true);
+        doc.AddItem("time", now);
+        doc.AddItem("source", "gps");
+        doc.AddItem("gps_fix", static_cast<double>(gps.fixType));
+        doc.AddItem("gps_sats", static_cast<double>(gps.satellites));
+        ESP_LOGI(TAG, "POST /ntp/sync from %s: %s (GPS, %u satellites)", caller.c_str(),
+                 now.c_str(), gps.satellites);
+        return sendJson(req, doc, 200);
+    }
+
     NtpTime        &ntp = NtpTime::instance();
     const esp_err_t err = ntp.syncNow(pdMS_TO_TICKS(kSyncWaitMs));
     if (err == ESP_ERR_INVALID_STATE) {
-        return sendJsonError(req, 409, "no time source: set timeSource to dhcp or static");
+        return sendJsonError(req, 409, "no time source: set timeSource to dhcp, static or gps");
     }
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "POST /ntp/sync from %s: %s", caller.c_str(), esp_err_to_name(err));

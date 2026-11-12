@@ -133,7 +133,7 @@ esp_err_t NtpTime::applySettings()
     const std::string   &text     = settings.timeSourceText();
     Settings::TimeSource wanted   = settings.timeSource();
 
-    if (text != "off" && text != "dhcp" && text != "static") {
+    if (text != "off" && text != "dhcp" && text != "static" && text != "gps") {
         ESP_LOGW(TAG, "unknown timeSource '%s', treating it as off", text.c_str());
     }
     if (wanted == Settings::TimeSource::Static && settings.ntpServer().empty()) {
@@ -157,6 +157,17 @@ esp_err_t NtpTime::applySettings()
 
 esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
 {
+    if (source == Settings::TimeSource::Gps) {
+        /* The clock is disciplined by gps_time.cpp, not by a poll. There is no
+         * client to start, and starting one would put a second owner on
+         * CLOCK_REALTIME -- SNTP steps, the PPS slews, and the two undo each
+         * other. m_source is still recorded, so /healthz names the source the
+         * device is actually using. */
+        m_source.store(source, std::memory_order_relaxed);
+        ESP_LOGI(TAG, "time source: gps (u-blox over UART, PPS on GPIO14)");
+        return ESP_OK;
+    }
+
     if (source == Settings::TimeSource::Off) {
         m_source.store(source, std::memory_order_relaxed);
         ESP_LOGI(TAG, "time source: off (the clock runs from reset)");
