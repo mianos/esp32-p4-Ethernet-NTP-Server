@@ -233,6 +233,7 @@ void GpsTime::bridgeTask()
 
         ESP_LOGW(TAG, "u-center attached from %s; the clock keeps running",
                  inet_ntoa(peer.sin_addr));
+        m_bridgeSessions = m_bridgeSessions + 1;
         /* Non-blocking, so a client that stops reading cannot wedge the bridge
          * and, with it, the parser. */
         fcntl(client, F_SETFL, fcntl(client, F_GETFL, 0) | O_NONBLOCK);
@@ -254,10 +255,12 @@ void GpsTime::bridgeTask()
                     if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                         /* spurious readiness; fall through to the read side */
                     } else {
+                        snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "recv %d errno %d", n, errno);
                         ESP_LOGW(TAG, "u-center gone: recv %d errno %d", n, errno);
                         break;
                     }
                 } else {
+                    m_bridgeRx = m_bridgeRx + static_cast<uint32_t>(n);
                 /* Log what the client sends, as hex. u-center builds these and
                  * a refused message is only diagnosable by looking at the bytes
                  * it actually put on the wire. */
@@ -311,6 +314,7 @@ void GpsTime::bridgeTask()
                 for (int i = 0; i < got; ++i) {
                     feed(buf[i]);
                 }
+                m_bridgeTx = m_bridgeTx + static_cast<uint32_t>(got);
                 /* Bounded retry rather than a single try: a short write or a
                  * momentarily full buffer is not a disconnect. */
                 int sent = 0;
@@ -322,6 +326,7 @@ void GpsTime::bridgeTask()
                     } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                         vTaskDelay(pdMS_TO_TICKS(2));
                     } else {
+                        snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "send errno %d", errno);
                         ESP_LOGW(TAG, "u-center send failed: errno %d", errno);
                         break;
                     }
@@ -331,6 +336,9 @@ void GpsTime::bridgeTask()
 
         close(client);
         m_bridgeActive = false;
+        if (strcmp(m_bridgeEnd, "none") == 0) {
+            snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "loop exit");
+        }
         ESP_LOGW(TAG, "u-center detached: re-applying the firmware's own configuration");
         /* The client may have left the receiver anywhere; put it back. */
         m_reconfigAtUs = esp_timer_get_time() + 500000;
@@ -1671,6 +1679,10 @@ GpsTime::Status GpsTime::status() const
     st.jamState          = m_jamState;
     st.monHwValid        = m_monHwValid;
     st.fitUs             = m_fitUs;
+    st.bridgeSessions    = m_bridgeSessions;
+    st.bridgeRx          = m_bridgeRx;
+    st.bridgeTx          = m_bridgeTx;
+    st.bridgeEnd.assign(m_bridgeEnd);
     st.pinSel            = m_pinSel;
     st.pinDir            = m_pinDir;
     st.pinVal            = m_pinVal;

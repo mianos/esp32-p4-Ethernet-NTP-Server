@@ -173,6 +173,10 @@ public:
         int64_t  navSatAgeUs  = -1;
         int64_t  monHwAgeUs   = -1;
         int64_t  fitUs        = 0; /* how long the last rate fit took */
+        uint32_t bridgeSessions = 0;
+        uint32_t bridgeRx       = 0;
+        uint32_t bridgeTx       = 0;
+        std::string bridgeEnd;
         /* MON-HW's pin map: which module pins the receiver has assigned, their
          * direction and level. The antenna supervisor is a pin pair, so this is
          * where its numbers come from when CFG-ANT has to name them. */
@@ -439,6 +443,10 @@ private:
     void applyBias(bool on);
     int64_t         m_reconfigAtUs = 0;
     int64_t    m_monHwAtUs         = 0;
+    volatile uint32_t m_bridgeRx   = 0;
+    volatile uint32_t m_bridgeTx   = 0;
+    volatile uint32_t m_bridgeSessions = 0;
+    char       m_bridgeEnd[48]     = "none";
     uint8_t    m_cn0Max            = 0;
     uint8_t    m_cn0Mean           = 0;
     uint8_t    m_cn0Used           = 0;
