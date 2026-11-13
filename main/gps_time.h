@@ -172,6 +172,7 @@ public:
         uint8_t  cn0Used      = 0; /* how many satellites were used in that sample */
         int64_t  navSatAgeUs  = -1;
         int64_t  monHwAgeUs   = -1;
+        int64_t  fitUs        = 0; /* how long the last rate fit took */
         /* MON-HW's pin map: which module pins the receiver has assigned, their
          * direction and level. The antenna supervisor is a pin pair, so this is
          * where its numbers come from when CFG-ANT has to name them. */
@@ -353,6 +354,7 @@ private:
     bool         m_qErrValid       = false;
     bool         m_pulseOnSecond   = false;
     int64_t      m_jitterNs        = 0;
+    int64_t      m_fitUs           = 0;
 
     /* The GPS task's own state; no other task reads it. */
     Parse    m_parse        = Parse::Sync1;

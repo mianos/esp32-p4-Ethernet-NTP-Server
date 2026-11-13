@@ -430,16 +430,21 @@ void GpsTime::task()
     ESP_LOGI(TAG, "antenna bias on");
 
     for (;;) {
-        /* While u-center is attached it owns the port; touching the parser here
-         * as well would interleave two readers on one stream. */
+        /* While u-center is attached, the bridge task does the reading and taps
+         * the bytes into the parser, so only the read is skipped here. The
+         * periodic work below carries on: the clock must keep being disciplined
+         * and /healthz must keep telling the truth while somebody is poking at
+         * the receiver.
+         *
+         * Only the read is contended, not the parser -- two readers on one
+         * stream is what the bridge exists to avoid. */
         if (m_bridgeActive) {
             vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        const int got = uart_read_bytes(kUart, buf, sizeof(buf), pdMS_TO_TICKS(100));
-        for (int i = 0; i < got; ++i) {
-            feed(buf[i]);
+        } else {
+            const int got = uart_read_bytes(kUart, buf, sizeof(buf), pdMS_TO_TICKS(100));
+            for (int i = 0; i < got; ++i) {
+                feed(buf[i]);
+            }
         }
 
         const int64_t nowUs = esp_timer_get_time();
@@ -1414,6 +1419,7 @@ void GpsTime::fitRate()
     if (m_rateCount < kRateMinSamples) {
         return;
     }
+    const int64_t t0 = esp_timer_get_time();
 
     /* Least squares of UTC nanoseconds against esp_timer microseconds, both
      * taken relative to the newest sample first: UTC nanoseconds are 1.8e18 at
@@ -1477,6 +1483,7 @@ void GpsTime::fitRate()
                           slope * dx;
         sse += dy * dy;
     }
+    m_fitUs = esp_timer_get_time() - t0;
     const double residualNs = std::sqrt(sse / m_rateCount);
     {
         const int64_t jitterNs = residualNs > static_cast<double>(kMaxJitterNs)
@@ -1605,6 +1612,7 @@ GpsTime::Status GpsTime::status() const
     st.jamInd            = m_jamInd;
     st.jamState          = m_jamState;
     st.monHwValid        = m_monHwValid;
+    st.fitUs             = m_fitUs;
     st.pinSel            = m_pinSel;
     st.pinDir            = m_pinDir;
     st.pinVal            = m_pinVal;
