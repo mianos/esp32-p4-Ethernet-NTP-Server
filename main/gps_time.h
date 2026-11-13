@@ -175,6 +175,12 @@ public:
         int64_t  fitUs        = 0; /* how long the last rate fit took */
         uint32_t bridgeSessions = 0;
         uint32_t bridgeRefused  = 0;
+        /* Whether a client holds the port right now, and how many. The point of
+         * saying so is that "u-center does nothing" and "u-center is not
+         * attached at all" are different faults and used to look the same from
+         * here. */
+        bool     bridgeActive  = false;
+        int      bridgeClients = 0;
         uint32_t bridgeRx       = 0;
         uint32_t bridgeTx       = 0;
         std::string bridgeEnd;
@@ -466,6 +472,7 @@ private:
     volatile uint32_t m_bridgeTx   = 0;
     volatile uint32_t m_bridgeSessions = 0;
     volatile uint32_t m_bridgeRefused  = 0;
+    volatile int      m_bridgeClients  = 0;
     char       m_bridgeEnd[48]     = "none";
     char       m_bridgeLast[128]   = "";
     uint8_t    m_cn0Max            = 0;

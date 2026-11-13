@@ -460,6 +460,8 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("rate_ppm", static_cast<double>(gps.ratePpb) / 1000.0);
     doc.AddItem("rate_n", static_cast<double>(gps.rateSamples));
     doc.AddItem("fit_us", static_cast<double>(gps.fitUs));
+    doc.AddItem("bridge_active", gps.bridgeActive);
+    doc.AddItem("bridge_clients", static_cast<double>(gps.bridgeClients));
     doc.AddItem("bridge_sessions", static_cast<double>(gps.bridgeSessions));
     doc.AddItem("bridge_refused", static_cast<double>(gps.bridgeRefused));
     doc.AddItem("bridge_rx", static_cast<double>(gps.bridgeRx));

@@ -926,7 +926,14 @@ silently accepted and closed, and `/gps/info` carries `bridge_refused` — the t
 look identical from the outside otherwise. `bridge_sessions`, `bridge_rx`,
 `bridge_tx`, `bridge_end` and `bridge_last` say what a session carried and how it
 ended; `bridge_last` is the client's last bytes as hex, which is how the handshake
-above was identified.
+above was identified. `bridge_active` and `bridge_clients` say whether anyone is
+attached at all, because "`u-center` does nothing" and "`u-center` never reached
+us" are different faults and used to read the same.
+
+There is **no authentication** on this port: anything on the LAN can reconfigure
+the receiver through it, including turning message rates off. Nothing is
+persisted, so the worst case is a receiver configured oddly until the next
+detach — which re-applies the message set — or until a reboot.
 
 **The other way, if the carrier is ever rewired.** UBX keeps a separate output
 rate per port, so a monitor on UART2 could ask for its own messages at its own

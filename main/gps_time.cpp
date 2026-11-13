@@ -265,6 +265,7 @@ void GpsTime::bridgeTask()
             ESP_LOGW(TAG, "client gone: %s", why);
             close(clients[i]);
             clients[i] = -1;
+            m_bridgeClients = m_bridgeClients - 1;
             bool any = false;
             for (int j = 0; j < kMaxClients; ++j) {
                 any = any || clients[j] >= 0;
@@ -272,7 +273,15 @@ void GpsTime::bridgeTask()
             if (!any) {
                 quieted        = false;
                 m_bridgeActive = false;
-                m_reconfigAtUs = esp_timer_get_time() + 500000;
+                /* Two seconds, not one, and it is a debounce rather than a
+                 * delay: a client that is unhappy reconnects about once a
+                 * second, and configureModule() takes roughly three of them
+                 * because it waits out an ACK on every message. Restoring on
+                 * the first detach therefore never finishes before the next
+                 * attach stands it aside again, and a bouncing client would
+                 * thrash the receiver without either side settling. A pending
+                 * reconfigure is stood aside on attach anyway. */
+                m_reconfigAtUs = esp_timer_get_time() + 2000000;
             }
         };
 
@@ -322,6 +331,7 @@ void GpsTime::bridgeTask()
                         snprintf(m_bridgeLast, sizeof(m_bridgeLast), "attach");
                         ESP_LOGW(TAG, "client attached from %s", inet_ntoa(peer.sin_addr));
                         m_bridgeSessions = m_bridgeSessions + 1;
+                        m_bridgeClients  = m_bridgeClients + 1;
                         if (!quieted) {
                             /* Claim the port and put the session's message set
                              * on it. No delay first: u-center's polls are
@@ -476,7 +486,8 @@ void GpsTime::bridgeTask()
             }
         }
         close(srv);
-        m_bridgeActive = false;
+        m_bridgeActive  = false;
+        m_bridgeClients = 0;
         ESP_LOGW(TAG, "bridge reset; re-applying configuration");
         m_reconfigAtUs = esp_timer_get_time() + 500000;
     }
@@ -1846,6 +1857,8 @@ GpsTime::Status GpsTime::status() const
     st.fitUs             = m_fitUs;
     st.bridgeSessions    = m_bridgeSessions;
     st.bridgeRefused     = m_bridgeRefused;
+    st.bridgeActive      = m_bridgeActive;
+    st.bridgeClients     = m_bridgeClients;
     st.bridgeRx          = m_bridgeRx;
     st.bridgeTx          = m_bridgeTx;
     st.bridgeEnd.assign(m_bridgeEnd);
