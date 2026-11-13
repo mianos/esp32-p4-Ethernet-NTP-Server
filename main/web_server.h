@@ -56,6 +56,7 @@ private:
     static esp_err_t gps_pps_post_handler(httpd_req_t *req);
     static esp_err_t gps_ant_post_handler(httpd_req_t *req);
     static esp_err_t gps_gnss_post_handler(httpd_req_t *req);
+    static esp_err_t gps_survey_post_handler(httpd_req_t *req);
     static esp_err_t gps_info_get_handler(httpd_req_t *req);
     static esp_err_t gps_reset_post_handler(httpd_req_t *req);
     static esp_err_t firmware_get_handler(httpd_req_t *req);

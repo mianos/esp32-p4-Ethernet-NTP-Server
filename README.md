@@ -759,6 +759,54 @@ Turning a constellation on costs minutes, not seconds: Galileo appeared about
 seven minutes after being enabled and then filled out to ten satellites. Judging
 one by the first minute after the change will look like nothing happened.
 
+### Surveying the position, and locking it
+
+A timing receiver should not be solving its own position. While it does, the
+position moves with the clock and the pulse with it; with the position fixed, the
+receiver solves time only. Position error is cheap in time — 3.3 ns per metre,
+averaged over the constellation — so even a survey that lands metres is worth
+more than none, which is why this is offered on a site that will never be
+survey-grade.
+
+```console
+$ curl -s -X POST -d '{"action":"start","hours":24,"acc_mm":3000}' http://192.0.2.20/gps/survey
+$ curl -s http://192.0.2.20/gps/info | python3 -m json.tool | grep svin   # watch it
+$ curl -s -X POST -d '{"action":"fix"}'   http://192.0.2.20/gps/survey    # lock the result
+$ curl -s -X POST -d '{"action":"stop"}'  http://192.0.2.20/gps/survey    # back to moving
+```
+
+`acc_mm` is required rather than given a tight default, because it is what decides
+whether the survey ever finishes: `CFG-TMODE2` ends a survey only when the minimum
+duration **and** the mean variance limit are both met. A limit tighter than the sky
+supports runs until somebody gives up — and while a survey runs the position is
+*not* held, which is worse than the moving mode it replaced.
+
+`gnss`'s siblings: `gps_time_mode` is `moving`, `survey` or `fixed`; `gps_svin_dur_s`,
+`gps_svin_obs`, `gps_svin_valid`, `gps_svin_age_s` and the accuracy pair
+`gps_svin_acc_mm` / `gps_svin_var_mm2` come from the receiver's own progress message.
+`valid` is the receiver saying the result is good enough to use, and it stays false
+until both conditions are met. A finished survey is logged once, with its accuracy,
+rather than locked automatically — the accuracy is worth a look first.
+
+**Two message dialects, and how they were found.** The first attempt used
+`UBX-CFG-TMODE3` (0x06 0x71) and `UBX-NAV-SVIN` (0x01 0x3B). Both are wrong here and
+wrong in a way that looks almost like working: TMODE3 was *acknowledged* and then
+read back as all zeros, and NAV-SVIN was `NAK`ed. At `PROTVER 22` this is an M8, and
+its messages are **`CFG-TMODE2` (0x06 0x3D)** and **`TIM-SVIN` (0x0D 0x04)** — same
+28-byte layout, but the first byte is `version` in one and `timeMode` in the other,
+so TMODE3 was being told "disabled" every time and answering `ACK`. The `TIM-`
+prefix is the tell: this is a TIM firmware, and the `onNavSvin` parser reads `dur`,
+the mean position, `meanV` and `obs` from offsets confirmed against live frames
+rather than from a specification.
+
+`meanV` is a **variance in mm²**, not an accuracy in mm. The API takes mm and squares
+it on the way in; the read-back divides it back, and `gps_svin_acc_mm` is the square
+root. Both are published so a disagreement between them is visible.
+
+Changing the time mode while one is already running does not restart it — the
+duration keeps counting. `stop` then `start` is the way to begin again with
+different parameters.
+
 ### Antennas, and what the front end says about one
 
 The M8T **does have an antenna supervisor**, and it took a while to find because

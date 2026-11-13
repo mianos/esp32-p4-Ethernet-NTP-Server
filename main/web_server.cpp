@@ -130,6 +130,7 @@ void NtpWebServer::register_routes()
         {"/gps/pps",      HTTP_POST, gps_pps_post_handler},
         {"/gps/ant",      HTTP_POST, gps_ant_post_handler},
         {"/gps/gnss",     HTTP_POST, gps_gnss_post_handler},
+        {"/gps/survey",   HTTP_POST, gps_survey_post_handler},
         {"/gps/info",     HTTP_GET,  gps_info_get_handler},
         {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
@@ -471,6 +472,15 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("bridge_last", gps.bridgeLast);
     doc.AddItem("gnss", gps.gnss);
     doc.AddItem("gnss_cfg", gps.gnssCfg);
+    doc.AddItem("time_mode", gps.timeMode);
+    if (gps.svinAgeS >= 0) {
+        doc.AddItem("svin_dur_s", gps.svinDurS);
+        doc.AddItem("svin_acc_mm", gps.svinAccMm);
+        doc.AddItem("svin_var_mm2", gps.svinVarMm2);
+        doc.AddItem("svin_obs", gps.svinObs);
+        doc.AddItem("svin_valid", gps.svinValid);
+        doc.AddItem("svin_age_s", gps.svinAgeS);
+    }
     if (gps.locked) {
         doc.AddItem("dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);
         doc.AddItem("lock_window_s", static_cast<double>(gps.lockWindowUs) / 1000000);
@@ -654,6 +664,83 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
                                         : cold ? "cold start queued" : "hot start queued");
     resp.AddItem("note", cold ? "the almanac is discarded; expect a slow reacquisition"
                               : "the almanac is kept; send {\"cold\":true} to discard it");
+    return sendJson(req, resp, 200);
+}
+
+esp_err_t NtpWebServer::gps_survey_post_handler(httpd_req_t *req)
+{
+    /* Survey-in of the antenna position, and locking the result.
+     *
+     * A timing receiver does not want to be solving its own position at all: a
+     * fixed position stops the clock from moving with the position solution,
+     * and 1 m of position error is only 3.3 ns of time once it is averaged over
+     * the constellation. That is what makes a survey worth running on a site
+     * that will never be survey-grade.
+     *
+     * The accuracy limit is required rather than defaulted to something tight,
+     * because the limit is what decides whether this ever finishes: the survey
+     * ends only when both the minimum duration *and* the mean variance are met,
+     * so a limit tighter than the sky can support runs until somebody gives up
+     * -- and while it runs the position is not held, which is worse than the
+     * moving mode it replaced. */
+    JsonWrapper doc;
+    if (!readJsonBody(req, doc)) {
+        return ESP_FAIL;
+    }
+
+    std::string action;
+    if (!doc.GetField("action", action)) {
+        return sendJsonError(req, 400, "action must be \"start\", \"stop\" or \"fix\"");
+    }
+
+    if (action == "fix") {
+        GpsTime::instance().requestFixPosition();
+        ESP_LOGW(TAG, "POST /gps/survey from %s: lock the surveyed position",
+                 callerAddress(req).c_str());
+        JsonWrapper resp;
+        resp.AddItem("action", "fix");
+        resp.AddItem("note", "locks the receiver's own mean position; gps_time_mode and "
+                             "gps_svin_* at /gps/info report the result");
+        return sendJson(req, resp, 200);
+    }
+
+    if (action == "stop") {
+        GpsTime::instance().requestSurvey(false);
+        JsonWrapper resp;
+        resp.AddItem("action", "stop");
+        resp.AddItem("note", "back to a moving position; the last mean is kept for \"fix\"");
+        return sendJson(req, resp, 200);
+    }
+
+    if (action != "start") {
+        return sendJsonError(req, 400, "action must be \"start\", \"stop\" or \"fix\"");
+    }
+
+    /* Hours, because the useful values are in hours and nobody wants to say
+     * 86400. Two hours is the shortest that means anything; a day is the
+     * sensible default for a site that will stay put. */
+    double hours = 24;
+    doc.GetField("hours", hours);
+    if (hours < 2 || hours > 48) {
+        return sendJsonError(req, 400, "hours must be 2..48");
+    }
+    double accMm = 3000;
+    doc.GetField("acc_mm", accMm);
+    if (accMm < 50 || accMm > 20000) {
+        return sendJsonError(req, 400, "acc_mm must be 50..20000");
+    }
+
+    GpsTime::instance().requestSurvey(true, static_cast<uint32_t>(hours * 3600),
+                                      static_cast<uint32_t>(accMm));
+    ESP_LOGW(TAG, "POST /gps/survey from %s: start, %.1f h, %u mm limit",
+             callerAddress(req).c_str(), hours, static_cast<unsigned>(accMm));
+
+    JsonWrapper resp;
+    resp.AddItem("action", "start");
+    resp.AddItem("hours", hours);
+    resp.AddItem("acc_mm", static_cast<double>(accMm));
+    resp.AddItem("note", "gps_time_mode and gps_svin_* at /gps/info report progress; "
+                         "lock it with {\"action\":\"fix\"} once it has finished");
     return sendJson(req, resp, 200);
 }
 

@@ -189,6 +189,18 @@ void GpsTime::requestGnss(uint8_t mask)
     m_gnssReq     = true;
 }
 
+void GpsTime::requestSurvey(bool start, uint32_t durS, uint32_t accMm)
+{
+    m_svinDurS  = durS;
+    m_svinAccMm = accMm;
+    m_svinCmd   = start ? 1 : 2;
+}
+
+void GpsTime::requestFixPosition()
+{
+    m_svinCmd = 3;
+}
+
 void GpsTime::requestDefaults()
 {
     m_defaultsReq = true;
@@ -723,6 +735,67 @@ void GpsTime::task()
             ESP_LOGW(TAG, "constellation mask 0x%02x requested", static_cast<unsigned>(m_gnssMask));
             configureModule();
         }
+        if (m_svinCmd != 0) {
+            const uint8_t cmd = m_svinCmd;
+            m_svinCmd         = 0;
+            /* The command names what only the task may do -- touch the UART --
+             * so the payload is built here rather than by the handler.
+             *
+             * **CFG-TMODE2 (0x06 0x3D), not TMODE3 (0x06 0x71).** At protocol
+             * 22 this is an M8, and TMODE3 is not its message. What gave the
+             * mistake away is that TMODE3 was acknowledged and then read back
+             * as all zeros: the same 28 bytes under TMODE2's layout start with
+             * a byte that is `version` in one and `timeMode` in the other, so
+             * TMODE3 was being told "disabled" each time. NAV-SVIN being NAKed
+             * while TIM-SVIN (0x0D 0x04) answers says the same about the status
+             * message -- this is a TIM firmware and the TIM dialect is the one
+             * it speaks. */
+            uint8_t  tm[28]   = {};
+            uint32_t fixedAcc = 0;
+            uint32_t minDur   = 0;
+            uint32_t accLimit = 0;
+            if (cmd == 1) {
+                tm[0]    = 1; /* survey-in */
+                minDur   = m_svinDurS;
+                /* The receiver's limit is a *variance* in mm squared while
+                 * everybody thinks in an accuracy in mm, so the conversion
+                 * belongs here rather than in the caller's head. 3000 mm is
+                 * 9e6; at 20000 mm it is still inside a uint32. */
+                accLimit = m_svinAccMm * m_svinAccMm;
+            } else if (cmd == 3) {
+                /* ECEF from the receiver's own mean: it reports ECEF and takes
+                 * ECEF, so staying in it avoids a projection between two things
+                 * that already agree. The accuracy goes in as the mean variance
+                 * the survey ended with, which is what the receiver itself uses
+                 * to decide how far to trust the position. */
+                tm[0]    = 2; /* fixed */
+                fixedAcc = m_svinAcc;
+                for (int i = 0; i < 3; ++i) {
+                    std::memcpy(tm + 4 + 4 * i, &m_svinMean[i], 4);
+                }
+            }
+            /* flags stay zero: ECEF, not LLA. */
+            std::memcpy(tm + 16, &fixedAcc, 4);
+            std::memcpy(tm + 20, &minDur, 4);
+            std::memcpy(tm + 24, &accLimit, 4);
+            const int8_t r = sendAndWait(0x06, 0x3D, tm, sizeof(tm));
+            if (r == 1) {
+                m_tmode = cmd == 1 ? 1 : cmd == 3 ? 2 : 0;
+                m_svinAtUs = 0;
+                if (cmd == 1) {
+                    ESP_LOGW(TAG, "survey-in started: %u s minimum, %u mm variance limit",
+                             static_cast<unsigned>(minDur), static_cast<unsigned>(accLimit));
+                } else if (cmd == 3) {
+                    ESP_LOGW(TAG, "position locked fixed at %d %d %d mm", m_svinMean[0],
+                             m_svinMean[1], m_svinMean[2]);
+                } else {
+                    ESP_LOGW(TAG, "time mode cleared: back to a moving position");
+                }
+            } else {
+                ESP_LOGW(TAG, "CFG-TMODE2 %s: time mode unchanged",
+                         r == 0 ? "rejected" : "unanswered");
+            }
+        }
         /* Three more tries at the two messages a module still booting may have
          * refused, ten seconds apart. The boot burst goes out about half a
          * second after power-up, which on this receiver is before it is ready
@@ -1085,6 +1158,20 @@ void GpsTime::configureModule()
         }
     }
 
+    /* UBX-TIM-SVIN (0x0D 0x04), once every ten seconds. It is the survey's own
+     * report -- duration, running mean position, mean variance, observations --
+     * and ten seconds is fresh enough: a survey runs for hours and its numbers
+     * move in minutes. NOT UBX-NAV-SVIN, which this firmware NAKs; the message
+     * exists in the TIM dialect for exactly this product. */
+    {
+        constexpr uint8_t kTimSvin[8] = {0x0D, 0x04, 0, 10, 0, 0, 0, 0};
+        r = sendAndWait(0x06, 0x01, kTimSvin, sizeof(kTimSvin));
+        if (r != 1) {
+            ESP_LOGW(TAG, "TIM-SVIN enable %s: no survey progress",
+                     r == 0 ? "rejected" : "unanswered");
+        }
+    }
+
     /* UBX-MON-VER poll. The protocol version decides which of the above exist
      * at all -- NAV-TIM-TP needs protocol 15 or later -- so it is asked for
      * rather than inferred from silence. This receiver never answers it, which
@@ -1295,6 +1382,8 @@ void GpsTime::onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
         onMonHw(payload, len);
     } else if (cls == 0x01 && id == 0x35) { /* UBX-NAV-SAT */
         onNavSat(payload, len);
+    } else if (cls == 0x0D && id == 0x04) { /* UBX-TIM-SVIN */
+        onNavSvin(payload, len);
     }
 }
 
@@ -1455,6 +1544,90 @@ void GpsTime::onNavSat(const uint8_t *p, uint16_t len)
     m_cn0Used  = used;
     m_navSatAtUs = esp_timer_get_time();
     portEXIT_CRITICAL(&m_mux);
+}
+
+namespace {
+
+/* Integer square root, for turning a variance in mm squared into an accuracy in
+ * mm without pulling in floats. */
+uint32_t isqrt(uint32_t v)
+{
+    uint32_t r = 0;
+    uint32_t bit = 1u << 30;
+    while (bit > v) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return r;
+}
+
+}  // namespace
+
+void GpsTime::onNavSvin(const uint8_t *p, uint16_t len)
+{
+    /* UBX-TIM-SVIN: dur U4, meanX/Y/Z I4, meanV U4, obs U4, valid, active,
+     * reserved U2 -- 28 bytes, confirmed against live frames while a survey was
+     * running (dur, obs and active all read correctly; nothing else in the
+     * message moves that way in step with a survey).
+     *
+     * meanV is a **variance in mm squared**, not an accuracy in mm, so it gets
+     * square-rooted for display. The receiver compares its own limit against
+     * the variance, which is why the limit has to be expressed in mm-squared
+     * terms when it is decided on: a "3000 mm" accuracy is 9e6 of variance.
+     *
+     * The mean is kept after the survey ends, because locking the position
+     * afterwards is the whole point of having run one and the receiver carries
+     * it in this message and nowhere else this firmware can reach. */
+    if (len < 28) {
+        return;
+    }
+    const auto word = [p](int at) {
+        return static_cast<uint32_t>(p[at]) | (static_cast<uint32_t>(p[at + 1]) << 8) |
+               (static_cast<uint32_t>(p[at + 2]) << 16) | (static_cast<uint32_t>(p[at + 3]) << 24);
+    };
+    const uint32_t dur  = word(0);
+    const uint32_t var  = word(16);
+    const uint32_t obs  = word(20);
+    int32_t        mean[3];
+    for (int i = 0; i < 3; ++i) {
+        std::memcpy(&mean[i], p + 4 + 4 * i, 4);
+    }
+
+    portENTER_CRITICAL(&m_mux);
+    for (int i = 0; i < 3; ++i) {
+        m_svinMean[i] = mean[i];
+    }
+    m_svinDur    = dur;
+    m_svinAcc    = var;
+    m_svinObs    = obs;
+    m_svinValid  = p[24] != 0;
+    m_svinActive = p[25] != 0;
+    m_svinAtUs   = esp_timer_get_time();
+    if (m_svinActive) {
+        /* The receiver is the authority on whether this is still running; a
+         * survey started through u-center shows up here too. */
+        m_tmode = 1;
+    }
+    portEXIT_CRITICAL(&m_mux);
+
+    /* Announces the end once, so nobody has to sit and watch it. Logged rather
+     * than acted on: locking the position automatically would throw away the
+     * chance to look at the accuracy first. */
+    static bool wasActive = false;
+    if (wasActive && !m_svinActive && m_tmode == 1) {
+        ESP_LOGW(TAG, "survey-in finished after %u s at %u mm: "
+                      "POST /gps/survey {\"action\":\"fix\"} to lock it",
+                 static_cast<unsigned>(dur), static_cast<unsigned>(isqrt(var)));
+    }
+    wasActive = m_svinActive;
 }
 
 namespace {
@@ -1975,6 +2148,14 @@ GpsTime::Status GpsTime::status() const
         }
         st.gnssCfg = m_gnssNaked ? "rejected" : m_gnssAcked ? "accepted" : "silent";
     }
+    st.timeMode = m_tmode == 1 ? "survey" : m_tmode == 2 ? "fixed" : "moving";
+    st.svinDurS = static_cast<double>(m_svinDur);
+    st.svinAccMm = static_cast<double>(isqrt(m_svinAcc));
+    st.svinVarMm2 = static_cast<double>(m_svinAcc);
+    st.svinObs  = static_cast<double>(m_svinObs);
+    st.svinValid = m_svinValid;
+    st.svinAgeS = m_svinAtUs != 0 ? static_cast<double>(esp_timer_get_time() - m_svinAtUs) / 1e6
+                                  : -1;
     st.pinSel            = m_pinSel;
     st.pinDir            = m_pinDir;
     st.pinVal            = m_pinVal;

@@ -190,6 +190,16 @@ public:
          * constant: BeiDou is refused while GLONASS or Galileo is enabled. */
         std::string gnss;
         std::string gnssCfg;
+        /* Time mode: disabled, surveying, or fixed. With the survey's own
+         * numbers beside it, since "how far along is it and how good is it" is
+         * the whole question once one is running. */
+        std::string timeMode;
+        double   svinDurS   = 0;
+        double   svinAccMm  = 0;
+        double   svinVarMm2 = 0;
+        double   svinObs    = 0;
+        bool     svinValid  = false;
+        double   svinAgeS   = -1;
         /* MON-HW's pin map: which module pins the receiver has assigned, their
          * direction and level. The antenna supervisor is a pin pair, so this is
          * where its numbers come from when CFG-ANT has to name them. */
@@ -266,6 +276,14 @@ public:
      * combinations it takes is the receiver's business -- BeiDou and GLONASS
      * cannot both be set on this one. */
     void requestGnss(uint8_t mask);
+    /* Survey-in of the antenna position, and locking it as a fixed one. A fixed
+     * position is what a timing receiver wants: the position stops being solved
+     * from the clock, so the pulse stops moving with it. Only worth doing
+     * because position error is cheap in time -- 3.3 ns per metre, averaged
+     * over the constellation -- so a survey that lands metres is still better
+     * than none. */
+    void requestSurvey(bool start, uint32_t durS = 86400, uint32_t accMm = 3000);
+    void requestFixPosition();
 
     /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort.
      *
@@ -341,6 +359,7 @@ private:
     void onMonVer(const uint8_t *p, uint16_t len);
     void onMonHw(const uint8_t *p, uint16_t len);
     void onNavSat(const uint8_t *p, uint16_t len);
+    void onNavSvin(const uint8_t *p, uint16_t len);
     void anchor(time_t second);
 
     /* The servo. Each anchor is one sample of esp_timer against the GPS; the
@@ -472,6 +491,20 @@ private:
     uint8_t          m_gnssMask    = 0x65; /* GPS | Galileo | QZSS | GLONASS */
     bool             m_gnssAcked   = false;
     bool             m_gnssNaked   = false;
+    /* Survey-in (CFG-TMODE3). 0 idle, 1 start, 2 stop, 3 lock the current mean
+     * position as a fixed one. The reported position is the receiver's own mean
+     * from NAV-SVIN, kept here so "lock it" does not have to invent one. */
+    volatile uint8_t m_svinCmd     = 0;
+    volatile uint32_t m_svinDurS   = 86400;
+    volatile uint32_t m_svinAccMm  = 3000;
+    uint8_t          m_tmode        = 0; /* 0 disabled, 1 surveying, 2 fixed */
+    int32_t          m_svinMean[3]  = {};
+    uint32_t         m_svinDur      = 0;
+    uint32_t         m_svinAcc      = 0;
+    uint32_t         m_svinObs      = 0;
+    bool             m_svinValid    = false;
+    bool             m_svinActive   = false;
+    int64_t          m_svinAtUs     = 0;
     volatile bool   m_resetReq     = false;
     volatile bool   m_resetCold    = false;
     volatile bool   m_resetHard    = false;
