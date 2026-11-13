@@ -185,6 +185,11 @@ public:
         uint32_t bridgeTx       = 0;
         std::string bridgeEnd;
         std::string bridgeLast;
+        /* What CFG-GNSS asked for, and what the receiver made of it. Reported
+         * because the answer is site and firmware dependent rather than a
+         * constant: BeiDou is refused while GLONASS or Galileo is enabled. */
+        std::string gnss;
+        std::string gnssCfg;
         /* MON-HW's pin map: which module pins the receiver has assigned, their
          * direction and level. The antenna supervisor is a pin pair, so this is
          * where its numbers come from when CFG-ANT has to name them. */
@@ -255,6 +260,12 @@ public:
     void requestAntennaBias(bool on);
     void requestReset(bool cold = false, bool hardware = false, bool powerCycle = false);
     void requestDefaults();
+    /* Replace the constellation mask and re-apply it. Bits are gnssId: GPS 0,
+     * SBAS 1, Galileo 2, BeiDou 3, IMES 4, QZSS 5, GLONASS 6. A mask the
+     * receiver refuses is reported rather than retried, because which
+     * combinations it takes is the receiver's business -- BeiDou and GLONASS
+     * cannot both be set on this one. */
+    void requestGnss(uint8_t mask);
 
     /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort.
      *
@@ -453,6 +464,14 @@ private:
     /* Requests from the HTTP task, serviced by the GPS task on its next pass so
      * that only one thread ever writes the UART or advances the parser. */
     volatile int8_t m_biasReq      = -1; /* -1 none, 0 off, 1 on */
+    /* Constellation mask, and a flag saying one has been asked for. The mask is
+     * one bit per gnssId, which is also how CFG-GNSS orders its blocks: GPS 0,
+     * SBAS 1, Galileo 2, BeiDou 3, IMES 4, QZSS 5, GLONASS 6. */
+    volatile uint8_t m_gnssReqMask = 0;
+    volatile bool    m_gnssReq     = false;
+    uint8_t          m_gnssMask    = 0x65; /* GPS | Galileo | QZSS | GLONASS */
+    bool             m_gnssAcked   = false;
+    bool             m_gnssNaked   = false;
     volatile bool   m_resetReq     = false;
     volatile bool   m_resetCold    = false;
     volatile bool   m_resetHard    = false;

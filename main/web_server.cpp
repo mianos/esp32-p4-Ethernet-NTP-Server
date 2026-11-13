@@ -129,6 +129,7 @@ void NtpWebServer::register_routes()
         {"/ntp/sync",     HTTP_POST, sync_post_handler},
         {"/gps/pps",      HTTP_POST, gps_pps_post_handler},
         {"/gps/ant",      HTTP_POST, gps_ant_post_handler},
+        {"/gps/gnss",     HTTP_POST, gps_gnss_post_handler},
         {"/gps/info",     HTTP_GET,  gps_info_get_handler},
         {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
@@ -468,6 +469,8 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("bridge_tx", static_cast<double>(gps.bridgeTx));
     doc.AddItem("bridge_end", gps.bridgeEnd);
     doc.AddItem("bridge_last", gps.bridgeLast);
+    doc.AddItem("gnss", gps.gnss);
+    doc.AddItem("gnss_cfg", gps.gnssCfg);
     if (gps.locked) {
         doc.AddItem("dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);
         doc.AddItem("lock_window_s", static_cast<double>(gps.lockWindowUs) / 1000000);
@@ -556,6 +559,57 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
     resp.AddItem("requested", bias);
     resp.AddItem("read_back_after_s", 3.0);
     resp.AddItem("note", "drives GPIO17; gps_ant_bias and gps_ant_short report the result");
+    return sendJson(req, resp, 200);
+}
+
+esp_err_t NtpWebServer::gps_gnss_post_handler(httpd_req_t *req)
+{
+    /* Which constellations the receiver solves. This is a switch rather than a
+     * fixed choice because the right answer is site-dependent, and because the
+     * receiver will not take them all.
+     *
+     * BeiDou and GLONASS are mutually exclusive here: enabling BeiDou is NAKed
+     * while GLONASS is on, and NAKed while Galileo is on for the same reason.
+     * So the two coherent sets are "max" (GPS + Galileo + GLONASS + QZSS, 37
+     * satellites in view here, median elevation 49 degrees) and "beidou"
+     * (GPS + BeiDou + QZSS, which trades GLONASS and Galileo for BeiDou). A
+     * raw mask is accepted too, for anything neither name covers, and a mask
+     * the receiver refuses is reported back rather than silently kept. */
+    JsonWrapper doc;
+    if (!readJsonBody(req, doc)) {
+        return ESP_FAIL;
+    }
+
+    /* gnssId order: GPS 0, SBAS 1, Galileo 2, BeiDou 3, IMES 4, QZSS 5,
+     * GLONASS 6. SBAS and IMES are off in both named sets: nothing applies
+     * SBAS corrections and IMES is indoor-only. */
+    std::string set;
+    uint8_t     mask = 0;
+    if (doc.GetField("set", set)) {
+        if (set == "max") {
+            mask = (1u << 0) | (1u << 2) | (1u << 5) | (1u << 6);
+        } else if (set == "beidou") {
+            mask = (1u << 0) | (1u << 3) | (1u << 5);
+        } else {
+            return sendJsonError(req, 400, "set must be \"max\" or \"beidou\"");
+        }
+    } else {
+        double raw = 0;
+        if (!doc.GetField("mask", raw) || raw < 1 || raw > 127) {
+            return sendJsonError(req, 400, "need {\"set\":\"max\"|\"beidou\"} or {\"mask\":1..127}");
+        }
+        mask = static_cast<uint8_t>(raw);
+    }
+
+    GpsTime::instance().requestGnss(mask);
+    ESP_LOGW(TAG, "POST /gps/gnss from %s: mask 0x%02x", callerAddress(req).c_str(),
+             static_cast<unsigned>(mask));
+
+    JsonWrapper resp;
+    resp.AddItem("requested_mask", static_cast<double>(mask));
+    resp.AddItem("read_back_after_s", 20.0);
+    resp.AddItem("note", "gps_gnss and gps_gnss_cfg at /gps/info report what was set and "
+                         "what the receiver said; a mask it refuses leaves the old set");
     return sendJson(req, resp, 200);
 }
 

@@ -724,6 +724,41 @@ Nothing here is followed by `UBX-CFG-CFG`: saving it to the receiver's flash wou
 outlive the firmware and take the module's own defaults away from `u-center`.
 Eleven short frames per boot is the cheaper trade.
 
+### Constellations, and the one pair that will not coexist
+
+`UBX-CFG-GNSS` is asserted at every boot, and the receiver takes it. What it
+asserts is **GPS + Galileo + GLONASS + QZSS**: 37 satellites in view on this site
+against 22 before, median elevation 49° against 35°, and a median C/N0 that did
+not move — the new satellites are weak ones, but they are *high* ones, and height
+is what a position solution has least of.
+
+**BeiDou and GLONASS are mutually exclusive on this receiver**, which is
+documented nowhere obvious and took a bisect over every combination. Enabling
+BeiDou comes back `NAK` while GLONASS is on, and `NAK` while Galileo is on for the
+same reason, so of the six constellations only these two coherent sets exist:
+
+| `POST /gps/gnss` | Set | In view here |
+|---|---|---|
+| `{"set":"max"}` (default) | GPS, Galileo, GLONASS, QZSS | 37 |
+| `{"set":"beidou"}` | GPS, BeiDou, QZSS | — trades GLONASS and Galileo for BeiDou |
+
+`{"mask":N}` is accepted for anything neither name covers, one bit per `gnssId`
+(GPS 0, SBAS 1, Galileo 2, BeiDou 3, IMES 4, QZSS 5, GLONASS 6). A mask the
+receiver refuses leaves the old set in place and says so: `gnss_cfg` goes
+`rejected`, beside `gnss`, which names what was asked for. A mask change re-runs
+the whole message set, because the acquisition is thrown away with it.
+
+SBAS and IMES are off in both sets. Nothing here applies SBAS corrections, so its
+two geostationary satellites would be two more low measurements for a channel;
+IMES is an indoors system. The channel counts are the receiver's own reported
+defaults, untouched — they are already the split u-blox ships for a five
+constellation mask, and a different one would be a guess against a working
+baseline.
+
+Turning a constellation on costs minutes, not seconds: Galileo appeared about
+seven minutes after being enabled and then filled out to ten satellites. Judging
+one by the first minute after the change will look like nothing happened.
+
 ### Antennas, and what the front end says about one
 
 The M8T **does have an antenna supervisor**, and it took a while to find because
@@ -831,6 +866,8 @@ Two hooks exist for a bench session:
 ```console
 $ curl -s -X POST -d '{"bias":"on"}' http://192.0.2.20/gps/ant
 {"requested":"on","read_back_after_s":3,...}
+$ curl -s -X POST -d '{"set":"max"}' http://192.0.2.20/gps/gnss      # GPS+Galileo+GLONASS+QZSS
+$ curl -s -X POST -d '{"set":"beidou"}' http://192.0.2.20/gps/gnss   # GPS+BeiDou+QZSS
 $ curl -s -X POST http://192.0.2.20/gps/reset                      # hot start, almanac kept
 $ curl -s -X POST -d '{"cold":true}' http://192.0.2.20/gps/reset  # discard the almanac
 $ curl -s -X POST -d '{"hardware":true}' http://192.0.2.20/gps/reset

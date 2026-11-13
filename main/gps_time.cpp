@@ -183,6 +183,12 @@ void GpsTime::requestAntennaBias(bool on)
     m_biasReq = on ? 1 : 0;
 }
 
+void GpsTime::requestGnss(uint8_t mask)
+{
+    m_gnssReqMask = mask;
+    m_gnssReq     = true;
+}
+
 void GpsTime::requestDefaults()
 {
     m_defaultsReq = true;
@@ -707,6 +713,16 @@ void GpsTime::task()
                 ESP_LOGW(TAG, "hardware reset queued to re-initialise the front end");
             }
         }
+        if (m_gnssReq) {
+            m_gnssReq  = false;
+            m_gnssMask = m_gnssReqMask;
+            /* The whole message set, not one frame. A mask change throws the
+             * acquisition away, and configureModule() is the only thing that
+             * knows every message the clock needs, so letting it run is
+             * cheaper than a second path that could drift from it. */
+            ESP_LOGW(TAG, "constellation mask 0x%02x requested", static_cast<unsigned>(m_gnssMask));
+            configureModule();
+        }
         /* Three more tries at the two messages a module still booting may have
          * refused, ten seconds apart. The boot burst goes out about half a
          * second after power-up, which on this receiver is before it is ready
@@ -970,6 +986,69 @@ void GpsTime::configureModule()
     } else {
         ESP_LOGW(TAG, "CFG-ANT %s: antenna bias is whatever the module was left set to",
                  r == 0 ? "rejected" : "unanswered");
+    }
+
+    /* UBX-CFG-GNSS (class 0x06, id 0x3E). Which constellations the receiver
+     * solves, and how many of its 32 channels each may have.
+     *
+     * **BeiDou and GLONASS are mutually exclusive on this receiver**, and that
+     * is not documented anywhere obvious -- it took a bisect over every
+     * combination here. Enabling BeiDou is NAKed while GLONASS is on, and
+     * NAKed while Galileo is on for the same reason. What is accepted is
+     * Galileo with GLONASS, or BeiDou without either. The numbers decided the
+     * choice: Galileo with GLONASS and QZSS takes the sky from 22 satellites in
+     * view to 37 and lifts the median elevation from 35 to 49 degrees, which is
+     * the axis a survey cares about. BeiDou would have replaced GLONASS rather
+     * than added to it.
+     *
+     * SBAS and IMES stay off. Nothing here applies SBAS corrections, so its
+     * two geostationary satellites would only be two more low-elevation
+     * measurements for a channel; IMES is an indoors system.
+     *
+     * The channel counts are the receiver's own reported defaults, untouched:
+     * they are already the split u-blox ships for a five-constellation mask,
+     * and inventing a different one is a guess against a working baseline. */
+    {
+        struct GnssBlock
+        {
+            uint8_t  id;
+            uint8_t  res;
+            uint8_t  max;
+            uint32_t flags;
+        };
+        /* flags: bit 0 enables; the sigCfgMask the receiver reports sits above
+         * it and is kept verbatim, since only the enable bit was ever the
+         * question. */
+        const GnssBlock kBlocks[] = {
+            {0, 8, 16, 0x01010000}, /* GPS      */
+            {1, 1, 3, 0x01010000},  /* SBAS     */
+            {2, 4, 8, 0x01010000},  /* Galileo  */
+            {3, 8, 16, 0x01010000}, /* BeiDou   */
+            {4, 0, 8, 0x03010000},  /* IMES     */
+            {5, 0, 3, 0x05010000},  /* QZSS     */
+            {6, 8, 14, 0x01010000}, /* GLONASS  */
+        };
+        constexpr int    kCount = static_cast<int>(sizeof(kBlocks) / sizeof(kBlocks[0]));
+        uint8_t          cfg[4 + 8 * kCount] = {0x00, 32, 32, kCount};
+        const uint32_t   mask = m_gnssMask;
+        for (int i = 0; i < kCount; ++i) {
+            const uint32_t flags = kBlocks[i].flags | (((mask >> kBlocks[i].id) & 1u) != 0 ? 1u : 0u);
+            uint8_t       *b     = cfg + 4 + 8 * i;
+            b[0]                 = kBlocks[i].id;
+            b[1]                 = kBlocks[i].res;
+            b[2]                 = kBlocks[i].max;
+            b[3]                 = 0;
+            std::memcpy(b + 4, &flags, 4);
+        }
+        r = sendAndWait(0x06, 0x3E, cfg, sizeof(cfg));
+        m_gnssAcked = r == 1;
+        m_gnssNaked = r == 0;
+        if (r == 1) {
+            ESP_LOGI(TAG, "CFG-GNSS accepted: constellations 0x%02x", static_cast<unsigned>(mask));
+        } else {
+            ESP_LOGW(TAG, "CFG-GNSS %s: constellation set is whatever the module had",
+                     r == 0 ? "rejected" : "unanswered");
+        }
     }
 
     r = sendAndWait(0x06, 0x01, kNavPvt, sizeof(kNavPvt));
@@ -1879,6 +1958,23 @@ GpsTime::Status GpsTime::status() const
     st.bridgeTx          = m_bridgeTx;
     st.bridgeEnd.assign(m_bridgeEnd);
     st.bridgeLast.assign(m_bridgeLast);
+    /* Named rather than numeric: the interesting thing is which constellations
+     * are being solved, and a reader should not have to hold the gnssId table
+     * in their head to find out. */
+    {
+        static constexpr const char *kNames[] = {"GPS", "SBAS", "Galileo", "BeiDou",
+                                                 "IMES", "QZSS", "GLONASS"};
+        st.gnss.clear();
+        for (int i = 0; i < 7; ++i) {
+            if ((m_gnssMask >> i) & 1u) {
+                if (!st.gnss.empty()) {
+                    st.gnss += ',';
+                }
+                st.gnss += kNames[i];
+            }
+        }
+        st.gnssCfg = m_gnssNaked ? "rejected" : m_gnssAcked ? "accepted" : "silent";
+    }
     st.pinSel            = m_pinSel;
     st.pinDir            = m_pinDir;
     st.pinVal            = m_pinVal;
