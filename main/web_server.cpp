@@ -240,6 +240,32 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
             json.AddItem("gps_lock_window_s",
                          static_cast<double>(gps.lockWindowUs / 1000000));
         }
+        /* What the receiver says about its own pulse, once it has said
+         * anything: the quantisation it admits to, the spread our stamps
+         * actually show, and whether the pulse is on the UTC second. These are
+         * the numbers behind root delay and dispersion -- before TIM-TP they
+         * were a constant and an assumption. */
+        if (gps.timTpCount != 0) {
+            if (gps.qErrValid) {
+                json.AddItem("gps_tp_qerr_ns", static_cast<double>(gps.qErrNs));
+            }
+            json.AddItem("gps_tp_jitter_ns", static_cast<double>(gps.jitterNs));
+            json.AddItem("gps_tp_on_second", gps.pulseOnSecond);
+        }
+        /* Which receiver this is, and whether it took the two configuration
+         * messages that make the rest of these numbers mean anything. Read here
+         * rather than from the boot log: the console drops bytes exactly when
+         * both of these are decided. */
+        if (!gps.moduleId.empty()) {
+            json.AddItem("gps_module", gps.moduleId);
+        }
+        json.AddItem("gps_tp5_ok", !gps.tp5Rejected);
+        /* Three states, because they mean different things: refused (no such
+         * message on this firmware), accepted (it exists and still never
+         * arrived -- something else is wrong), or neither (never asked). */
+        json.AddItem("gps_timtp", gps.timTpRejected ? "rejected"
+                                   : gps.timTpAcked  ? "accepted"
+                                                     : "silent");
         /* The leap-second notice a reply would carry. leap_pending is what puts
          * the indicator at 1 (or 2); leap_in_s only exists while something is
          * actually pending. */
@@ -291,9 +317,10 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
          * at all, and 0 the rest of the time. */
         json.AddItem("ntp_leap", static_cast<double>(ref.locked ? ref.leap : 3));
         /* The same two numbers the reply's root delay and root dispersion
-         * fields carry, before 16.16 rounds them: 0 delay from the GPS, the
-         * 0.992 ms LAN guess from an upstream nobody measured, and dispersion
-         * growing with the age of the reference in both cases. */
+         * fields carry, before 16.16 rounds them: from the GPS, a measured
+         * quantisation and jitter once NAV-TIM-TP is flowing, else the named
+         * fallback; from an upstream nobody measured, the 0.992 ms LAN guess.
+         * Dispersion grows with the age of the reference in both cases. */
         const NtpServer::RootFigures root = server.wireRootFigures();
         json.AddItem("ntp_root_delay_us", root.delayUs);
         json.AddItem("ntp_root_dispersion_us", root.dispersionUs);

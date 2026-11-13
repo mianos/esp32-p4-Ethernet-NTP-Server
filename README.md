@@ -424,6 +424,15 @@ source: `ntp_server` is `null` (nothing is polled, so there is no upstream),
 2 2D, 3 3D), `gps_sats`, `gps_pps_age_ms` and `gps_offset_us` describe the
 receiver itself — see [GPS](#gps-u-blox-lea-8--pps) for what those numbers mean.
 
+`gps_tp5_ok` and `gps_timtp` are the receiver's answers to the two configuration
+messages that decide whether any of the rest can be trusted: whether the 1 Hz
+timepulse was asserted, and whether `NAV-TIM-TP` exists on this firmware
+(`rejected`, `accepted` or `silent` — three different faults). `gps_module` is what
+`MON-VER` said, and is absent because this unit does not answer it. When `TIM-TP`
+does flow, `gps_tp_qerr_ns` is the quantisation the receiver admits to,
+`gps_tp_jitter_ns` the spread the stamps actually show, and `gps_tp_on_second`
+whether the pulse is on the UTC second.
+
 The last group is the responder's: `serve_ntp` is whether it is listening,
 `ntp_stratum` / `ntp_refid` / `ntp_leap` are what a reply would claim *right now*
 (so they flip to `16` / `"INIT"` / `3` the moment the clock stops being fresh),
@@ -432,8 +441,8 @@ to decide how much to trust it — the same numbers the wire carries, before 16.
 rounds them to 15.26 µs steps — and `ntp_requests` is how many requests it has
 answered since boot. They are absent while it is not running. Reporting the root
 figures here rather than leaving them to be inferred keeps the endpoint honest in
-the same way the reply is: 10 µs of dispersion from the GPS, 992 µs from an
-upstream nobody measured.
+the same way the reply is: 2 µs of delay and 2.5 µs of dispersion from the GPS,
+992 µs from an upstream nobody measured.
 
 `/config` takes and returns a flat JSON object. Values are strings; keys that
 are not registered are ignored, so an older/newer client will not break it:
@@ -674,14 +683,35 @@ what is read here. `NAV-TIMELS` is 24 bytes on a line that has room: the GPS-UTC
 offset, whether a leap is announced, and the countdown to it, which is the only
 source for the leap indicator in a reply's first byte.
 
-It is deliberately **not** followed by `UBX-CFG-CFG`: saving that to the
-receiver's flash would outlive the firmware and take the module's own defaults
-away from `u-center`. Nine short frames per boot is the cheaper trade.
+The timepulse is **asserted**, not assumed. `UBX-CFG-TP5` goes out first — 1 Hz
+and 1 Hz again for the locked case, `alignToTow`, rising edge, UTC grid, 100 ms
+wide — with the antenna and user delays left at zero because the lead's delay is
+not known and a made-up figure would be worse than none. A pulse somebody moved in
+`u-center` is the one fault that makes this server confidently wrong rather than
+merely stale, and 32 bytes per boot is cheaper than a README asking the reader to
+go and look. The module's answer is reported, not swallowed: `/healthz` carries
+`gps_tp5_ok`, and a refusal is a warning at boot.
 
-The timepulse is left at the module's default — 1 Hz, UTC-aligned, rising edge at
-the top of the second. If it has been changed with `u-center`, `UBX-CFG-TP5` wants
-`syncMode` UTC and a 1 s period; a pulse that is not on the UTC boundary would
-make this server confidently wrong, which is the one failure worth checking first.
+Each configuration message is sent on its own and the firmware waits for that
+message's own ACK or NAK before sending the next, because this receiver **does not
+answer everything** — `MON-VER` gets silence, so `gps_module` stays absent — and an
+order-based guess drifts apart inside one boot. The three replies it does give are
+acted on directly rather than matched up afterwards.
+
+**`UBX-NAV-TIM-TP` is asked for and refused.** It would be the obvious way to stop
+guessing: every pulse would arrive with the receiver's own quantisation error
+(`qErr`) and its nominal time of week, turning root delay from an assumption into
+a measurement. This unit acknowledges nothing — it NAKs the enable — so the
+message is in the code and dormant. The budget does not depend on it: the jitter
+it would have described is measured instead from the servo's own residuals
+([the numbers](#accuracy-and-the-parts-that-are-not)), and if a module that has
+the message is ever fitted, `qErr` and the pulse-position check start contributing
+on their own. `/healthz` reports the answer as `gps_timtp`: `rejected`, `accepted`
+or `silent`, which are three different faults and worth keeping apart.
+
+Nothing here is followed by `UBX-CFG-CFG`: saving it to the receiver's flash would
+outlive the firmware and take the module's own defaults away from `u-center`.
+Eleven short frames per boot is the cheaper trade.
 
 **Baud rate.** 9600 is tried first. With no valid UBX frame in 4 s the firmware
 moves to 38400, 115200, 57600 and 19200, then starts over — a receiver that has
@@ -703,7 +733,7 @@ rate is known — the first minute, sixty anchors — there is nothing to hold o
 guess, so three missed edges demote the server and the log says so. Once the rate
 is measured, the elapsed time is corrected by it, a ten-minute gap costs
 microseconds rather than milliseconds, and the window stretches to ten minutes
-with root dispersion growing the whole way (10 µs at the edge, 610 µs at the end
+with root dispersion growing the whole way (2.5 µs at the edge, 602 µs at the end
 of it) so a client can see the claim decay instead of having to trust it.
 
 The numbers below are from this unit, and they are the reason the second window
@@ -736,10 +766,27 @@ $ curl -s http://192.0.2.20/healthz | tr ',' '\n' | grep ntp_
 "ntp_leap":3
 ```
 
-One second earlier it was a stratum-1 answer with 610 µs of dispersion; one second
+One second earlier it was a stratum-1 answer with 602 µs of dispersion; one second
 later it is `INIT` with LI 3, and `sntp` refuses it — which is the whole point of
 having a window: a server that has not seen its reference for ten minutes should
 say so in the one field a client is guaranteed to read.
+
+Those are the numbers the budget produces. Sampled out of `/healthz` while a 121 s
+holdover ran, and then the edge back:
+
+```console
+# POST /gps/pps {"suppress_s":120}, dispersion as the anchor ages away
+"gps_pps_age_ms":28721   "gps_dispersion_us":30.529
+"gps_pps_age_ms":56801   "gps_dispersion_us":58.529
+"gps_pps_age_ms":84885   "gps_dispersion_us":86.529
+"gps_pps_age_ms":112963  "gps_dispersion_us":114.529
+# the first edge back, 121 s later
+"gps_holdover_s":120.9964  "gps_holdover_error_us":-2.94
+```
+
+One microsecond a second from 2.5 µs at the edge, which is the 1 ppm wander term
+and nothing else. The run ended claiming 114 µs for an error that came back at
+2.94 µs: 39 times the truth, in the direction a promise should err.
 
 There is no silent fallback to SNTP either. `timeSource` names the authoritative
 source; if that source is unhealthy the answer is stratum 16, not a stratum whose
@@ -832,14 +879,28 @@ mistaken for a fault.
   second that repeats or vanishes is the second the timestamp repeats or vanishes.
   Unlocked, LI is 3, because a server that has lost its reference should not be
   quoting a leap notice either.
-- **What a client is told about the error** is root delay 0 (the reference is local)
-  and root dispersion 10 µs growing at 1 ppm of the anchor's age: 11 µs a second
-  after the edge, 92 µs after 82 s, 610 µs at the end of the ten-minute window. That
-  is the crystal wandering with temperature, not the fit — quoting the fit's ppb
-  would be a promise about a room that has not been measured — and it is what
-  makes the holdover honest: a client that watches dispersion can tell how stale
-  the claim is getting, and when the window is exceeded the answer is stratum 16,
-  not a slightly-more-wrong stratum 1.
+- **What a client is told about the error** is root delay 2 µs and root dispersion
+  2.5 µs at the edge, growing at 1 ppm of the anchor's age from there: 3.5 µs a
+  second after the edge, 84 µs after 82 s, 602 µs at the end of the ten-minute
+  window. The delay is the measurement path — two microseconds of interrupt
+  latency, a named constant — plus half of any pulse quantisation the receiver
+  states about itself; the dispersion adds the stamping jitter actually measured
+  from the servo's residuals, 0.3 to 0.5 µs across the runs below. Both fields used
+  to be worse than this: root delay was **0**, which was an assumption dressed as a
+  number, and the dispersion was a flat 10 µs guess that no measurement stood
+  behind. Growing at 1 ppm is the crystal wandering with temperature, not the fit —
+  quoting the fit's ppb would be a promise about a room that has not been measured
+  — and it is what makes the holdover honest: a client that watches dispersion can
+  tell how stale the claim is getting, and when the window is exceeded the answer
+  is stratum 16, not a slightly-more-wrong stratum 1.
+
+  The measured budget is a *narrowing* — 2.5 µs at the edge against the old 10 —
+  and it is worth knowing where the floor is: NTP's 16.16 field resolves 15.26 µs,
+  and `toFixed()` rounds up so a microsecond clock never claims zero. At the edge
+  both fields therefore go out as the same single least significant bit, and the
+  improvement only becomes visible on the wire once the anchor has aged a second or
+  two. `/healthz` carries the unrounded numbers, which is the honest place to read
+  them.
 
 ### Enabling it, and what it looks like
 
@@ -851,8 +912,9 @@ $ curl -s -X POST -H 'Content-Type: application/json' \
 $ curl -s http://192.0.2.20/healthz
 { ... "ntp_source":"gps","ntp_server":null,"ntp_synced":true,"last_sync":1794526208,
   "gps_fix":3,"gps_sats":18,"gps_pps_age_ms":82111,"gps_offset_us":30,
-  "gps_rate_ppm":-29.968,"gps_rate_n":183,"gps_dispersion_us":92,
+  "gps_rate_ppm":-29.968,"gps_rate_n":183,"gps_dispersion_us":84.5,
   "gps_lock_window_s":600,"gps_leap_s":18,"gps_leap_pending":false,
+  "gps_tp5_ok":true,"gps_timtp":"rejected",
   "gps_holdover_s":150.9955,"gps_holdover_error_us":-2.032,
   "serve_ntp":true,"ntp_stratum":1,"ntp_refid":"GPS","ntp_leap":0,
   "ntp_root_delay_us":0,"ntp_root_dispersion_us":92,"ntp_requests":17}
@@ -954,9 +1016,9 @@ is also how the `INIT` refid and the zero reference timestamp were verified.)
   an all-zero one; receive and transmit are taken around the reply build.
 - **Precision `-20`** (about 1 µs — what this clock can distinguish), and root
   delay / root dispersion **as the reference states them**, because the two
-  references are not the same distance away. From the GPS: root delay 0, root
-  dispersion 10 µs + 1 ppm of the anchor's age — 610 µs at the end of the ten-minute
-  holdover ([the numbers, and the measurement](#accuracy-and-the-parts-that-are-not)).
+  references are not the same distance away. From the GPS: root delay 2 µs and root
+  dispersion 2.5 µs, + 1 ppm of the anchor's age — 602 µs at the end of the
+  ten-minute holdover ([the numbers, and the measurement](#accuracy-and-the-parts-that-are-not)).
   From the upstream: root delay 65 units of 16.16 — 0.992 ms, the standing guess,
   since lwIP exposes neither the upstream's root delay nor our round trip to it —
   and root dispersion the same 0.992 ms plus 15 ppm of the time since the last
@@ -1032,14 +1094,18 @@ sntp_exchange {
 
 `ref: 47505300` is `"GPS\0"`, the RFC 5905 stratum-1 refid. `t_ref` has a zero
 fraction because it is an anchor: the integer second the last PPS edge marked.
-`delay: 0000.0000` is root delay 0 — the reference is the receiver on the board,
-not a server across a network — and `dispersion: 0000.0001` is one unit of NTP's
-16.16 short format, 15.26 µs, because 10 µs does not fit in a smaller one. It
-grows at 1 ppm of the anchor's age from there: 92 µs at 82 s, 610 µs at the end of
-the ten-minute holdover. `/healthz` reports both before that rounding
-(`ntp_root_delay_us` 0, `ntp_root_dispersion_us` 10 — the numbers this paragraph is
-about). Compare with the upstream case below, where the same arithmetic starts
-from 0.992 ms and grows at 15 ppm of the poll interval.
+`delay: 0000.0001` is root delay, and it used to be `0000.0000`: the reference is
+the receiver on the board, not a server across a network, so there is no path to
+measure in the ordinary sense — but there is an interrupt to enter, and calling
+that zero was a claim nothing stood behind. One unit of NTP's 16.16 short format is
+15.26 µs, which is what the measured 2 µs rounds up to; `toFixed()` rounds up
+rather than down so a microsecond clock never files a zero. `dispersion` goes out
+as the same unit for the same reason, and grows at 1 ppm of the anchor's age from
+there: 84 µs at 82 s, 602 µs at the end of the ten-minute holdover. `/healthz`
+reports both before that rounding (`ntp_root_delay_us` 2,
+`ntp_root_dispersion_us` 2.5 — the numbers this paragraph is about). Compare with
+the upstream case below, where the same arithmetic starts from 0.992 ms and grows
+at 15 ppm of the poll interval.
 
 With `timeSource=dhcp` instead:
 

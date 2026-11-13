@@ -51,20 +51,24 @@
  *    five minutes. Served time is corrected by it, which removes the sawtooth
  *    between edges and, far more importantly, turns a holdover from "3 seconds
  *    then demote" into minutes of microsecond-level time;
- *  - the error budget. Locked, the dispersion this reference states is ten
- *    microseconds plus one ppm for every second since the last edge: not the
- *    fit's own confidence (which is parts per billion and would be a boast) but
- *    a cheap crystal's wander over temperature, which is the term that actually
- *    decides how long a holdover is worth serving.
-
+ *  - the error budget. Locked, the dispersion this reference states is what it
+ *    has measured about its own stamping -- the receiver's stated pulse
+ *    quantisation and the observed spread between edges -- plus one ppm for
+ *    every second since the last edge: not the fit's own confidence (which is
+ *    parts per billion and would be a boast) but a cheap crystal's wander over
+ *    temperature, which is the term that actually decides how long a holdover is
+ *    worth serving.
  *
- * The receiver is configured over UART on every boot -- UBX-NAV-PVT at 1 Hz,
- * UBX-NAV-TIMELS at 1 Hz for the leap-second notice, NMEA off -- and
- * deliberately not saved to its flash: the module keeps its own defaults, so it
- * can still be plugged into u-center afterwards. The PPS configuration is
- * likewise left at the module's default (1 Hz, UTC-aligned, rising edge at the
- * top of the second); if it has been changed with u-center, CFG-TP5 wants
- * syncMode UTC and a period of 1 s.
+ * The receiver is configured over UART on every boot -- NAV-PVT at 1 Hz for the
+ * date, NAV-TIM-TP at 1 Hz for the pulse's own qualities, NAV-TIMELS at 1 Hz for
+ * the leap-second notice, NMEA off -- and deliberately not saved to its flash.
+ * (This unit rejects the TIM-TP enable, so that half of it is dormant here; the
+ * jitter the message would have described is measured from the servo instead.) It is
+ * the module keeps its own defaults, so it can still be plugged into u-center
+ * afterwards. The timepulse is asserted with CFG-TP5 rather than assumed: 1 Hz,
+ * UTC-aligned, rising edge, 100 ms wide. A pulse somebody moved in u-center is
+ * the one fault that makes this server confidently wrong, and a 32-byte frame
+ * per boot is cheaper than a README telling the reader to go and look.
  *
  * Without a module on the pins (or with the wires crossed) nothing here fails:
  * no UBX frames arrive, the baud scan says so once, and the reference answers
@@ -108,8 +112,38 @@ public:
         int64_t  lockWindowUs = 0;
 
         /* The error budget this reference states for itself, in nanoseconds:
-         * the anchor's own accuracy while fresh, plus wander since the edge. */
+         * the anchor's own accuracy while fresh, plus wander since the edge.
+         * rootDelayNs is the half of it that sits in the measurement path --
+         * the interrupt's latency and the receiver's own pulse quantisation --
+         * and dispersionNs is that plus the edge-to-edge jitter actually seen
+         * plus wander since the edge. Neither is a constant any more: see
+         * onNavTimTp() for what is measured and what stays named. */
+        int64_t  rootDelayNs  = 0;
         int64_t  dispersionNs = 0;
+
+        /* What UBX-NAV-TIM-TP says about the pulse itself: the receiver's
+         * stated quantisation error (how well it knows where the edge truly
+         * is, picoseconds on the wire, ns here), the measured spread of our own
+         * stamping, and whether the pulse is where the top of the second puts
+         * it. timTpCount is a plain "is it flowing" counter, so a module that
+         * ignores the message is distinguishable from a quiet one. */
+        int32_t  qErrNs         = 0;
+        bool     qErrValid      = false;
+        int64_t  jitterNs       = 0;
+        uint32_t timTpCount     = 0;
+        bool     pulseOnSecond  = false;
+
+        /* What the receiver says it is, from UBX-MON-VER, and which of this
+         * firmware's two configuration messages it refused. An empty moduleId
+         * with both flags false means the question was never answered -- a
+         * module that ignores the poll is not the same as one that answered and
+         * refused, and TIM-TP needs protocol 15, which an old unit will not
+         * have. All three go out over /healthz rather than only to a log that
+         * drops bytes at exactly the wrong moment. */
+        std::string moduleId;
+        bool     tp5Rejected   = false;
+        bool     timTpRejected = false;
+        bool     timTpAcked    = false;
 
         /* The last holdover, and what it cost: how long the edge was missing
          * and what the servo's prediction was worth when it came back. The only
@@ -175,6 +209,20 @@ private:
     void advanceBaud();
     void configureModule();
     void sendUbx(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len);
+
+    /* One configuration message at a time, waiting for its own ACK or NAK
+     * before the next is sent. The reply's payload names the class and id of
+     * the message it answers, so a single outstanding message is unambiguous --
+     * and it has to be, because this receiver does not answer everything (it
+     * never answers MON-VER) and an order-based guess drifts apart within one
+     * boot. pump() keeps parsing while it waits; the GPS task would otherwise
+     * be blind for the duration. */
+    int8_t  sendAndWait(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len);
+    void    pump(int64_t timeoutUs);
+    uint8_t m_awaitCls      = 0;
+    uint8_t m_awaitId       = 0;
+    int8_t  m_awaitResult   = -1; /* -1 pending, 1 ACK, 0 NAK, -2 timed out */
+
     void logLockChange();
 
     /* UBX framing, one byte at a time. NMEA sentences and rubbish are skipped
@@ -184,6 +232,8 @@ private:
     void onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len);
     void onNavPvt(const uint8_t *p, uint16_t len);
     void onNavTimels(const uint8_t *p, uint16_t len);
+    void onNavTimTp(const uint8_t *p, uint16_t len);
+    void onMonVer(const uint8_t *p, uint16_t len);
     void anchor(time_t second);
 
     /* The servo. Each anchor is one sample of esp_timer against the GPS; the
@@ -217,6 +267,7 @@ private:
     int64_t      m_offsetUs     = 0;
     int32_t      m_ratePpb      = 0; /* the servo's answer, used by now() */
     uint16_t     m_rateSamples  = 0;
+
     int8_t       m_leapSeconds  = 0;
     int8_t       m_leapChange   = 0;
     int32_t      m_leapInS      = 0;
@@ -224,6 +275,17 @@ private:
     int64_t      m_ppsSuppressUntilUs = 0; /* the POST /gps/pps hook */
     int64_t      m_lastHoldoverUs     = 0;
     int64_t      m_lastHoldoverErrNs  = 0;
+
+    /* What TIM-TP has said, when the receiver has it at all, plus the spread
+     * our own stamps show. The spread comes from the servo's residuals rather
+     * than from TIM-TP, because this module refuses TIM-TP: the fit already
+     * computes how far each edge sits from the line through all of them, and
+     * that is the same jitter the message would have described. */
+    uint32_t     m_timTpCount      = 0;
+    int32_t      m_qErrNs          = 0;
+    bool         m_qErrValid       = false;
+    bool         m_pulseOnSecond   = false;
+    int64_t      m_jitterNs        = 0;
 
     /* The GPS task's own state; no other task reads it. */
     Parse    m_parse        = Parse::Sync1;
@@ -234,8 +296,9 @@ private:
     uint8_t  m_ckA          = 0;
     uint8_t  m_ckB          = 0;
     bool     m_overflow     = false;
-    uint8_t  m_payload[100] = {};
+    uint8_t  m_payload[160] = {};
     uint32_t m_pairedCount  = 0; /* the PPS edge the current anchor came from */
+    uint32_t m_framesLogged = 0;
     bool     m_stepped      = false;
     bool     m_frameSeen    = false;
     bool     m_fixLogged    = false;
@@ -264,6 +327,19 @@ private:
     bool       m_holdoverLogged    = false;
     int8_t     m_leapLoggedSeconds = -1;
     int8_t     m_leapLoggedChange  = 0;
+    bool       m_timTpLogged       = false;
+    bool       m_timTpGoneLogged   = false;
+    uint32_t   m_timTpLastCount    = 0;
+    int64_t    m_timTpLastUs       = 0;
+    bool       m_pulseOnSecondSeen = true;
+    bool       m_tp5Acked          = false;
+    bool       m_tp5Naked          = false;
+    bool       m_timTpNaked        = false;
+    bool       m_timTpAcked        = false;
+    bool       m_verLogged         = false;
+    bool       m_timTpProbed       = false;
+    int64_t    m_timTpProbeAtUs    = 0;
+    char       m_moduleId[160]     = {};
 };
 
 /* The GPS as the responder sees it: stratum 1 and refid "GPS" while the PPS is
