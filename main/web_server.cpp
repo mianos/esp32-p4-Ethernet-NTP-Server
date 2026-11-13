@@ -128,6 +128,8 @@ void NtpWebServer::register_routes()
         {"/config/reset", HTTP_POST, config_reset_post_handler},
         {"/ntp/sync",     HTTP_POST, sync_post_handler},
         {"/gps/pps",      HTTP_POST, gps_pps_post_handler},
+        {"/gps/ant",      HTTP_POST, gps_ant_post_handler},
+        {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
         {"/firmware",     HTTP_POST, firmware_post_handler},
     };
@@ -266,6 +268,41 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("gps_timtp", gps.timTpRejected ? "rejected"
                                    : gps.timTpAcked  ? "accepted"
                                                      : "silent");
+
+        /* The antenna group, for swapping leads and comparing them. `gps_ant`
+         * is what the supervisor found (ok / short / open, or no reading), and
+         * `gps_ant_power` what the bias tee is doing -- the two questions a
+         * high-gain antenna with a preamp actually raises. `gps_cn0_*` is the
+         * comparison metric: C/N0 on used satellites, not satellite count,
+         * because a better antenna adds the marginal ones last. agc/noise/jam
+         * are the overload tell-tales -- a preamp that is too strong for this
+         * receiver drives agc down and the jamming state up while the C/N0
+         * still looks flattering. */
+        json.AddItem("gps_ant_cfg", gps.antCfgRejected ? "rejected"
+                                    : gps.antCfgAcked  ? "accepted"
+                                                       : "silent");
+        if (gps.monHwValid) {
+            static constexpr const char *kAntStatus[] = {"init", "unknown", "ok", "short", "open"};
+            static constexpr const char *kAntPower[]  = {"off", "on", "unknown"};
+            static constexpr const char *kJam[]       = {"unknown", "ok", "warning", "critical"};
+            json.AddItem("gps_ant", gps.antStatus <= 4 ? kAntStatus[gps.antStatus] : "unknown");
+            json.AddItem("gps_ant_power", gps.antPower <= 2 ? kAntPower[gps.antPower] : "unknown");
+            json.AddItem("gps_noise_dbm", -static_cast<double>(gps.noisePerMs));
+            json.AddItem("gps_agc", static_cast<double>(gps.agcCnt));
+            json.AddItem("gps_jam_ind", static_cast<double>(gps.jamInd));
+            json.AddItem("gps_jam", gps.jamState <= 3 ? kJam[gps.jamState] : "unknown");
+            /* How stale the supervisor reading is, so a frozen set of these
+             * cannot pass for a live one. */
+            json.AddItem("gps_ant_age_s", static_cast<double>(gps.monHwAgeUs) / 1e6);
+        }
+        /* Absent until a NAV-SAT has been parsed, and stale-flagged after 5 s,
+         * so a stopped message cannot pass an old C/N0 off as a live one. */
+        if (gps.cn0Used != 0 || gps.navSatAgeUs >= 0) {
+            json.AddItem("gps_cn0_max", static_cast<double>(gps.cn0Max));
+            json.AddItem("gps_cn0_mean", static_cast<double>(gps.cn0Mean));
+            json.AddItem("gps_cn0_used", static_cast<double>(gps.cn0Used));
+            json.AddItem("gps_cn0_age_s", static_cast<double>(gps.navSatAgeUs) / 1e6);
+        }
         /* The leap-second notice a reply would carry. leap_pending is what puts
          * the indicator at 1 (or 2); leap_in_s only exists while something is
          * actually pending. */
@@ -466,6 +503,51 @@ esp_err_t NtpWebServer::gps_pps_post_handler(httpd_req_t *req)
     resp.AddItem("holdover_s", static_cast<double>(gps.ppsAgeUs > 0 ? gps.ppsAgeUs / 1000000 : 0));
     ESP_LOGW(TAG, "POST /gps/pps from %s: suppress_s=%u", caller.c_str(),
              static_cast<unsigned>(applied));
+    return sendJson(req, resp, 200);
+}
+
+esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
+{
+    /* The antenna bench hook. Swapping antennas is the one job where "is the
+     * bias on" has to be answerable and changeable from outside, and where the
+     * two antennas must be compared under the *same* settings -- so this
+     * switches the supply deliberately rather than leaving it to whatever the
+     * module was last left set to. The C/N0 either side of the change is the
+     * comparison; gps_cn0_* reports it and nothing here interprets it. */
+    JsonWrapper doc;
+    if (!readJsonBody(req, doc)) {
+        return ESP_FAIL;
+    }
+
+    std::string bias;
+    if (!doc.GetField("bias", bias) || (bias != "on" && bias != "off")) {
+        return sendJsonError(req, 400, "bias must be \"on\" or \"off\"");
+    }
+
+    GpsTime::instance().requestAntennaBias(bias == "on");
+    ESP_LOGW(TAG, "POST /gps/ant from %s: bias %s", callerAddress(req).c_str(), bias.c_str());
+
+    /* Answered before it has happened: the GPS task owns the UART, so the
+     * change is queued for its next pass. Say so, and say when to look. */
+    JsonWrapper resp;
+    resp.AddItem("requested", bias);
+    resp.AddItem("read_back_after_s", 3.0);
+    resp.AddItem("note", "queued for the GPS task; gps_ant_power and gps_ant report the result");
+    return sendJson(req, resp, 200);
+}
+
+esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
+{
+    /* A controlled hot start. The receiver gets reconfigured on every boot and
+     * has been worked hard on a bench; this restarts the navigation engine
+     * without clearing the almanac, which is the cheap way back from a state it
+     * will not leave on its own. */
+    GpsTime::instance().requestReset();
+    ESP_LOGW(TAG, "POST /gps/reset from %s: hot start", callerAddress(req).c_str());
+
+    JsonWrapper resp;
+    resp.AddItem("reset", "hot start queued");
+    resp.AddItem("note", "the almanac is kept; a cold start needs u-center");
     return sendJson(req, resp, 200);
 }
 

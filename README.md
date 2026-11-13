@@ -4,7 +4,7 @@ An NTP server on the ESP32-P4: **Ethernet bring-up + DHCP + ping**, the device's
 HTTP surface (`/healthz`, `/config`, `/config/reset`, `/ntp/sync`, `/gps/pps`)
 using the same REST conventions as the other
 [mianesp](https://github.com/mianos/mianesp) devices, **a stratum-1 reference of
-its own** — a u-blox LEA-8 on UART1, disciplined by its PPS line, with a frequency
+its own** — a u-blox LEA-M8T on UART1, disciplined by its PPS line, with a frequency
 servo that turns a three-second holdover into a ten-minute one (measured on this
 board: 2 µs across 151 s of missing edges), and the upstream SNTP client kept as
 the other source ([GPS](#gps-u-blox-lea-8--pps)) — and **a responder that serves
@@ -433,6 +433,12 @@ does flow, `gps_tp_qerr_ns` is the quantisation the receiver admits to,
 `gps_tp_jitter_ns` the spread the stamps actually show, and `gps_tp_on_second`
 whether the pulse is on the UTC second.
 
+`gps_ant`, `gps_ant_power`, `gps_noise_dbm`, `gps_agc`, `gps_jam_ind` and the
+`gps_cn0_*` group describe the antenna and the front end behind it — see
+[Antennas](#antennas-and-what-the-front-end-says-about-one) for which of those is
+the one to compare two antennas with, and which is the tell for a preamp that is
+not running.
+
 The last group is the responder's: `serve_ntp` is whether it is listening,
 `ntp_stratum` / `ntp_refid` / `ntp_leap` are what a reply would claim *right now*
 (so they flip to `16` / `"INIT"` / `3` the moment the clock stops being fresh),
@@ -614,10 +620,10 @@ The dependencies are mianesp components pulled over git (`main`), plus
 build downloads them into `managed_components/` (git-ignored), and it needs an
 SSH key with read access to `mianos/mianesp`.
 
-## GPS (u-blox LEA-8 + PPS)
+## GPS (u-blox LEA-M8T + PPS)
 
 The reference the server exists for. `timeSource=gps` makes the board a
-stratum-1 server: the date and time come from a u-blox LEA-8 over UART, the second
+stratum-1 server: the date and time come from a u-blox LEA-M8T over UART, the second
 boundary from its timepulse, and `CLOCK_REALTIME` is slewed to match.
 
 | Signal     | GPIO | Direction                          | Carries |
@@ -712,6 +718,55 @@ or `silent`, which are three different faults and worth keeping apart.
 Nothing here is followed by `UBX-CFG-CFG`: saving it to the receiver's flash would
 outlive the firmware and take the module's own defaults away from `u-center`.
 Eleven short frames per boot is the cheaper trade.
+
+### Antennas, and what the front end says about one
+
+The M8T has **no antenna supervisor**: `CFG-ANT` is refused, at boot and after
+three retries ten seconds apart, so `gps_ant` and `gps_ant_power` stay `unknown`
+and the bias can be neither switched nor read back from software. Whether the
+board puts DC on the feed is a hardware question about the module's bias
+arrangement, not a register — worth a multimeter at the connector, and worth
+knowing *before* an antenna is chosen.
+
+What software can say is what the front end is doing, which turns out to be
+enough to spot a dead antenna path without a supervisor:
+
+| Key | Means |
+|-----|-------|
+| `gps_cn0_max` / `gps_cn0_mean` / `gps_cn0_used` | C/N0 on **used** satellites, in dBHz. This is how two antennas are compared. Satellite count is not: a better antenna adds the marginal ones last, and a worse one can hold the count up on the strongest handful while everything near the horizon goes. |
+| `gps_noise_dbm` | `MON-HW` noise floor, and the preamp tell. A running preamp raises it to roughly −30…−50 dBm; **−100 dBm means the preamp is not powered, or the feed is open.** |
+| `gps_agc` | AGC count, for context against the two above. |
+| `gps_jam_ind` / `gps_jam` | Interference index, and the receiver's verdict where the firmware offers one. High alongside high C/N0 is a preamp that is too much for this receiver. |
+| `gps_ant_age_s` | Age of the `MON-HW` reading, so a frozen set of these cannot pass for a live one. |
+
+Two hooks exist for a bench session:
+
+```console
+$ curl -s -X POST -d '{"bias":"on"}' http://192.0.2.20/gps/ant
+{"requested":"on","read_back_after_s":3,...}
+$ curl -s -X POST http://192.0.2.20/gps/reset    # controlled hot start, almanac kept
+```
+
+`/gps/ant` queues the change for the GPS task, which owns the UART, and the answer
+is a `gps_ant_power` reading three seconds later. On this module it changes
+nothing — there is no supervisor to accept it — but it is the right hook for one
+that has.
+
+**The state while this was written is bad, and worth keeping as a baseline.** As
+received, the board reported `gps_cn0_max` 11 and `gps_cn0_mean` 9 across 12 used
+satellites with a 3D fix — 25 to 35 dB below a healthy active antenna — and then
+fell to zero satellites and stayed there through a hot start:
+
+```console
+gps_fix 0  gps_sats 0  gps_cn0_max 0  gps_noise_dbm -100  gps_agc 5460  gps_jam_ind 58
+```
+
+Zero satellites while PPS still arrives, over a −100 dBm floor, is an open or
+unpowered feed rather than a configuration fault: `NAV-PVT` and `NAV-TIMELS` are
+acknowledged and arriving, the timepulse is asserted, and nothing in this firmware
+touches the RF path. A high-gain antenna whose preamp is not powered is *worse*
+than a passive one — the bypass path is a loss, not a gain — which is what 9 dBHz
+looks like.
 
 **Baud rate.** 9600 is tried first. With no valid UBX frame in 4 s the firmware
 moves to 38400, 115200, 57600 and 19200, then starts over — a receiver that has

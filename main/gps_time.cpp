@@ -166,6 +166,16 @@ GpsTime &GpsTime::instance()
     return gps;
 }
 
+void GpsTime::requestAntennaBias(bool on)
+{
+    m_biasReq = on ? 1 : 0;
+}
+
+void GpsTime::requestReset()
+{
+    m_resetReq = true;
+}
+
 void IRAM_ATTR GpsTime::ppsIsr(void *arg)
 {
     auto *self = static_cast<GpsTime *>(arg);
@@ -269,6 +279,8 @@ esp_err_t GpsTime::begin()
      * to eight identical CFG-MSG frames are indistinguishable. Doubles as the
      * retry for a module that was still booting when the burst went out. */
     m_timTpProbeAtUs = esp_timer_get_time() + 3000000;
+    m_nextHwUs       = esp_timer_get_time() + 2000000;
+    m_warmRetryAtUs  = esp_timer_get_time() + 10000000;
 
     ESP_LOGI(TAG, "UART%d %u 8N1 (esp TX %d -> module RX, esp RX %d <- module TX), PPS on GPIO%d",
              kUart, static_cast<unsigned>(m_baud), kTxPin, kRxPin, static_cast<int>(kPpsPin));
@@ -299,6 +311,68 @@ void GpsTime::task()
         if (nowUs >= m_nextCheckUs) {
             logLockChange();
             m_nextCheckUs = nowUs + 1000000;
+        }
+        /* A bias change or a restart asked for over HTTP. Serviced here rather
+         * than in the handler so exactly one thread owns the UART and the
+         * parser. */
+        if (m_biasReq >= 0) {
+            const bool on = m_biasReq == 1;
+            m_biasReq     = -1;
+            /* Supply control bit on or off; short/open detection and
+             * power-down-on-short stay set either way. */
+            const uint8_t cfg[4] = {static_cast<uint8_t>(on ? 0x0F : 0x0E), 0, 0, 0};
+            const int8_t  br     = sendAndWait(0x06, 0x13, cfg, sizeof(cfg));
+            ESP_LOGW(TAG, "antenna bias %s on request: module %s", on ? "ON" : "OFF",
+                     br == 1 ? "accepted" : br == 0 ? "refused, so the bias is unchanged"
+                                                    : "did not answer");
+            sendUbx(0x0A, 0x09, nullptr, 0); /* re-read the supervisor at once */
+        }
+        /* Three more tries at the two messages a module still booting may have
+         * refused, ten seconds apart. The boot burst goes out about half a
+         * second after power-up, which on this receiver is before it is ready
+         * for everything -- MON-VER only answered at 1.2 s -- so a NAK that
+         * early is not always a refusal. Only the refusals are retried; a
+         * message that was acknowledged is left alone. */
+        if (m_warmRetries < 3 && nowUs >= m_warmRetryAtUs &&
+            (m_antCfgNaked || m_timTpNaked)) {
+            ++m_warmRetries;
+            m_warmRetryAtUs = nowUs + 10000000;
+            if (m_antCfgNaked) {
+                const uint8_t cfg[4] = {0x0F, 0x00, 0x00, 0x00};
+                const int8_t  br     = sendAndWait(0x06, 0x13, cfg, sizeof(cfg));
+                if (br >= 0) {
+                    m_antCfgNaked = br == 0;
+                    m_antCfgAcked = br == 1;
+                    ESP_LOGW(TAG, "CFG-ANT retry %u: %s", m_warmRetries,
+                             br == 1 ? "accepted now the receiver is up" : "still refused");
+                }
+            }
+            if (m_timTpNaked && m_timTpCount == 0) {
+                const int8_t br = sendAndWait(0x06, 0x01, kTimTpEnable, sizeof(kTimTpEnable));
+                if (br >= 0) {
+                    m_timTpNaked = br == 0;
+                    m_timTpAcked = br == 1;
+                    ESP_LOGW(TAG, "TIM-TP retry %u: %s", m_warmRetries,
+                             br == 1 ? "accepted now the receiver is up" : "still refused");
+                }
+            }
+        }
+
+        if (m_resetReq) {
+            m_resetReq = false;
+            /* CFG-RST, controlled hot start: restart the navigation engine, keep
+             * the almanac. A module reconfigured into a corner comes back from
+             * this without losing the sky it already knows. */
+            const uint8_t rst[4] = {0x00, 0x00, 0x02, 0x00};
+            ESP_LOGW(TAG, "receiver hot start requested");
+            sendUbx(0x06, 0x04, rst, sizeof(rst));
+        }
+
+        /* Antenna supervisor, every two seconds. Polled rather than enabled at
+         * a rate so a bench session that never looks at it costs nothing. */
+        if (nowUs >= m_nextHwUs) {
+            sendUbx(0x0A, 0x09, nullptr, 0);
+            m_nextHwUs = nowUs + 2000000;
         }
         if (!m_timTpProbed && m_timTpCount == 0 && nowUs >= m_timTpProbeAtUs) {
             m_timTpProbed = true;
@@ -406,6 +480,28 @@ void GpsTime::configureModule()
                  r == 0 ? "rejected" : "unanswered");
     }
 
+    /* UBX-CFG-ANT (class 0x06, id 0x13). The bias tee on the RF input is not
+     * something this firmware used to touch, so whether a preamp was powered
+     * depended entirely on whatever the module's saved configuration said -- a
+     * user swapping antennas had no way to know from here. It is now asserted:
+     * supply voltage control on, short and open detection on, and power down on
+     * a short so a bad lead cannot cook the supply.
+     *
+     * The detect bits are the point of the exercise: MON-HW reports what they
+     * find as aStatus, so "is the antenna plugged in and powered" becomes a
+     * number in /healthz instead of a guess. A receiver without a supervisor
+     * NAKs this and the whole group stays at DONTKNOW. */
+    constexpr uint8_t kCfgAnt[4] = {0x0F, 0x00, 0x00, 0x00};
+    r = sendAndWait(0x06, 0x13, kCfgAnt, sizeof(kCfgAnt));
+    m_antCfgAcked = r == 1;
+    m_antCfgNaked = r == 0;
+    if (r == 1) {
+        ESP_LOGI(TAG, "CFG-ANT accepted: antenna bias on, with short/open detection");
+    } else {
+        ESP_LOGW(TAG, "CFG-ANT %s: antenna bias is whatever the module was left set to",
+                 r == 0 ? "rejected" : "unanswered");
+    }
+
     r = sendAndWait(0x06, 0x01, kNavPvt, sizeof(kNavPvt));
     if (r != 1) {
         ESP_LOGW(TAG, "NAV-PVT enable %s", r == 0 ? "rejected" : "unanswered");
@@ -427,12 +523,25 @@ void GpsTime::configureModule()
         ESP_LOGI(TAG, "NAV-TIM-TP enable accepted");
     }
 
+    /* UBX-NAV-SAT at half rate. Twelve bytes per satellite with a 16-satellite
+     * sky is 200 bytes, so once a second would spend a fifth of a 9600-baud line
+     * on diagnostics; once every two seconds is plenty to compare two antennas
+     * and leaves the line to the messages the clock actually needs. */
+    {
+        constexpr uint8_t kNavSat[8] = {0x01, 0x35, 0, 2, 0, 0, 0, 0};
+        r = sendAndWait(0x06, 0x01, kNavSat, sizeof(kNavSat));
+        if (r != 1) {
+            ESP_LOGW(TAG, "NAV-SAT enable %s: no C/N0 in /healthz",
+                     r == 0 ? "rejected" : "unanswered");
+        }
+    }
+
     /* UBX-MON-VER poll. The protocol version decides which of the above exist
      * at all -- NAV-TIM-TP needs protocol 15 or later -- so it is asked for
      * rather than inferred from silence. This receiver never answers it, which
      * is itself worth the log line: absent `gps_module` is a fact about the
      * module, not about the wiring. */
-    if (sendAndWait(0x0A, 0x04, nullptr, 0) == -2) {
+    if (sendAndWait(0x0A, 0x04, nullptr, 0, 1500000) == -2) {
         ESP_LOGI(TAG, "MON-VER unanswered: protocol version unknown");
     }
 
@@ -448,17 +557,19 @@ void GpsTime::configureModule()
      * u-center later. Sending it at every boot costs eleven short frames. */
 }
 
-int8_t GpsTime::sendAndWait(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len)
+int8_t GpsTime::sendAndWait(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len,
+                            uint32_t timeoutUs)
 {
     m_awaitCls    = cls;
     m_awaitId     = id;
     m_awaitResult = -1;
     sendUbx(cls, id, payload, len);
 
-    /* 250 ms is several reply times at 9600 baud and still short enough that a
-     * module which answers nothing (this one, for polls) costs a boot nothing:
-     * the whole configuration is twelve messages. */
-    pump(250000);
+    /* 250 ms is several reply times at 9600 baud for a short answer. A long
+     * one needs longer and says so: MON-VER is 250 bytes, which is a quarter of
+     * a second on the wire at 9600 all by itself, and a 250 ms wait timed out on
+     * it and logged the module as silent when it had in fact answered. */
+    pump(timeoutUs);
     return m_awaitResult;
 }
 
@@ -620,6 +731,10 @@ void GpsTime::onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
         onNavTimTp(payload, len);
     } else if (cls == 0x0A && id == 0x04) { /* UBX-MON-VER */
         onMonVer(payload, len);
+    } else if (cls == 0x0A && id == 0x09) { /* UBX-MON-HW */
+        onMonHw(payload, len);
+    } else if (cls == 0x01 && id == 0x35) { /* UBX-NAV-SAT */
+        onNavSat(payload, len);
     }
 }
 
@@ -647,6 +762,122 @@ void GpsTime::onMonVer(const uint8_t *p, uint16_t len)
     portEXIT_CRITICAL(&m_mux);
 
     ESP_LOGI(TAG, "module: %.48s", text);
+}
+
+void GpsTime::onMonHw(const uint8_t *p, uint16_t len)
+{
+    /* UBX-MON-HW is 60 bytes. The fields that matter for an antenna are:
+     *   16 noisePerMS (u2, dBm)   18 agcCnt (u2)
+     *   20 aStatus (u1: 0 init, 1 dontknow, 2 ok, 3 short, 4 open)
+     *   21 aPower  (u1: 0 off, 1 on, 2 dontknow)
+     *   22 flags   (X1, bits 2:3 jamming state 0 unknown / 1 ok / 2 warn / 3 crit)
+     *   45 jamInd  (u1)
+     *
+     * aStatus and aPower only mean anything while the antenna supervisor is
+     * enabled, which is what CFG-ANT does; without it they stay DONTKNOW and
+     * that is reported rather than smoothed over. noisePerMS and agcCnt are
+     * always real, and they are the pair that shows a front end being
+     * overloaded: a preamp on a high-gain antenna drives agcCnt down and the
+     * jamming state up, which looks like a good signal right up to the point
+     * where it is a worse one. */
+    if (len < 60) {
+        return;
+    }
+
+    const uint16_t noise  = le16(p + 16);
+    const uint16_t agc    = le16(p + 18);
+    const uint8_t  status = p[20];
+    const uint8_t  power  = p[21];
+    const uint8_t  jstate = (p[22] >> 2) & 0x03;
+    const uint8_t  jam    = p[45];
+
+    uint8_t before = 0;
+    uint8_t beforePower = 0;
+    uint8_t beforeJam = 0;
+
+    portENTER_CRITICAL(&m_mux);
+    before      = m_antStatus;
+    beforePower = m_antPower;
+    beforeJam   = m_jamState;
+    m_antStatus = status;
+    m_antPower  = power;
+    m_noisePerMs = noise;
+    m_agcCnt     = agc;
+    m_jamInd     = jam;
+    m_jamState   = jstate;
+    m_monHwValid = true;
+    m_monHwAtUs  = esp_timer_get_time();
+    portEXIT_CRITICAL(&m_mux);
+
+    /* Only on a change: MON-HW is polled every two seconds and a line each time
+     * would bury everything else. */
+    if (status != before) {
+        switch (status) {
+        case 3:
+            ESP_LOGW(TAG, "antenna SHORT: bias powered down, check the lead and the connector");
+            break;
+        case 4:
+            ESP_LOGW(TAG, "antenna OPEN: nothing drawing bias, check the lead and the connector");
+            break;
+        case 2:
+            ESP_LOGI(TAG, "antenna status OK");
+            break;
+        default:
+            ESP_LOGI(TAG, "antenna status %u (no supervisor reading)", status);
+            break;
+        }
+    }
+    if (power != beforePower) {
+        ESP_LOGI(TAG, "antenna bias %s", power == 1 ? "ON" : power == 0 ? "OFF" : "DONTKNOW");
+    }
+    if (jstate != beforeJam && jstate >= 2) {
+        ESP_LOGW(TAG, "jamming state %s: check for overload from a preamp or a nearby transmitter",
+                 jstate == 3 ? "CRITICAL" : "warning");
+    }
+}
+
+void GpsTime::onNavSat(const uint8_t *p, uint16_t len)
+{
+    /* UBX-NAV-SAT: 8 bytes of header (iTOW, version, numSvs, reserved) then 12
+     * bytes per satellite. Only cno and the svUsed flag are wanted, so the
+     * groups are walked rather than the message being kept.
+     *
+     * C/N0 is the number to compare antennas with. Satellite count is not: a
+     * better antenna adds the marginal ones last, and a worse one can hold the
+     * count up on the strongest handful while everything near the horizon goes.
+     * Mean and max over *used* satellites therefore, not tracked ones. */
+    if (len < 8) {
+        return;
+    }
+    const uint8_t num = p[5];
+    if (len < static_cast<uint16_t>(8 + 12 * num)) {
+        return;
+    }
+
+    uint16_t sum = 0;
+    uint8_t  max = 0;
+    uint8_t  used = 0;
+    for (uint8_t i = 0; i < num; ++i) {
+        const uint8_t *sv = p + 8 + 12 * i;
+        const uint8_t  cno = sv[2];
+        const uint32_t fl  = static_cast<uint32_t>(sv[8]) |
+                            (static_cast<uint32_t>(sv[9]) << 8) |
+                            (static_cast<uint32_t>(sv[10]) << 16) |
+                            (static_cast<uint32_t>(sv[11]) << 24);
+        if ((fl & (1u << 3)) == 0 || cno == 0) {
+            continue;
+        }
+        sum = static_cast<uint16_t>(sum + cno);
+        max = cno > max ? cno : max;
+        ++used;
+    }
+
+    portENTER_CRITICAL(&m_mux);
+    m_cn0Max   = max;
+    m_cn0Mean  = used != 0 ? static_cast<uint8_t>(sum / used) : 0;
+    m_cn0Used  = used;
+    m_navSatAtUs = esp_timer_get_time();
+    portEXIT_CRITICAL(&m_mux);
 }
 
 namespace {
@@ -1100,6 +1331,8 @@ GpsTime::Status GpsTime::status() const
     Status   st;
     int64_t  ppsMonoUs     = 0;
     int64_t  suppressUntil = 0;
+    int64_t  navSatAtUs    = 0;
+    int64_t  monHwAtUs     = 0;
 
     portENTER_CRITICAL(&m_mux);
     st.ppsCount    = m_ppsCount;
@@ -1125,6 +1358,20 @@ GpsTime::Status GpsTime::status() const
     st.tp5Rejected       = m_tp5Naked;
     st.timTpRejected     = m_timTpNaked;
     st.timTpAcked        = m_timTpAcked;
+    st.antCfgAcked       = m_antCfgAcked;
+    st.antCfgRejected    = m_antCfgNaked;
+    st.antStatus         = m_antStatus;
+    st.antPower          = m_antPower;
+    st.noisePerMs        = m_noisePerMs;
+    st.agcCnt            = m_agcCnt;
+    st.jamInd            = m_jamInd;
+    st.jamState          = m_jamState;
+    st.monHwValid        = m_monHwValid;
+    st.cn0Max            = m_cn0Max;
+    st.cn0Mean           = m_cn0Mean;
+    st.cn0Used           = m_cn0Used;
+    navSatAtUs           = m_navSatAtUs;
+    monHwAtUs            = m_monHwAtUs;
     st.moduleId          = m_moduleId;
     ppsMonoUs      = m_ppsMonoUs;
     suppressUntil  = m_ppsSuppressUntilUs;
@@ -1136,6 +1383,12 @@ GpsTime::Status GpsTime::status() const
     }
     if (suppressUntil > nowUs) {
         st.ppsSuppressUs = suppressUntil - nowUs;
+    }
+    if (navSatAtUs != 0) {
+        st.navSatAgeUs = nowUs - navSatAtUs;
+    }
+    if (monHwAtUs != 0) {
+        st.monHwAgeUs = nowUs - monHwAtUs;
     }
 
     st.rateKnown = st.rateSamples >= kRateMinSamples;

@@ -145,6 +145,29 @@ public:
         bool     timTpRejected = false;
         bool     timTpAcked    = false;
 
+        /* The antenna, from UBX-MON-HW, and the signal quality behind it, from
+         * UBX-NAV-SAT. Comparing antennas needs C/N0 and the AGC/noise/jammer
+         * figures, not satellite counts: a high-gain antenna on a preamp can
+         * push this receiver into overload, and the two numbers that show it are
+         * a falling agcCnt and a jamming state above "ok". antPower is what the
+         * bias tee is actually doing -- OFF, ON, or DONTKNOW when the firmware
+         * has no supervisor -- and antStatus reports the fault the supervisor
+         * found: SHORT, OPEN, or OK. */
+        uint8_t  antStatus    = 0; /* MON-HW aStatus: 0 init, 1 dontknow, 2 ok, 3 short, 4 open */
+        uint8_t  antPower     = 0; /* MON-HW aPower: 0 off, 1 on, 2 dontknow */
+        uint16_t noisePerMs   = 0;
+        uint16_t agcCnt       = 0;
+        uint8_t  jamInd       = 0;
+        uint8_t  jamState     = 0; /* MON-HW flags 2:3: 0 unknown, 1 ok, 2 warning, 3 critical */
+        bool     monHwValid   = false;
+        bool     antCfgRejected = false;
+        bool     antCfgAcked    = false;
+        uint8_t  cn0Max       = 0; /* strongest used satellite, dBHz */
+        uint8_t  cn0Mean      = 0; /* mean over used satellites */
+        uint8_t  cn0Used      = 0; /* how many satellites were used in that sample */
+        int64_t  navSatAgeUs  = -1;
+        int64_t  monHwAgeUs   = -1;
+
         /* The last holdover, and what it cost: how long the edge was missing
          * and what the servo's prediction was worth when it came back. The only
          * number that can honestly justify serving through a gap -- and the one
@@ -197,6 +220,17 @@ public:
      * wire had come off. Returns the number of seconds now in force. */
     uint32_t suppressPps(uint32_t seconds);
 
+    /* Bench hooks for an antenna that is being swapped. setAntennaBias() sends
+     * CFG-ANT with supply control on or off, so a preamp can be powered and
+     * unpowered without a reflash and the C/N0 either side compared; the
+     * automatic case never turns it off, so this only ever describes a
+     * deliberate experiment. resetReceiver() is a controlled hot start: it
+     * restarts the navigation engine without touching the almanac, for a module
+     * that has been reconfigured into a corner. Both return false if the module
+     * refused. */
+    void requestAntennaBias(bool on);
+    void requestReset();
+
 private:
     static constexpr const char *TAG = "gps_time";
 
@@ -217,7 +251,8 @@ private:
      * never answers MON-VER) and an order-based guess drifts apart within one
      * boot. pump() keeps parsing while it waits; the GPS task would otherwise
      * be blind for the duration. */
-    int8_t  sendAndWait(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len);
+    int8_t  sendAndWait(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len,
+                        uint32_t timeoutUs = 250000);
     void    pump(int64_t timeoutUs);
     uint8_t m_awaitCls      = 0;
     uint8_t m_awaitId       = 0;
@@ -234,6 +269,8 @@ private:
     void onNavTimels(const uint8_t *p, uint16_t len);
     void onNavTimTp(const uint8_t *p, uint16_t len);
     void onMonVer(const uint8_t *p, uint16_t len);
+    void onMonHw(const uint8_t *p, uint16_t len);
+    void onNavSat(const uint8_t *p, uint16_t len);
     void anchor(time_t second);
 
     /* The servo. Each anchor is one sample of esp_timer against the GPS; the
@@ -296,7 +333,7 @@ private:
     uint8_t  m_ckA          = 0;
     uint8_t  m_ckB          = 0;
     bool     m_overflow     = false;
-    uint8_t  m_payload[160] = {};
+    uint8_t  m_payload[512] = {}; /* NAV-SAT with 32 satellites is 392 bytes */
     uint32_t m_pairedCount  = 0; /* the PPS edge the current anchor came from */
     uint32_t m_framesLogged = 0;
     bool     m_stepped      = false;
@@ -336,6 +373,28 @@ private:
     bool       m_tp5Naked          = false;
     bool       m_timTpNaked        = false;
     bool       m_timTpAcked        = false;
+    bool       m_antCfgAcked       = false;
+    bool       m_antCfgNaked       = false;
+    bool       m_antLogged         = false;
+    uint8_t    m_antStatus         = 0;
+    uint8_t    m_antPower          = 0;
+    uint16_t   m_noisePerMs        = 0;
+    uint16_t   m_agcCnt            = 0;
+    uint8_t    m_jamInd            = 0;
+    uint8_t    m_jamState          = 0;
+    bool       m_monHwValid        = false;
+    int64_t    m_nextHwUs          = 0;
+    int64_t    m_warmRetryAtUs     = 0;
+    uint8_t    m_warmRetries       = 0;
+    /* Requests from the HTTP task, serviced by the GPS task on its next pass so
+     * that only one thread ever writes the UART or advances the parser. */
+    volatile int8_t m_biasReq      = -1; /* -1 none, 0 off, 1 on */
+    volatile bool   m_resetReq     = false;
+    int64_t    m_monHwAtUs         = 0;
+    uint8_t    m_cn0Max            = 0;
+    uint8_t    m_cn0Mean           = 0;
+    uint8_t    m_cn0Used           = 0;
+    int64_t    m_navSatAtUs        = 0;
     bool       m_verLogged         = false;
     bool       m_timTpProbed       = false;
     int64_t    m_timTpProbeAtUs    = 0;

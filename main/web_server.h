@@ -7,6 +7,8 @@
  *   POST /config         apply any subset of the keys, persist, echo the result
  *   POST /config/reset   restore compiled-in defaults
  *   POST /ntp/sync       force a poll of the upstream time server (test mode)
+ *   POST /gps/ant        {"bias":"on"|"off"} switch antenna bias for a bench test
+ *   POST /gps/reset      controlled hot start of the receiver
  *   POST /gps/pps        make the PPS interrupt ignore edges for a while, so a
  *                        GPS holdover can be measured on a board whose PPS line
  *                        is soldered (test mode; /healthz reports the time left)
@@ -50,6 +52,8 @@ private:
     static esp_err_t config_reset_post_handler(httpd_req_t *req);
     static esp_err_t sync_post_handler(httpd_req_t *req);
     static esp_err_t gps_pps_post_handler(httpd_req_t *req);
+    static esp_err_t gps_ant_post_handler(httpd_req_t *req);
+    static esp_err_t gps_reset_post_handler(httpd_req_t *req);
     static esp_err_t firmware_get_handler(httpd_req_t *req);
     static esp_err_t firmware_post_handler(httpd_req_t *req);
 
