@@ -743,6 +743,17 @@ The lesson is worth keeping: a `NAK` is about the whole message, so any one
 unsupported bit hides an otherwise complete feature. Vary the bits before
 concluding a message is absent.
 
+With the switch closed the front end recovers completely: `agc` falls from ~5300 to
+the low hundreds, `gps_cn0_max` goes from 0 to **42–44**, and the receiver holds a
+3D fix and stratum 1. That C/N0 is the number to judge an antenna by; 11 was an
+unpowered preamp, 42 is a working one.
+
+`NAV-TIM-TP` remains odd on this receiver. It was acknowledged once, immediately
+after a hardware reset, and refused at every other time — including now, with a fix,
+which is when it would actually have something to say. `/healthz` reports it as
+`rejected`; the code path stays because it costs nothing and the earlier ACK proves
+the message exists.
+
 **The board is a WD22UGRC**, a Huawei carrier for the LEA-M8T, and it does not
 generate antenna power: the 8-pin header takes `V_ANT` on pin 1 as a *supply
 input* separate from Vcc on pin 2, and the transistor pair switches it. No supply
@@ -803,17 +814,19 @@ that changed anything here: it turned a refused `NAV-TIM-TP` enable into an
 acknowledged one while leaving `CFG-ANT` refused. Reach for it before concluding
 that a message is unsupported.
 
-**The state while this was written is bad, and worth keeping as a baseline.** As
-received, the board reported `gps_cn0_max` 11 and `gps_cn0_mean` 9 across 12 used
-satellites with a 3D fix — 25 to 35 dB below a healthy active antenna — and then
-fell to zero satellites and stayed there through a hot start:
+**What this looked like before the flag bit was found**, kept because it is what an
+unswitched preamp does. As received the board reported `gps_cn0_max` 11 and
+`gps_cn0_mean` 9 across 12 used satellites with a 3D fix — 25 to 35 dB below a
+healthy active antenna — and then fell to zero satellites and stayed there through
+a hot start:
 
 ```console
 gps_fix 0  gps_sats 0  gps_cn0_max 0  gps_noise_dbm -100  gps_agc 5460  gps_jam_ind 58
 ```
 
 Zero satellites while PPS still arrives, over a −100 dBm floor, is an open or
-unpowered feed rather than a configuration fault. The firmware was cleared the hard way, and the
+unpowered feed rather than a configuration fault — which was right, and the cause
+was the refused flag bit rather than the antenna. The firmware was cleared the hard way, and the
 order matters if anyone has to do this again: the **original image from before any
 of the antenna work** (`f84fe50`) was flashed onto a board that had been power
 cycled at the wall, and it sat at zero satellites for three minutes. Nothing in
