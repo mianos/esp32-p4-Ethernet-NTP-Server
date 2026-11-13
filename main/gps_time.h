@@ -229,7 +229,8 @@ public:
      * that has been reconfigured into a corner. Both return false if the module
      * refused. */
     void requestAntennaBias(bool on);
-    void requestReset(bool cold = false, bool hardware = false);
+    void requestReset(bool cold = false, bool hardware = false, bool powerCycle = false);
+    void requestDefaults();
 
 private:
     static constexpr const char *TAG = "gps_time";
@@ -392,6 +393,8 @@ private:
     volatile bool   m_resetReq     = false;
     volatile bool   m_resetCold    = false;
     volatile bool   m_resetHard    = false;
+    volatile bool   m_resetPower   = false;
+    volatile bool   m_defaultsReq  = false;
     int64_t         m_reconfigAtUs = 0;
     int64_t    m_monHwAtUs         = 0;
     uint8_t    m_cn0Max            = 0;

@@ -171,11 +171,17 @@ void GpsTime::requestAntennaBias(bool on)
     m_biasReq = on ? 1 : 0;
 }
 
-void GpsTime::requestReset(bool cold, bool hardware)
+void GpsTime::requestDefaults()
 {
-    m_resetCold = cold;
-    m_resetHard = hardware;
-    m_resetReq  = true;
+    m_defaultsReq = true;
+}
+
+void GpsTime::requestReset(bool cold, bool hardware, bool powerCycle)
+{
+    m_resetCold  = cold;
+    m_resetHard  = hardware;
+    m_resetPower = powerCycle;
+    m_resetReq   = true;
 }
 
 void IRAM_ATTR GpsTime::ppsIsr(void *arg)
@@ -364,6 +370,19 @@ void GpsTime::task()
             m_reconfigAtUs = 0;
             configureModule();
         }
+        if (m_defaultsReq) {
+            m_defaultsReq = false;
+            /* CFG-CFG with clearMask 0x1F: put every configuration block back to
+             * its default in RAM. Unlike the resets, this touches the settings
+             * themselves -- constellation selection, message rates, the lot --
+             * and leaves the module's saved flash alone, so u-center still gets
+             * its defaults back at the next power-up. The last software lever
+             * when the receiver is deaf and its configuration is the suspect. */
+            const uint8_t cfg[12] = {0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+            ESP_LOGW(TAG, "receiver configuration cleared to defaults");
+            sendUbx(0x06, 0x09, cfg, sizeof(cfg));
+            m_reconfigAtUs = esp_timer_get_time() + 3000000;
+        }
         if (m_resetReq) {
             m_resetReq = false;
             /* CFG-RST. Hot by default: restart the navigation engine and keep
@@ -371,20 +390,28 @@ void GpsTime::task()
              * not leave on its own. Cold when asked, which throws the almanac
              * away -- the thing to try when a hot start changed nothing and the
              * receiver's own stored state is suspect. */
-            const bool    cold = m_resetCold;
-            const bool    hard = m_resetHard;
-            m_resetHard        = false;
+            const bool    cold  = m_resetCold;
+            const bool    hard  = m_resetHard;
+            const bool    power = m_resetPower;
+            m_resetHard         = false;
+            m_resetPower        = false;
             /* resetMode: 0x00 is a hardware reset, 0x02 a controlled software
              * one (GNSS only). A hardware reset also drops the module's whole
              * runtime configuration back to its defaults, so the message set is
              * re-sent a few seconds later -- otherwise it comes back speaking
              * NMEA at 9600 and the parser has nothing to read. */
+            /* 0x04 is "hardware reset after shutdown", the nearest thing to
+             * pulling the module's supply: it shuts the receiver down first, so
+             * the RF and baseband are re-initialised rather than restarted, and
+             * every RAM configuration written since power-up goes with it. The
+             * saved configuration in the module's own flash comes back, which is
+             * the point when the RAM state is what is suspect. */
+            const uint8_t mode = power ? 0x04 : hard ? 0x00 : 0x02;
             const uint8_t rst[4] = {static_cast<uint8_t>(cold ? 0xFF : 0x00),
-                                    static_cast<uint8_t>(cold ? 0xFF : 0x00),
-                                    static_cast<uint8_t>(hard ? 0x00 : 0x02), 0x00};
-            ESP_LOGW(TAG, "receiver %s%s start requested", hard ? "HARDWARE " : "",
+                                    static_cast<uint8_t>(cold ? 0xFF : 0x00), mode, 0x00};
+            ESP_LOGW(TAG, "receiver %s%s start requested", power ? "POWER-CYCLE " : hard ? "HARDWARE " : "",
                      cold ? "cold" : "hot");
-            if (hard) {
+            if (hard || power) {
                 m_reconfigAtUs = esp_timer_get_time() + 3000000;
             }
             sendUbx(0x06, 0x04, rst, sizeof(rst));

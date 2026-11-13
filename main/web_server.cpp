@@ -545,6 +545,8 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
     /* The body is optional, so an empty POST still means the cheap thing. */
     bool cold = false;
     bool hard = false;
+    bool power = false;
+    bool defaults = false;
     const int len = req->content_len;
     if (len > 0 && len < 512) {
         char buf[512];
@@ -554,17 +556,25 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
             if (!doc.Empty()) {
                 doc.GetField("cold", cold);
                 doc.GetField("hardware", hard);
+                doc.GetField("power", power);
+                doc.GetField("defaults", defaults);
             }
         }
     }
 
-    GpsTime::instance().requestReset(cold, hard);
-    ESP_LOGW(TAG, "POST /gps/reset from %s: %s%s start", callerAddress(req).c_str(),
-             hard ? "hardware " : "", cold ? "cold" : "hot");
+    if (defaults) {
+        GpsTime::instance().requestDefaults();
+    } else {
+        GpsTime::instance().requestReset(cold, hard, power);
+    }
+    ESP_LOGW(TAG, "POST /gps/reset from %s: %s%s%s start", callerAddress(req).c_str(),
+             power ? "power-cycle " : "", hard ? "hardware " : "", cold ? "cold" : "hot");
 
     JsonWrapper resp;
-    resp.AddItem("reset", hard ? "hardware reset queued" : cold ? "cold start queued"
-                                                                 : "hot start queued");
+    resp.AddItem("reset", defaults ? "configuration cleared to defaults"
+                                 : power ? "power-cycle reset queued"
+                                 : hard ? "hardware reset queued"
+                                        : cold ? "cold start queued" : "hot start queued");
     resp.AddItem("note", cold ? "the almanac is discarded; expect a slow reacquisition"
                               : "the almanac is kept; send {\"cold\":true} to discard it");
     return sendJson(req, resp, 200);
