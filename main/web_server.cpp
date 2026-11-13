@@ -294,6 +294,14 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
             /* How stale the supervisor reading is, so a frozen set of these
              * cannot pass for a live one. */
             json.AddItem("gps_ant_age_s", static_cast<double>(gps.monHwAgeUs) / 1e6);
+            /* Hex strings: these are bit maps, not quantities. */
+            char pins[32];
+            std::snprintf(pins, sizeof(pins), "%08lx", static_cast<unsigned long>(gps.pinSel));
+            json.AddItem("gps_pin_sel", std::string(pins));
+            std::snprintf(pins, sizeof(pins), "%08lx", static_cast<unsigned long>(gps.pinDir));
+            json.AddItem("gps_pin_dir", std::string(pins));
+            std::snprintf(pins, sizeof(pins), "%08lx", static_cast<unsigned long>(gps.pinVal));
+            json.AddItem("gps_pin_val", std::string(pins));
         }
         /* Absent until a NAV-SAT has been parsed, and stale-flagged after 5 s,
          * so a stopped message cannot pass an old C/N0 off as a live one. */

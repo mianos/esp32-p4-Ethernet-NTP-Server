@@ -167,6 +167,12 @@ public:
         uint8_t  cn0Used      = 0; /* how many satellites were used in that sample */
         int64_t  navSatAgeUs  = -1;
         int64_t  monHwAgeUs   = -1;
+        /* MON-HW's pin map: which module pins the receiver has assigned, their
+         * direction and level. The antenna supervisor is a pin pair, so this is
+         * where its numbers come from when CFG-ANT has to name them. */
+        uint32_t pinSel       = 0;
+        uint32_t pinDir       = 0;
+        uint32_t pinVal       = 0;
 
         /* The last holdover, and what it cost: how long the edge was missing
          * and what the servo's prediction was worth when it came back. The only
@@ -232,6 +238,14 @@ public:
     void requestReset(bool cold = false, bool hardware = false, bool powerCycle = false);
     void requestDefaults();
 
+    /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort. While a
+     * client is attached the GPS task stops reading the port so exactly one
+     * thread owns it, and everything -- polls, configuration, the lot -- is the
+     * client's. On disconnect the task resumes and re-applies its own
+     * configuration, so a session cannot leave the receiver somewhere the
+     * firmware does not expect. */
+    static constexpr int kBridgePort = 3333;
+
 private:
     static constexpr const char *TAG = "gps_time";
 
@@ -239,6 +253,8 @@ private:
 
     static void ppsIsr(void *arg);
     static void taskEntry(void *arg);
+    static void bridgeTaskEntry(void *arg);
+    void bridgeTask();
 
     void task();
     void advanceBaud();
@@ -383,6 +399,10 @@ private:
     uint16_t   m_agcCnt            = 0;
     uint8_t    m_jamInd            = 0;
     uint8_t    m_jamState          = 0;
+    uint32_t   m_pinSel            = 0;
+    uint32_t   m_pinDir            = 0;
+    uint32_t   m_pinVal            = 0;
+    uint32_t   m_pinsLogged        = 0;
     bool       m_monHwValid        = false;
     int64_t    m_nextHwUs          = 0;
     int64_t    m_warmRetryAtUs     = 0;
@@ -395,6 +415,7 @@ private:
     volatile bool   m_resetHard    = false;
     volatile bool   m_resetPower   = false;
     volatile bool   m_defaultsReq  = false;
+    volatile bool   m_bridgeActive = false;
     int64_t         m_reconfigAtUs = 0;
     int64_t    m_monHwAtUs         = 0;
     uint8_t    m_cn0Max            = 0;

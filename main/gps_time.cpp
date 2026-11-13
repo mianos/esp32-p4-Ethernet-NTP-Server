@@ -7,6 +7,10 @@
 #include <cstring>
 #include <sys/time.h>
 
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -184,6 +188,74 @@ void GpsTime::requestReset(bool cold, bool hardware, bool powerCycle)
     m_resetReq   = true;
 }
 
+void GpsTime::bridgeTaskEntry(void *arg)
+{
+    static_cast<GpsTime *>(arg)->bridgeTask();
+}
+
+void GpsTime::bridgeTask()
+{
+    for (;;) {
+        const int srv = socket(AF_INET, SOCK_STREAM, 0);
+        if (srv < 0) {
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+        int yes = 1;
+        setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+        sockaddr_in addr = {};
+        addr.sin_family      = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_port        = htons(kBridgePort);
+        if (bind(srv, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 || listen(srv, 1) != 0) {
+            close(srv);
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            continue;
+        }
+        ESP_LOGI(TAG, "u-center bridge listening on tcp/%d", kBridgePort);
+
+        sockaddr_in peer   = {};
+        socklen_t   peerLen = sizeof(peer);
+        const int   client  = accept(srv, reinterpret_cast<sockaddr *>(&peer), &peerLen);
+        close(srv);
+        if (client < 0) {
+            continue;
+        }
+
+        ESP_LOGW(TAG, "u-center attached: the GPS task stands down until it disconnects");
+        m_bridgeActive = true;
+        vTaskDelay(pdMS_TO_TICKS(100));
+
+        uint8_t buf[256];
+        for (;;) {
+            fd_set set;
+            FD_ZERO(&set);
+            FD_SET(client, &set);
+            timeval tv = {.tv_sec = 0, .tv_usec = 50000};
+            const int ready = select(client + 1, &set, nullptr, nullptr, &tv);
+
+            if (ready > 0 && FD_ISSET(client, &set)) {
+                const int n = recv(client, buf, sizeof(buf), 0);
+                if (n <= 0) {
+                    break; /* closed */
+                }
+                uart_write_bytes(kUart, buf, n);
+            }
+            const int got = uart_read_bytes(kUart, buf, sizeof(buf), 0);
+            if (got > 0 && send(client, buf, got, 0) < 0) {
+                break;
+            }
+        }
+
+        close(client);
+        m_bridgeActive = false;
+        ESP_LOGW(TAG, "u-center detached: re-applying the firmware's own configuration");
+        /* The client may have left the receiver anywhere; put it back. */
+        m_reconfigAtUs = esp_timer_get_time() + 500000;
+    }
+}
+
 void IRAM_ATTR GpsTime::ppsIsr(void *arg)
 {
     auto *self = static_cast<GpsTime *>(arg);
@@ -276,6 +348,10 @@ esp_err_t GpsTime::begin()
         return ESP_ERR_NO_MEM;
     }
 
+    if (xTaskCreate(&GpsTime::bridgeTaskEntry, "gpsbridge", 4096, this, 3, nullptr) != pdPASS) {
+        ESP_LOGW(TAG, "no bridge task: u-center passthrough unavailable");
+    }
+
     m_begun       = true;
     m_baud        = kBauds[0];
     m_nextScanUs  = esp_timer_get_time() + kScanAfterUs;
@@ -306,6 +382,13 @@ void GpsTime::task()
     configureModule();
 
     for (;;) {
+        /* While u-center is attached it owns the port; touching the parser here
+         * as well would interleave two readers on one stream. */
+        if (m_bridgeActive) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+
         const int got = uart_read_bytes(kUart, buf, sizeof(buf), pdMS_TO_TICKS(100));
         for (int i = 0; i < got; ++i) {
             feed(buf[i]);
@@ -840,6 +923,11 @@ void GpsTime::onMonHw(const uint8_t *p, uint16_t len)
     const uint8_t  jstate = (p[22] >> 2) & 0x03;
     const uint8_t  jam    = p[45];
 
+    /* The pin map, which is the only place the supervisor's pin numbers appear. */
+    const uint32_t pinSel = static_cast<uint32_t>(le32(p));
+    const uint32_t pinDir = static_cast<uint32_t>(le32(p + 8));
+    const uint32_t pinVal = static_cast<uint32_t>(le32(p + 12));
+
     uint8_t before = 0;
     uint8_t beforePower = 0;
     uint8_t beforeJam = 0;
@@ -856,7 +944,19 @@ void GpsTime::onMonHw(const uint8_t *p, uint16_t len)
     m_jamState   = jstate;
     m_monHwValid = true;
     m_monHwAtUs  = esp_timer_get_time();
+    m_pinSel     = pinSel;
+    m_pinDir     = pinDir;
+    m_pinVal     = pinVal;
     portEXIT_CRITICAL(&m_mux);
+
+    /* The pin map once, and again if it moves: these are the numbers CFG-ANT has
+     * to name, so they belong in the log where a bench session looks. */
+    if (pinSel != m_pinsLogged) {
+        m_pinsLogged = pinSel;
+        ESP_LOGW(TAG, "receiver pins: sel 0x%08lx dir 0x%08lx val 0x%08lx",
+                 static_cast<unsigned long>(pinSel), static_cast<unsigned long>(pinDir),
+                 static_cast<unsigned long>(pinVal));
+    }
 
     /* Only on a change: MON-HW is polled every two seconds and a line each time
      * would bury everything else. */
@@ -1416,6 +1516,9 @@ GpsTime::Status GpsTime::status() const
     st.jamInd            = m_jamInd;
     st.jamState          = m_jamState;
     st.monHwValid        = m_monHwValid;
+    st.pinSel            = m_pinSel;
+    st.pinDir            = m_pinDir;
+    st.pinVal            = m_pinVal;
     st.cn0Max            = m_cn0Max;
     st.cn0Mean           = m_cn0Mean;
     st.cn0Used           = m_cn0Used;
