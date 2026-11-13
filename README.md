@@ -780,13 +780,17 @@ gps_fix 0  gps_sats 0  gps_cn0_max 0  gps_noise_dbm -100  gps_agc 5460  gps_jam_
 ```
 
 Zero satellites while PPS still arrives, over a −100 dBm floor, is an open or
-unpowered feed rather than a configuration fault. The firmware was cleared by
-putting the previous build back on the same module, same power, same cable: it saw
-zero satellites too. Then, with nothing physical touched, the receiver was taken
-through a hot start, a cold start and a hardware reset — all three left it at zero,
-while the hardware reset was enough to make it acknowledge messages it had been
-refusing. `NAV-PVT` and `NAV-TIMELS` are acknowledged and arriving throughout and
-the timepulse is asserted. A high-gain antenna whose preamp is not powered is *worse*
+unpowered feed rather than a configuration fault. The firmware was cleared the hard way, and the
+order matters if anyone has to do this again: the **original image from before any
+of the antenna work** (`f84fe50`) was flashed onto a board that had been power
+cycled at the wall, and it sat at zero satellites for three minutes. Nothing in
+the firmware writes the RF path, so nothing in the firmware can be holding it.
+
+Before that, and with nothing physical touched, the receiver had already been taken
+through a hot start, a cold start, a hardware reset and a clear-to-defaults; all
+four left it at zero, while the hardware reset was enough to make it acknowledge
+messages it had been refusing. `NAV-PVT` and `NAV-TIMELS` are acknowledged and
+arriving throughout and the timepulse keeps running. A high-gain antenna whose preamp is not powered is *worse*
 than a passive one — the bypass path is a loss, not a gain — which is what 9 dBHz
 looks like.
 
