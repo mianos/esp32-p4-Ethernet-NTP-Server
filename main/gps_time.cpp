@@ -203,6 +203,10 @@ void GpsTime::bridgeTaskEntry(void *arg)
 
 void GpsTime::bridgeTask()
 {
+    /* Two clients, and the listening socket stays open. u-center taking the port
+     * must not lock out a shell, and the earlier single-client version did. */
+    constexpr int kMaxClients = 2;
+
     for (;;) {
         const int srv = socket(AF_INET, SOCK_STREAM, 0);
         if (srv < 0) {
@@ -216,141 +220,204 @@ void GpsTime::bridgeTask()
         addr.sin_family      = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
         addr.sin_port        = htons(kBridgePort);
-        if (bind(srv, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 || listen(srv, 1) != 0) {
+        if (bind(srv, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0 ||
+            listen(srv, kMaxClients) != 0) {
             close(srv);
             vTaskDelay(pdMS_TO_TICKS(2000));
             continue;
         }
-        ESP_LOGI(TAG, "u-center bridge listening on tcp/%d", kBridgePort);
+        ESP_LOGI(TAG, "u-center bridge on tcp/%d", kBridgePort);
 
-        sockaddr_in peer   = {};
-        socklen_t   peerLen = sizeof(peer);
-        const int   client  = accept(srv, reinterpret_cast<sockaddr *>(&peer), &peerLen);
-        close(srv);
-        if (client < 0) {
-            continue;
-        }
+        int clients[kMaxClients] = {-1, -1};
+        bool quieted = false;
+        /* u-center opens a TCP port by polling MON-COMMS, and this receiver
+         * never answers it -- so u-center waits out its timeout and resets once a
+         * second. A synthetic reply is sent if the module stays silent. */
+        int     commsClient   = -1;
+        int64_t commsDeadline = 0;
 
-        ESP_LOGW(TAG, "u-center attached from %s; the clock keeps running",
-                 inet_ntoa(peer.sin_addr));
-        m_bridgeSessions = m_bridgeSessions + 1;
-        /* Non-blocking, so a client that stops reading cannot wedge the bridge
-         * and, with it, the parser. */
-        fcntl(client, F_SETFL, fcntl(client, F_GETFL, 0) | O_NONBLOCK);
-        m_bridgeActive = true;
-        vTaskDelay(pdMS_TO_TICKS(100));
-        /* Quiet the diagnostics for the session. u-center expects a port it can
-         * talk to, and 300 bytes a second of NAV-SAT and MON-HW arrives as noise
-         * in the middle of its handshake. What the clock actually needs -- the
-         * 1 Hz NAV-PVT and TIMELS -- keeps running, so NTP is unaffected; the
-         * rest comes back on disconnect with the rest of the configuration. */
-        {
-            static constexpr uint8_t kStopNavSat[8] = {0x01, 0x35, 0, 0, 0, 0, 0, 0};
-            sendUbx(0x06, 0x01, kStopNavSat, sizeof(kStopNavSat));
-        }
-
-        uint8_t  buf[256];
-        uint32_t pendingBaud = 0;
         for (;;) {
             fd_set set;
             FD_ZERO(&set);
-            FD_SET(client, &set);
-            timeval tv = {.tv_sec = 0, .tv_usec = 50000};
-            const int ready = select(client + 1, &set, nullptr, nullptr, &tv);
-
-            if (ready > 0 && FD_ISSET(client, &set)) {
-                const int n = recv(client, buf, sizeof(buf), 0);
-                if (n <= 0) {
-                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                        /* spurious readiness; fall through to the read side */
-                    } else {
-                        snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "recv %d errno %d", n, errno);
-                        ESP_LOGW(TAG, "u-center gone: recv %d errno %d", n, errno);
-                        break;
+            FD_SET(srv, &set);
+            int maxFd = srv;
+            for (int i = 0; i < kMaxClients; ++i) {
+                if (clients[i] >= 0) {
+                    FD_SET(clients[i], &set);
+                    if (clients[i] > maxFd) {
+                        maxFd = clients[i];
                     }
-                } else {
-                    m_bridgeRx = m_bridgeRx + static_cast<uint32_t>(n);
-                /* Log what the client sends, as hex. u-center builds these and
-                 * a refused message is only diagnosable by looking at the bytes
-                 * it actually put on the wire. */
-                char hex[3 * 40 + 1];
-                int  hn = 0;
-                for (int i = 0; i < n && i < 40 && hn < static_cast<int>(sizeof(hex)) - 4; ++i) {
-                    hn += std::snprintf(hex + hn, sizeof(hex) - hn, "%02x ", buf[i]);
                 }
-                    snprintf(m_bridgeLast, sizeof(m_bridgeLast), "%s", hex);
-                    ESP_LOGI(TAG, "u-center -> %d bytes: %s", n, hex);
-                    /* u-center autobauds by sending CFG-PRT, and if this end
-                     * stays at the old rate every subsequent byte is garbage --
-                     * which looks like a dead link and makes it reconnect once a
-                     * second. Follow the rate it asks for. */
-                    for (int i = 0; i + 15 < n; ++i) {
-                        if (buf[i] == 0xB5 && buf[i + 1] == 0x62 && buf[i + 2] == 0x06 &&
-                            buf[i + 3] == 0x00) {
-                            /* Port 1 is UART1, which is where the module is and
-                             * where this end is. A CFG-PRT for USB or DDC names
-                             * a rate the module is not using for this line, so
-                             * following it would desynchronise both directions
-                             * -- which is what made u-center go deaf. */
-                            const uint8_t  port = buf[i + 6];
-                            const uint32_t baud = static_cast<uint32_t>(buf[i + 14]) |
-                                                  (static_cast<uint32_t>(buf[i + 15]) << 8);
-                            if (port != 1) {
-                                ESP_LOGI(TAG, "client set port %u to %u: not this line, ignoring",
-                                         port, static_cast<unsigned>(baud));
-                            } else if (baud >= 4800 && baud <= 921600 && baud != m_baud) {
-                                /* Applied after the write below, never before:
-                                 * the frame has to go out at the old rate or the
-                                 * module receives rubbish and never changes. */
-                                pendingBaud = baud;
-                            }
+            }
+            timeval tv = {.tv_sec = 0, .tv_usec = 50000};
+            if (select(maxFd + 1, &set, nullptr, nullptr, &tv) < 0) {
+                break;
+            }
+
+            if (FD_ISSET(srv, &set)) {
+                sockaddr_in peer    = {};
+                socklen_t   peerLen = sizeof(peer);
+                const int   c       = accept(srv, reinterpret_cast<sockaddr *>(&peer), &peerLen);
+                if (c >= 0) {
+                    int slot = -1;
+                    for (int i = 0; i < kMaxClients; ++i) {
+                        if (clients[i] < 0) {
+                            slot = i;
+                            break;
                         }
                     }
-                    uart_write_bytes(kUart, buf, n);
-                    if (pendingBaud != 0) {
-                        uart_set_baudrate(kUart, pendingBaud);
-                        m_baud = pendingBaud;
-                        ESP_LOGW(TAG, "client changed the port rate: following to %u",
-                                 static_cast<unsigned>(pendingBaud));
-                        pendingBaud = 0;
+                    if (slot < 0) {
+                        close(c); /* both taken */
+                    } else {
+                        fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK);
+                        clients[slot] = c;
+                        snprintf(m_bridgeLast, sizeof(m_bridgeLast), "attach");
+                        ESP_LOGW(TAG, "client attached from %s", inet_ntoa(peer.sin_addr));
+                        m_bridgeSessions = m_bridgeSessions + 1;
+                        if (!quieted) {
+                            /* Quiet the diagnostics while anybody is reading: the
+                             * 392-byte NAV-SAT bursts are noise in the middle of a
+                             * handshake. NAV-PVT and TIMELS keep running, which is
+                             * what the clock needs. */
+                            quieted        = true;
+                            m_bridgeActive = true;
+                            vTaskDelay(pdMS_TO_TICKS(100));
+                            static constexpr uint8_t kStopNavSat[8] = {0x01, 0x35, 0, 0,
+                                                                      0, 0,    0, 0};
+                            sendUbx(0x06, 0x01, kStopNavSat, sizeof(kStopNavSat));
+                        }
                     }
                 }
             }
-            const int got = uart_read_bytes(kUart, buf, sizeof(buf), 0);
+
+            for (int i = 0; i < kMaxClients; ++i) {
+                if (clients[i] < 0 || !FD_ISSET(clients[i], &set)) {
+                    continue;
+                }
+                uint8_t       in[256];
+                const int     n = recv(clients[i], in, sizeof(in), 0);
+                if (n <= 0 && !(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+                    snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "recv %d errno %d", n, errno);
+                    ESP_LOGW(TAG, "client gone: recv %d errno %d", n, errno);
+                    close(clients[i]);
+                    clients[i] = -1;
+                    continue;
+                }
+                if (n <= 0) {
+                    continue;
+                }
+                m_bridgeRx = m_bridgeRx + static_cast<uint32_t>(n);
+
+                char hex[3 * 40 + 1] = {};
+                int  hn              = 0;
+                for (int k = 0; k < n && k < 40 && hn < static_cast<int>(sizeof(hex)) - 4; ++k) {
+                    hn += snprintf(hex + hn, sizeof(hex) - hn, "%02x ", in[k]);
+                }
+                snprintf(m_bridgeLast, sizeof(m_bridgeLast), "%s", hex);
+                ESP_LOGI(TAG, "client -> %d bytes: %s", n, hex);
+
+                /* A port-rate change has to be applied after the frame is out, or
+                 * the module receives the request at the wrong rate. */
+                uint32_t pending = 0;
+                for (int k = 0; k + 15 < n; ++k) {
+                    if (in[k] == 0xB5 && in[k + 1] == 0x62 && in[k + 2] == 0x06 &&
+                        in[k + 3] == 0x00) {
+                        const uint8_t  port = in[k + 6];
+                        const uint32_t baud = static_cast<uint32_t>(in[k + 14]) |
+                                              (static_cast<uint32_t>(in[k + 15]) << 8);
+                        if (port != 1) {
+                            ESP_LOGI(TAG, "port %u set to %u: not this line", port,
+                                     static_cast<unsigned>(baud));
+                        } else if (baud >= 4800 && baud <= 921600 && baud != m_baud) {
+                            pending = baud;
+                        }
+                    }
+                }
+                /* Remember who asked for MON-COMMS, in case the module will not. */
+                for (int k = 0; k + 5 < n; ++k) {
+                    if (in[k] == 0xB5 && in[k + 1] == 0x62 && in[k + 2] == 0x0A &&
+                        in[k + 3] == 0x36) {
+                        commsClient   = clients[i];
+                        commsDeadline = esp_timer_get_time() + 120000;
+                    }
+                }
+                uart_write_bytes(kUart, in, n);
+                if (pending != 0) {
+                    uart_set_baudrate(kUart, pending);
+                    m_baud = pending;
+                    ESP_LOGW(TAG, "following client to %u baud", static_cast<unsigned>(pending));
+                }
+            }
+
+            uint8_t   out[256];
+            const int got = uart_read_bytes(kUart, out, sizeof(out), 0);
+
+            /* Did the module answer the MON-COMMS poll itself? */
+            if (got > 0 && commsClient >= 0) {
+                for (int i = 0; i + 3 < got; ++i) {
+                    if (out[i] == 0xB5 && out[i + 1] == 0x62 && out[i + 2] == 0x0A &&
+                        out[i + 3] == 0x36) {
+                        commsClient = -1;
+                        break;
+                    }
+                }
+            }
+            if (commsClient >= 0 && esp_timer_get_time() > commsDeadline) {
+                /* version 0, no ports, no errors: enough for a client checking that
+                 * the link is alive, and honest about there being nothing to
+                 * report. */
+                uint8_t reply[20] = {0xB5, 0x62, 0x0A, 0x36, 0x0C, 0x00};
+                uint8_t a = 0;
+                uint8_t b = 0;
+                for (int i = 2; i < 18; ++i) {
+                    a = static_cast<uint8_t>(a + reply[i]);
+                    b = static_cast<uint8_t>(b + a);
+                }
+                reply[18] = a;
+                reply[19] = b;
+                if (send(commsClient, reply, sizeof(reply), 0) > 0) {
+                    m_bridgeTx = m_bridgeTx + sizeof(reply);
+                }
+                ESP_LOGI(TAG, "answered MON-COMMS locally (the module does not)");
+                commsClient = -1;
+            }
+
             if (got > 0) {
-                /* Tapped as well as forwarded, so /healthz keeps working and a
-                 * NAK from the module is recorded rather than vanishing into the
-                 * socket. */
                 for (int i = 0; i < got; ++i) {
-                    feed(buf[i]);
+                    feed(out[i]);
                 }
                 m_bridgeTx = m_bridgeTx + static_cast<uint32_t>(got);
-                /* Bounded retry rather than a single try: a short write or a
-                 * momentarily full buffer is not a disconnect. */
-                int sent = 0;
-                int64_t giveUp = esp_timer_get_time() + 500000;
-                while (sent < got && esp_timer_get_time() < giveUp) {
-                    const int w = send(client, buf + sent, got - sent, 0);
-                    if (w > 0) {
-                        sent += w;
-                    } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                        vTaskDelay(pdMS_TO_TICKS(2));
-                    } else {
-                        snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "send errno %d", errno);
-                        ESP_LOGW(TAG, "u-center send failed: errno %d", errno);
-                        break;
+                for (int i = 0; i < kMaxClients; ++i) {
+                    if (clients[i] < 0) {
+                        continue;
+                    }
+                    int sent   = 0;
+                    int64_t by = esp_timer_get_time() + 500000;
+                    while (sent < got && esp_timer_get_time() < by) {
+                        const int w = send(clients[i], out + sent, got - sent, 0);
+                        if (w > 0) {
+                            sent += w;
+                        } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                            vTaskDelay(pdMS_TO_TICKS(2));
+                        } else {
+                            snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "send errno %d", errno);
+                            close(clients[i]);
+                            clients[i] = -1;
+                            break;
+                        }
                     }
                 }
             }
         }
 
-        close(client);
-        m_bridgeActive = false;
-        if (strcmp(m_bridgeEnd, "none") == 0) {
-            snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "loop exit");
+        for (int i = 0; i < kMaxClients; ++i) {
+            if (clients[i] >= 0) {
+                close(clients[i]);
+            }
         }
-        ESP_LOGW(TAG, "u-center detached: re-applying the firmware's own configuration");
-        /* The client may have left the receiver anywhere; put it back. */
+        close(srv);
+        m_bridgeActive = false;
+        ESP_LOGW(TAG, "bridge reset; re-applying configuration");
         m_reconfigAtUs = esp_timer_get_time() + 500000;
     }
 }
