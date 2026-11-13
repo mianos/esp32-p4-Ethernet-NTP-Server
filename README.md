@@ -730,10 +730,20 @@ Eleven short frames per boot is the cheaper trade.
 The M8T has **no antenna supervisor**: `CFG-ANT` is refused, at boot, after three
 retries ten seconds apart, and again after a hardware reset that made the receiver
 accept other messages it had been refusing, so `gps_ant` and `gps_ant_power` stay `unknown`
-and the bias can be neither switched nor read back from software. Whether the
-board puts DC on the feed is a hardware question about the module's bias
-arrangement, not a register — worth a multimeter at the connector, and worth
-knowing *before* an antenna is chosen.
+and the bias can be neither switched nor read back from software.
+
+**There is no DC on the centre pin on this board** — measured, not inferred. So an
+active antenna's preamp gets nothing, and an unpowered preamp is a 10 to 20 dB
+attenuator: worse than a passive antenna, not better. That is what `gps_cn0_max`
+11 dBHz over a working fix was, and when the path faded the last few dB it went to
+zero and stayed there. Any antenna with a preamp needs its bias supplied
+externally, by a bias tee on the feed; a passive antenna needs no such thing and
+is the cheaper way to keep the receiver usable indoors.
+
+The module stays a LEA-M8T and is not suspected: unplugging and refitting the
+antenna moves `gps_noise_dbm` by 2 dB, `gps_agc` by 78 counts and `gps_jam_ind` by
+8, all in the direction an open connector and a matched one should move, so the RF
+front end and the board's trace are both alive. What is missing is L1 at the pin.
 
 What software can say is what the front end is doing, which turns out to be
 enough to spot a dead antenna path without a supervisor:
