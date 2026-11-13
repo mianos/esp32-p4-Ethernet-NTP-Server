@@ -784,10 +784,18 @@ enough to spot a dead antenna path without a supervisor:
 | Key at `/gps/info` | Means |
 |-----|-------|
 | `cn0_max` / `cn0_mean` / `cn0_used` | C/N0 on **used** satellites, in dBHz. This is how two antennas are compared. Satellite count is not: a better antenna adds the marginal ones last, and a worse one can hold the count up on the strongest handful while everything near the horizon goes. |
-| `noise_dbm` | `MON-HW` noise floor, and the preamp tell. A running preamp raises it to roughly −30…−50 dBm; **−100 dBm means the preamp is not powered, or the feed is open.** |
-| `agc` | AGC count, for context against the two above. |
-| `jam_ind` / `jam` | Interference index, and the receiver's verdict where the firmware offers one. High alongside high C/N0 is a preamp that is too much for this receiver. |
+| `noise_dbm` | `MON-HW` noise floor. A preamp tell only in the coarse sense: this board sits near −99 dBm with the preamp powered and −98 with it off, so the number barely moves and the **`agc` and `cn0` pair is what actually separates the two** (5460 and 9 dBHz unpowered, 1400–1600 and 24–27 dBHz powered). Do not read −99 as "no preamp" here, which an earlier version of this table invited. |
+| `agc` | AGC count. Pinned near 5460 is a desensed front end: no preamp, an open feed, or a strong interferer. |
+| `jam_ind` / `jam` | Interference index, and the receiver's verdict where the firmware offers one. It runs near 50 desensed and near 10–25 with the preamp powered, so a high value alongside *low* `agc` means an interferer rather than a missing feed. |
 | `ant` / `ant_power` / `ant_bias` | What the supervisor reports, and what the switch is doing. |
+
+**Turning the bias off and on again does not bring the sky back by itself.** The
+supply returns, the receiver sits at zero satellites, AGC pegged and `ant`
+DONTKNOW, and stays there — four minutes of it before a hardware reset restored
+24 dBHz in fifteen seconds. `/gps/ant` on the off-to-on edge therefore queues that
+reset itself, because the missing step is the module re-initialising its front
+end and the next person to compare two antennas would otherwise be left with a
+deaf receiver and no obvious next move.
 
 ### GET /gps/info, for the diagnostics
 

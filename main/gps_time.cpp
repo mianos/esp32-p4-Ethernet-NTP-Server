@@ -674,8 +674,9 @@ void GpsTime::task()
          * than in the handler so exactly one thread owns the UART and the
          * parser. */
         if (m_biasReq >= 0) {
-            const bool on = m_biasReq == 1;
-            m_biasReq     = -1;
+            const bool on      = m_biasReq == 1;
+            const bool wasOn   = m_antBiasOn;
+            m_biasReq          = -1;
             /* Supply control bit on or off; short/open detection and
              * power-down-on-short stay set either way. */
             const uint8_t cfg[4] = {static_cast<uint8_t>(on ? 0x0F : 0x0E), 0, 0, 0};
@@ -690,6 +691,21 @@ void GpsTime::task()
             ESP_LOGW(TAG, "antenna bias %s on request (module said %s)", on ? "ON" : "OFF",
                      br == 1 ? "accepted" : br == 0 ? "refused" : "nothing");
             sendUbx(0x0A, 0x09, nullptr, 0); /* re-read the supervisor at once */
+
+            /* Powering the preamp back up is not enough to get the sky back. The
+             * supply was restored and the receiver sat at zero satellites, a
+             * pegged AGC and a DONTKNOW antenna status for four minutes; the
+             * same supply at the next boot works, so what is missing is the
+             * module re-initialising its front end. A hardware reset gives it
+             * that, and it keeps the almanac. Only on the off -> on edge: an
+             * "on" while already on has nothing to re-initialise. */
+            if (on && !wasOn) {
+                m_resetReq   = true;
+                m_resetHard  = true;
+                m_resetCold  = false;
+                m_resetPower = false;
+                ESP_LOGW(TAG, "hardware reset queued to re-initialise the front end");
+            }
         }
         /* Three more tries at the two messages a module still booting may have
          * refused, ten seconds apart. The boot burst goes out about half a
