@@ -7,6 +7,8 @@
 #include <cstring>
 #include <sys/time.h>
 
+#include <arpa/inet.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -229,7 +231,11 @@ void GpsTime::bridgeTask()
             continue;
         }
 
-        ESP_LOGW(TAG, "u-center attached: the GPS task stands down until it disconnects");
+        ESP_LOGW(TAG, "u-center attached from %s; the clock keeps running",
+                 inet_ntoa(peer.sin_addr));
+        /* Non-blocking, so a client that stops reading cannot wedge the bridge
+         * and, with it, the parser. */
+        fcntl(client, F_SETFL, fcntl(client, F_GETFL, 0) | O_NONBLOCK);
         m_bridgeActive = true;
         vTaskDelay(pdMS_TO_TICKS(100));
 
@@ -244,8 +250,13 @@ void GpsTime::bridgeTask()
             if (ready > 0 && FD_ISSET(client, &set)) {
                 const int n = recv(client, buf, sizeof(buf), 0);
                 if (n <= 0) {
-                    break; /* closed */
-                }
+                    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        /* spurious readiness; fall through to the read side */
+                    } else {
+                        ESP_LOGW(TAG, "u-center gone: recv %d errno %d", n, errno);
+                        break;
+                    }
+                } else {
                 /* Log what the client sends, as hex. u-center builds these and
                  * a refused message is only diagnosable by looking at the bytes
                  * it actually put on the wire. */
@@ -254,8 +265,26 @@ void GpsTime::bridgeTask()
                 for (int i = 0; i < n && i < 40 && hn < static_cast<int>(sizeof(hex)) - 4; ++i) {
                     hn += std::snprintf(hex + hn, sizeof(hex) - hn, "%02x ", buf[i]);
                 }
-                ESP_LOGI(TAG, "u-center -> %d bytes: %s", n, hex);
-                uart_write_bytes(kUart, buf, n);
+                    ESP_LOGI(TAG, "u-center -> %d bytes: %s", n, hex);
+                    /* u-center autobauds by sending CFG-PRT, and if this end
+                     * stays at the old rate every subsequent byte is garbage --
+                     * which looks like a dead link and makes it reconnect once a
+                     * second. Follow the rate it asks for. */
+                    for (int i = 0; i + 15 < n; ++i) {
+                        if (buf[i] == 0xB5 && buf[i + 1] == 0x62 && buf[i + 2] == 0x06 &&
+                            buf[i + 3] == 0x00) {
+                            const uint32_t baud = static_cast<uint32_t>(buf[i + 14]) |
+                                                  (static_cast<uint32_t>(buf[i + 15]) << 8);
+                            if (baud >= 4800 && baud <= 921600 && baud != m_baud) {
+                                uart_set_baudrate(kUart, baud);
+                                m_baud = baud;
+                                ESP_LOGW(TAG, "client changed the port rate: following to %u",
+                                         static_cast<unsigned>(baud));
+                            }
+                        }
+                    }
+                    uart_write_bytes(kUart, buf, n);
+                }
             }
             const int got = uart_read_bytes(kUart, buf, sizeof(buf), 0);
             if (got > 0) {
@@ -265,8 +294,20 @@ void GpsTime::bridgeTask()
                 for (int i = 0; i < got; ++i) {
                     feed(buf[i]);
                 }
-                if (send(client, buf, got, 0) < 0) {
-                    break;
+                /* Bounded retry rather than a single try: a short write or a
+                 * momentarily full buffer is not a disconnect. */
+                int sent = 0;
+                int64_t giveUp = esp_timer_get_time() + 500000;
+                while (sent < got && esp_timer_get_time() < giveUp) {
+                    const int w = send(client, buf + sent, got - sent, 0);
+                    if (w > 0) {
+                        sent += w;
+                    } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                        vTaskDelay(pdMS_TO_TICKS(2));
+                    } else {
+                        ESP_LOGW(TAG, "u-center send failed: errno %d", errno);
+                        break;
+                    }
                 }
             }
         }
