@@ -815,11 +815,17 @@ void GpsTime::task()
             if (cmd == 1) {
                 tm[0]    = 1; /* survey-in */
                 minDur   = m_svinDurS;
-                /* The receiver's limit is a *variance* in mm squared while
-                 * everybody thinks in an accuracy in mm, so the conversion
-                 * belongs here rather than in the caller's head. 3000 mm is
-                 * 9e6; at 20000 mm it is still inside a uint32. */
-                accLimit = m_svinAccMm * m_svinAccMm;
+                /* Two conversions, both the receiver's units rather than the
+                 * caller's: the limit is a *variance*, and the receiver works
+                 * in centimetres while everybody thinks in millimetres. So a
+                 * requested 3000 mm is 300 cm is 90000 of variance. The
+                 * centimetres are not documented where it matters -- what
+                 * settled it is that the ECEF the receiver reports has a
+                 * magnitude of 6.37e8, which is 6371 km in centimetres and 637
+                 * km in millimetres, and 637 km is a tenth of the way to the
+                 * centre of the earth. */
+                const uint32_t cm = m_svinAccMm / 10;
+                accLimit = cm * cm;
             } else if (cmd == 3) {
                 /* ECEF from the receiver's own mean: it reports ECEF and takes
                  * ECEF, so staying in it avoids a projection between two things
@@ -1657,10 +1663,10 @@ void GpsTime::onNavSvin(const uint8_t *p, uint16_t len)
      * running (dur, obs and active all read correctly; nothing else in the
      * message moves that way in step with a survey).
      *
-     * meanV is a **variance in mm squared**, not an accuracy in mm, so it gets
-     * square-rooted for display. The receiver compares its own limit against
-     * the variance, which is why the limit has to be expressed in mm-squared
-     * terms when it is decided on: a "3000 mm" accuracy is 9e6 of variance.
+     * meanV is a **variance**, not an accuracy, and its unit follows the
+     * position's -- centimetres here, so cm squared. It is square-rooted for
+     * the accuracy and scaled to millimetres, and the limit is put in the same
+     * cm-squared terms when it is set.
      *
      * The mean is kept after the survey ends, because locking the position
      * afterwards is the whole point of having run one and the receiver carries
@@ -2229,7 +2235,8 @@ GpsTime::Status GpsTime::status() const
     }
     st.timeMode = m_tmode == 1 ? "survey" : m_tmode == 2 ? "fixed" : "moving";
     st.svinDurS = static_cast<double>(m_svinDur);
-    st.svinAccMm = static_cast<double>(isqrt(m_svinAcc));
+    /* cm of standard deviation, in mm, for a figure in mm. */
+    st.svinAccMm = static_cast<double>(isqrt(m_svinAcc)) * 10.0;
     st.svinVarMm2 = static_cast<double>(m_svinAcc);
     st.svinObs  = static_cast<double>(m_svinObs);
     st.svinValid = m_svinValid;
