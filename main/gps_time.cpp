@@ -275,16 +275,17 @@ void GpsTime::bridgeTask()
                         ESP_LOGW(TAG, "client attached from %s", inet_ntoa(peer.sin_addr));
                         m_bridgeSessions = m_bridgeSessions + 1;
                         if (!quieted) {
-                            /* Quiet the diagnostics while anybody is reading: the
-                             * 392-byte NAV-SAT bursts are noise in the middle of a
-                             * handshake. NAV-PVT and TIMELS keep running, which is
-                             * what the clock needs. */
+                            /* Speed NAV-SAT up to 1 Hz for the session: the sky
+                             * view and the C/N0 bars are drawn from it, so it is
+                             * the message a session is actually for. It runs at
+                             * half rate normally, to leave the line to the clock;
+                             * configureModule() puts it back on disconnect. */
                             quieted        = true;
                             m_bridgeActive = true;
                             vTaskDelay(pdMS_TO_TICKS(100));
-                            static constexpr uint8_t kStopNavSat[8] = {0x01, 0x35, 0, 0,
+                            static constexpr uint8_t kNavSatFast[8] = {0x01, 0x35, 0, 1,
                                                                       0, 0,    0, 0};
-                            sendUbx(0x06, 0x01, kStopNavSat, sizeof(kStopNavSat));
+                            sendUbx(0x06, 0x01, kNavSatFast, sizeof(kNavSatFast));
                         }
                     }
                 }
