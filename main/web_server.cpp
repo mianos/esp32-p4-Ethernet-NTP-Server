@@ -464,6 +464,7 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("bridge_rx", static_cast<double>(gps.bridgeRx));
     doc.AddItem("bridge_tx", static_cast<double>(gps.bridgeTx));
     doc.AddItem("bridge_end", gps.bridgeEnd);
+    doc.AddItem("bridge_last", gps.bridgeLast);
     if (gps.locked) {
         doc.AddItem("dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);
         doc.AddItem("lock_window_s", static_cast<double>(gps.lockWindowUs) / 1000000);

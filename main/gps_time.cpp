@@ -239,6 +239,15 @@ void GpsTime::bridgeTask()
         fcntl(client, F_SETFL, fcntl(client, F_GETFL, 0) | O_NONBLOCK);
         m_bridgeActive = true;
         vTaskDelay(pdMS_TO_TICKS(100));
+        /* Quiet the diagnostics for the session. u-center expects a port it can
+         * talk to, and 300 bytes a second of NAV-SAT and MON-HW arrives as noise
+         * in the middle of its handshake. What the clock actually needs -- the
+         * 1 Hz NAV-PVT and TIMELS -- keeps running, so NTP is unaffected; the
+         * rest comes back on disconnect with the rest of the configuration. */
+        {
+            static constexpr uint8_t kStopNavSat[8] = {0x01, 0x35, 0, 0, 0, 0, 0, 0};
+            sendUbx(0x06, 0x01, kStopNavSat, sizeof(kStopNavSat));
+        }
 
         uint8_t  buf[256];
         uint32_t pendingBaud = 0;
@@ -269,6 +278,7 @@ void GpsTime::bridgeTask()
                 for (int i = 0; i < n && i < 40 && hn < static_cast<int>(sizeof(hex)) - 4; ++i) {
                     hn += std::snprintf(hex + hn, sizeof(hex) - hn, "%02x ", buf[i]);
                 }
+                    snprintf(m_bridgeLast, sizeof(m_bridgeLast), "%s", hex);
                     ESP_LOGI(TAG, "u-center -> %d bytes: %s", n, hex);
                     /* u-center autobauds by sending CFG-PRT, and if this end
                      * stays at the old rate every subsequent byte is garbage --
@@ -654,7 +664,7 @@ void GpsTime::task()
 
         /* Antenna supervisor, every two seconds. Polled rather than enabled at
          * a rate so a bench session that never looks at it costs nothing. */
-        if (nowUs >= m_nextHwUs) {
+        if (!m_bridgeActive && nowUs >= m_nextHwUs) {
             sendUbx(0x0A, 0x09, nullptr, 0);
             m_nextHwUs = nowUs + 2000000;
         }
@@ -1683,6 +1693,7 @@ GpsTime::Status GpsTime::status() const
     st.bridgeRx          = m_bridgeRx;
     st.bridgeTx          = m_bridgeTx;
     st.bridgeEnd.assign(m_bridgeEnd);
+    st.bridgeLast.assign(m_bridgeLast);
     st.pinSel            = m_pinSel;
     st.pinDir            = m_pinDir;
     st.pinVal            = m_pinVal;

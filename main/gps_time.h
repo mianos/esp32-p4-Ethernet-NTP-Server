@@ -177,6 +177,7 @@ public:
         uint32_t bridgeRx       = 0;
         uint32_t bridgeTx       = 0;
         std::string bridgeEnd;
+        std::string bridgeLast;
         /* MON-HW's pin map: which module pins the receiver has assigned, their
          * direction and level. The antenna supervisor is a pin pair, so this is
          * where its numbers come from when CFG-ANT has to name them. */
@@ -447,6 +448,7 @@ private:
     volatile uint32_t m_bridgeTx   = 0;
     volatile uint32_t m_bridgeSessions = 0;
     char       m_bridgeEnd[48]     = "none";
+    char       m_bridgeLast[128]   = "";
     uint8_t    m_cn0Max            = 0;
     uint8_t    m_cn0Mean           = 0;
     uint8_t    m_cn0Used           = 0;
