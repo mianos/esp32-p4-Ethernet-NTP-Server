@@ -278,6 +278,12 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
          * are the overload tell-tales -- a preamp that is too strong for this
          * receiver drives agc down and the jamming state up while the C/N0
          * still looks flattering. */
+        /* The switch this firmware drives, since the module has no supervisor. */
+        json.AddItem("gps_ant_bias", gps.antBiasOn ? "on" : "off");
+        json.AddItem("gps_ant_short", gps.antShort);
+        if (gps.antLatched) {
+            json.AddItem("gps_ant_latched", true);
+        }
         json.AddItem("gps_ant_cfg", gps.antCfgRejected ? "rejected"
                                     : gps.antCfgAcked  ? "accepted"
                                                        : "silent");
@@ -540,7 +546,7 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
     JsonWrapper resp;
     resp.AddItem("requested", bias);
     resp.AddItem("read_back_after_s", 3.0);
-    resp.AddItem("note", "queued for the GPS task; gps_ant_power and gps_ant report the result");
+    resp.AddItem("note", "drives GPIO17; gps_ant_bias and gps_ant_short report the result");
     return sendJson(req, resp, 200);
 }
 

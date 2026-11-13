@@ -170,6 +170,12 @@ GpsTime &GpsTime::instance()
     return gps;
 }
 
+void GpsTime::applyBias(bool on)
+{
+    m_antBiasOn = on;
+    gpio_set_level(static_cast<gpio_num_t>(kAntDrivePin), on ? 0 : 1);
+}
+
 void GpsTime::requestAntennaBias(bool on)
 {
     m_biasReq = on ? 1 : 0;
@@ -365,6 +371,25 @@ esp_err_t GpsTime::begin()
         return ESP_ERR_NO_MEM;
     }
 
+    /* The bias switch. Output, idle high (off, which is also the board's own
+     * default), then turned on below; the sense pin is an input with the board's
+     * pull-up already on the net. */
+    gpio_config_t bias = {};
+    bias.pin_bit_mask  = (1ULL << kAntDrivePin) | (1ULL << kAntSensePin);
+    bias.mode          = GPIO_MODE_INPUT_OUTPUT;
+    bias.pull_up_en    = GPIO_PULLUP_ENABLE;
+    bias.pull_down_en  = GPIO_PULLDOWN_DISABLE;
+    bias.intr_type     = GPIO_INTR_DISABLE;
+    if (gpio_config(&bias) != ESP_OK) {
+        ESP_LOGW(TAG, "cannot claim GPIO%d/%d for the bias switch", kAntDrivePin, kAntSensePin);
+    } else {
+        gpio_set_direction(static_cast<gpio_num_t>(kAntDrivePin), GPIO_MODE_OUTPUT);
+        gpio_set_direction(static_cast<gpio_num_t>(kAntSensePin), GPIO_MODE_INPUT);
+        gpio_set_level(static_cast<gpio_num_t>(kAntDrivePin), 1); /* off until the module is up */
+        ESP_LOGI(TAG, "antenna bias on GPIO%d (active low), short sense on GPIO%d",
+                 kAntDrivePin, kAntSensePin);
+    }
+
     if (xTaskCreate(&GpsTime::bridgeTaskEntry, "gpsbridge", 4096, this, 3, nullptr) != pdPASS) {
         ESP_LOGW(TAG, "no bridge task: u-center passthrough unavailable");
     }
@@ -398,6 +423,12 @@ void GpsTime::task()
      * if there is nothing on the other end. */
     configureModule();
 
+    /* Power the antenna once the receiver has been configured. Off during the
+     * baud scan so a wrong lead is not sitting powered through it. */
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    applyBias(true);
+    ESP_LOGI(TAG, "antenna bias on");
+
     for (;;) {
         /* While u-center is attached it owns the port; touching the parser here
          * as well would interleave two readers on one stream. */
@@ -430,9 +461,15 @@ void GpsTime::task()
              * power-down-on-short stay set either way. */
             const uint8_t cfg[4] = {static_cast<uint8_t>(on ? 0x0F : 0x0E), 0, 0, 0};
             const int8_t  br     = sendAndWait(0x06, 0x13, cfg, sizeof(cfg));
-            ESP_LOGW(TAG, "antenna bias %s on request: module %s", on ? "ON" : "OFF",
-                     br == 1 ? "accepted" : br == 0 ? "refused, so the bias is unchanged"
-                                                    : "did not answer");
+            /* The pin is what actually does it; the CFG-ANT frame is kept
+             * because it costs nothing and would start working on a module that
+             * has a supervisor. */
+            m_antLatched = false;
+            m_shortSamples = 0;
+            applyBias(on);
+            gpio_set_level(static_cast<gpio_num_t>(kAntDrivePin), on ? 0 : 1);
+            ESP_LOGW(TAG, "antenna bias %s on request (module said %s)", on ? "ON" : "OFF",
+                     br == 1 ? "accepted" : br == 0 ? "refused" : "nothing");
             sendUbx(0x0A, 0x09, nullptr, 0); /* re-read the supervisor at once */
         }
         /* Three more tries at the two messages a module still booting may have
@@ -446,7 +483,7 @@ void GpsTime::task()
             ++m_warmRetries;
             m_warmRetryAtUs = nowUs + 10000000;
             if (m_antCfgNaked) {
-                const uint8_t cfg[4] = {0x0F, 0x00, 0x00, 0x00};
+                const uint8_t cfg[4] = {0x0B, 0x00, 20, 27};
                 const int8_t  br     = sendAndWait(0x06, 0x13, cfg, sizeof(cfg));
                 if (br >= 0) {
                     m_antCfgNaked = br == 0;
@@ -515,6 +552,33 @@ void GpsTime::task()
                 m_reconfigAtUs = esp_timer_get_time() + 3000000;
             }
             sendUbx(0x06, 0x04, rst, sizeof(rst));
+        }
+
+        /* The short sense. Sample four times a second; three consecutive reads
+         * in the shorted state cut the bias and latch, because the point of the
+         * protection is to act faster than a person. */
+        {
+            static int64_t nextSenseUs = 0;
+            if (nowUs >= nextSenseUs) {
+                nextSenseUs = nowUs + 250000;
+                const int level = gpio_get_level(static_cast<gpio_num_t>(kAntSensePin));
+                if (level != m_senseLogged) {
+                    m_senseLogged = level;
+                    ESP_LOGI(TAG, "antenna sense GPIO%d reads %d", kAntSensePin, level);
+                }
+                /* SCS1_N is active low: a short pulls it down. */
+                if (m_antBiasOn && !m_antLatched && level == 0) {
+                    if (++m_shortSamples >= 3) {
+                        m_antShort   = true;
+                        m_antLatched = true;
+                        applyBias(false);
+                        ESP_LOGW(TAG, "antenna SHORT: bias cut and latched off");
+                    }
+                } else if (level != 0) {
+                    m_shortSamples = 0;
+                    m_antShort     = false;
+                }
+            }
         }
 
         /* Antenna supervisor, every two seconds. Polled rather than enabled at
@@ -633,19 +697,24 @@ void GpsTime::configureModule()
      * something this firmware used to touch, so whether a preamp was powered
      * depended entirely on whatever the module's saved configuration said -- a
      * user swapping antennas had no way to know from here. It is now asserted:
-     * supply voltage control on, short and open detection on, and power down on
-     * a short so a bad lead cannot cook the supply.
+     * supply voltage control on, short detection on, and power down on a short so
+     * a bad lead cannot cook the supply. Open-circuit detection is left out
+     * because this firmware refuses it.
      *
      * The detect bits are the point of the exercise: MON-HW reports what they
      * find as aStatus, so "is the antenna plugged in and powered" becomes a
      * number in /healthz instead of a guess. A receiver without a supervisor
      * NAKs this and the whole group stays at DONTKNOW. */
-    constexpr uint8_t kCfgAnt[4] = {0x0F, 0x00, 0x00, 0x00};
+    /* flags 0x0B: svcs | scd | pdwnOnSCD. Bit 2, open-circuit detection, is
+     * rejected by this firmware -- setting it NAKs the whole message, which is
+     * what made the supervisor look absent for an afternoon. Pins 20 and 27 are
+     * the EXTINT pair the board wires to the switch, AADET first. */
+    constexpr uint8_t kCfgAnt[4] = {0x0B, 0x00, 20, 27};
     r = sendAndWait(0x06, 0x13, kCfgAnt, sizeof(kCfgAnt));
     m_antCfgAcked = r == 1;
     m_antCfgNaked = r == 0;
     if (r == 1) {
-        ESP_LOGI(TAG, "CFG-ANT accepted: antenna bias on, with short/open detection");
+        ESP_LOGI(TAG, "CFG-ANT accepted: antenna bias on, short detection, power-down on short");
     } else {
         ESP_LOGW(TAG, "CFG-ANT %s: antenna bias is whatever the module was left set to",
                  r == 0 ? "rejected" : "unanswered");
@@ -1524,6 +1593,9 @@ GpsTime::Status GpsTime::status() const
     st.tp5Rejected       = m_tp5Naked;
     st.timTpRejected     = m_timTpNaked;
     st.timTpAcked        = m_timTpAcked;
+    st.antBiasOn         = m_antBiasOn;
+    st.antShort          = m_antShort;
+    st.antLatched        = m_antLatched;
     st.antCfgAcked       = m_antCfgAcked;
     st.antCfgRejected    = m_antCfgNaked;
     st.antStatus         = m_antStatus;

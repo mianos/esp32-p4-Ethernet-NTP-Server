@@ -727,13 +727,21 @@ Eleven short frames per boot is the cheaper trade.
 
 ### Antennas, and what the front end says about one
 
-The M8T has **no antenna supervisor**. `CFG-ANT` is refused, at boot, after three
-retries ten seconds apart, and after a hardware reset that made the receiver accept
-other messages it had been refusing. `u-center` shows an antenna dialog regardless,
-which is misleading: five pin pairs were probed through it — both orders of the two
-`EXTINT` pins the board actually wires, plus 0/0, 1/2 and 10/12 — and every one came
-back `NAK`. So `gps_ant` and `gps_ant_power` stay `unknown`, and nothing sent over
-UART will make the module drive the switch.
+The M8T **does have an antenna supervisor**, and it took a while to find because
+one flag bit refuses the entire message. Every attempt used `0x0F` — supply,
+short detect, open detect, power-down-on-short — and every one came back `NAK`,
+which reads exactly like "no supervisor here". It is not: sweeping the bits one at
+a time shows `svcs`, `scd` and `pdwnOnSCD` all accepted, and **bit 2, open-circuit
+detection, is the one this firmware rejects**. With `0x0B` and the pins named, the
+receiver reports `aStatus ok` and `aPower on` and drives the switch.
+
+The working frame is `flags 0x0B, pins 20/27` — the `EXTINT` pair the board wires
+to the transistor base and the short-sense divider. `gps_ant` and `gps_ant_power`
+now report what the receiver says instead of `unknown`.
+
+The lesson is worth keeping: a `NAK` is about the whole message, so any one
+unsupported bit hides an otherwise complete feature. Vary the bits before
+concluding a message is absent.
 
 **The board is a WD22UGRC**, a Huawei carrier for the LEA-M8T, and it does not
 generate antenna power: the 8-pin header takes `V_ANT` on pin 1 as a *supply
@@ -743,18 +751,13 @@ here, and an unpowered preamp is a 10 to 20 dB attenuator: worse than a passive
 antenna, not better. That is what `gps_cn0_max` 11 dBHz over a working fix was, and
 when the path faded the last few dB it went to zero and stayed there.
 
-Because the module will not drive it, the switch has to be worked by hand. The two
-PNP transistors take their base drive from the net on the module's `AADET_N` pin and
-report a short back on `SCS1_N`, which lands on the other `EXTINT` pin; both are
-otherwise unused. Holding `AADET_N` low turns the bias on — through about 1 kΩ to
-ground as a test, or from an ESP GPIO to make it switchable and to read `SCS1_N`
-back for the short sense, which is the module's job that the firmware would then be
-doing instead.
+The switch is the board's, not the firmware's: the two PNPs take base drive from
+the module's `AADET_N` pin and report a short on `SCS1_N`, and the module drives
+those once `CFG-ANT` is accepted. `V_ANT` on pin 1 still has to be fed — the board
+switches a supply, it does not make one.
 
-The alternative is an external DC injector on the feed, which is what the other
-owner of one of these boards settled on and needs no rework. An active antenna
-therefore needs a supply on pin 1 *and* something driving the switch, or an
-injector; a passive antenna needs neither.
+A GPIO drive on 17 with a sense on 18 exists as a fallback for a module that
+cannot be configured, and costs nothing while unused.
 
 The RF connector is SMB, and the SMA adapter often used on a bench is a snap-fit
 with real loss and contact risk — worth reseating, and worth suspecting before the

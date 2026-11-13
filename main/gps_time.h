@@ -141,6 +141,11 @@ public:
          * have. All three go out over /healthz rather than only to a log that
          * drops bytes at exactly the wrong moment. */
         std::string moduleId;
+        /* The bias switch, driven by the ESP because the module will not. */
+        bool     antBiasOn     = false;
+        bool     antShort      = false;
+        bool     antLatched    = false;
+
         bool     tp5Rejected   = false;
         bool     timTpRejected = false;
         bool     timTpAcked    = false;
@@ -245,6 +250,14 @@ public:
      * configuration, so a session cannot leave the receiver somewhere the
      * firmware does not expect. */
     static constexpr int kBridgePort = 3333;
+
+    /* The antenna switch, on the ESP side: AADET_N is pulled low to power the
+     * preamp, SCS1_N reports a short. The module's own supervisor does not
+     * exist on this firmware (CFG-ANT is refused for every flag and pin
+     * combination tried), so the firmware does the job -- including cutting the
+     * bias on a short, which is the one part of it that protects hardware. */
+    static constexpr int kAntDrivePin = 17;
+    static constexpr int kAntSensePin = 18;
 
 private:
     static constexpr const char *TAG = "gps_time";
@@ -416,6 +429,12 @@ private:
     volatile bool   m_resetPower   = false;
     volatile bool   m_defaultsReq  = false;
     volatile bool   m_bridgeActive = false;
+    bool           m_antBiasOn     = false;
+    bool           m_antShort      = false;
+    bool           m_antLatched    = false;
+    int            m_shortSamples  = 0;
+    int            m_senseLogged   = -1;
+    void applyBias(bool on);
     int64_t         m_reconfigAtUs = 0;
     int64_t    m_monHwAtUs         = 0;
     uint8_t    m_cn0Max            = 0;
