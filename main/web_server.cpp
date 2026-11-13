@@ -28,6 +28,12 @@ constexpr const char *TAG = "webserver";
 /* POST /ntp/sync blocks the request for at most this long. */
 constexpr uint32_t kSyncWaitMs = 5000;
 
+/* POST /gps/pps will not disable the PPS for longer than this. An hour is long
+ * past the ten-minute holdover window, so a test can watch the reference demote
+ * and then watch it recover; beyond that it stops being a test and starts being
+ * a way to run a stratum-1 server with its reference switched off. */
+constexpr int kMaxSuppressS = 3600;
+
 /* POST /firmware moves the body a socket-chunk at a time into flash. Handlers
  * run on httpd's server task, and HTTPD_DEFAULT_CONFIG() gives that task 4 KB
  * of stack, so the buffer stays at 1 KB: enough to keep a 500 KB image quick
@@ -121,6 +127,7 @@ void NtpWebServer::register_routes()
         {"/config",       HTTP_POST, config_post_handler},
         {"/config/reset", HTTP_POST, config_reset_post_handler},
         {"/ntp/sync",     HTTP_POST, sync_post_handler},
+        {"/gps/pps",      HTTP_POST, gps_pps_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
         {"/firmware",     HTTP_POST, firmware_post_handler},
     };
@@ -220,6 +227,44 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
             json.AddItem("gps_pps_age_ms", static_cast<double>(gps.ppsAgeUs / 1000));
         }
         json.AddItem("gps_offset_us", static_cast<double>(gps.offsetUs));
+
+        /* The servo, and what it buys: the rate it has measured for the
+         * crystal, how many anchors that is based on, and the window that rate
+         * is worth holding over for. Before the first fit the rate is 0 and
+         * rate_n grows towards 60; after it, this number is the difference
+         * between a 3-second holdover and a 10-minute one. */
+        json.AddItem("gps_rate_ppm", static_cast<double>(gps.ratePpb) / 1000.0);
+        json.AddItem("gps_rate_n", static_cast<double>(gps.rateSamples));
+        if (gps.locked) {
+            json.AddItem("gps_dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);
+            json.AddItem("gps_lock_window_s",
+                         static_cast<double>(gps.lockWindowUs / 1000000));
+        }
+        /* The leap-second notice a reply would carry. leap_pending is what puts
+         * the indicator at 1 (or 2); leap_in_s only exists while something is
+         * actually pending. */
+        if (gps.leapValid) {
+            json.AddItem("gps_leap_s", static_cast<double>(gps.leapSeconds));
+            const bool pending = gps.leapChange != 0 && gps.leapInS > 0;
+            json.AddItem("gps_leap_pending", pending);
+            if (pending) {
+                json.AddItem("gps_leap_in_s", static_cast<double>(gps.leapInS));
+            }
+        }
+        /* Only while the holdover test hook is armed, so an artificial state is
+         * never mistaken for a fault. */
+        if (gps.ppsSuppressUs > 0) {
+            json.AddItem("gps_pps_suppressed_s",
+                         static_cast<double>(gps.ppsSuppressUs / 1000000));
+        }
+        /* What the last holdover actually cost, measured when the edge came
+         * back: how long it was, and how far the servo's prediction was out.
+         * Absent until there has been one. */
+        if (gps.lastHoldoverUs > 0) {
+            json.AddItem("gps_holdover_s", static_cast<double>(gps.lastHoldoverUs) / 1e6);
+            json.AddItem("gps_holdover_error_us",
+                         static_cast<double>(gps.lastHoldoverErrNs) / 1000.0);
+        }
     } else {
         if (const std::optional<std::string> upstream = ntp.upstreamName()) {
             json.AddItem("ntp_server", *upstream);
@@ -241,6 +286,17 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         const TimeReference ref = server.reference();
         json.AddItem("ntp_stratum", static_cast<double>(ref.stratum));
         json.AddItem("ntp_refid", refIdText(ref.refId, ref.stratum));
+        /* What the leap field of a reply would say right now: 1 or 2 for the
+         * minute before a leap, 3 when the reference cannot vouch for the clock
+         * at all, and 0 the rest of the time. */
+        json.AddItem("ntp_leap", static_cast<double>(ref.locked ? ref.leap : 3));
+        /* The same two numbers the reply's root delay and root dispersion
+         * fields carry, before 16.16 rounds them: 0 delay from the GPS, the
+         * 0.992 ms LAN guess from an upstream nobody measured, and dispersion
+         * growing with the age of the reference in both cases. */
+        const NtpServer::RootFigures root = server.wireRootFigures();
+        json.AddItem("ntp_root_delay_us", root.delayUs);
+        json.AddItem("ntp_root_dispersion_us", root.dispersionUs);
         json.AddItem("ntp_requests", static_cast<double>(server.requests()));
     }
 }
@@ -350,6 +406,40 @@ esp_err_t NtpWebServer::sync_post_handler(httpd_req_t *req)
     ESP_LOGI(TAG, "POST /ntp/sync from %s: %s", caller.c_str(), now.c_str());
 
     return sendJson(req, doc, 200);
+}
+
+esp_err_t NtpWebServer::gps_pps_post_handler(httpd_req_t *req)
+{
+    /* The holdover test hook, and the reason it exists: the PPS line on this
+     * board is soldered, so "unplug it and see what happens" is not available,
+     * and a holdover nobody has exercised is a promise rather than a
+     * measurement. This makes the interrupt ignore edges for a while; the
+     * anchor stops advancing, dispersion grows, and the reference demotes
+     * itself at the end of the window exactly as it would with a loose wire.
+     * Nothing else changes, and /healthz reports the time left, so a reader can
+     * tell a test from a fault. */
+    JsonWrapper doc;
+    if (!readJsonBody(req, doc)) {
+        return ESP_FAIL;
+    }
+
+    int seconds = 0;
+    if (!doc.GetField("suppress_s", seconds) || seconds < 0 || seconds > kMaxSuppressS) {
+        return sendJsonError(req, 400, "suppress_s must be 0..3600, or 0 to end the test");
+    }
+
+    const std::string caller  = callerAddress(req);
+    const uint32_t    applied = GpsTime::instance().suppressPps(static_cast<uint32_t>(seconds));
+    const GpsTime::Status gps = GpsTime::instance().status();
+
+    JsonWrapper resp;
+    resp.AddItem("pps_suppressed_s", static_cast<double>(applied));
+    resp.AddItem("locked", gps.locked);
+    resp.AddItem("stratum", static_cast<double>(gps.locked ? 1 : 16));
+    resp.AddItem("holdover_s", static_cast<double>(gps.ppsAgeUs > 0 ? gps.ppsAgeUs / 1000000 : 0));
+    ESP_LOGW(TAG, "POST /gps/pps from %s: suppress_s=%u", caller.c_str(),
+             static_cast<unsigned>(applied));
+    return sendJson(req, resp, 200);
 }
 
 esp_err_t NtpWebServer::firmware_get_handler(httpd_req_t *req)

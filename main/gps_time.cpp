@@ -1,7 +1,9 @@
 #include "gps_time.h"
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <sys/time.h>
 
@@ -40,8 +42,39 @@ constexpr int64_t kScanAfterUs = 4000000;
 constexpr int64_t kPairWindowUs = 900000;
 
 /* Three missed edges. Two would demote the server on a single lost interrupt;
- * ten would hold a stopped module up for ten seconds. */
+ * ten would hold a stopped module up for ten seconds. This is the window while
+ * the servo has no rate for the crystal: with no ppm estimate there is nothing
+ * to hold over *with*, and a clock whose second boundary is a guess is not a
+ * stratum-1 clock. kHoldoverWindowUs is the window once there is one. */
 constexpr int64_t kLockWindowUs = 3000000;
+
+/* Ten minutes of holdover, once the rate is known. The limit is not the fit,
+ * which is good to parts per billion and would carry hours; it is the crystal
+ * wandering with temperature, which is why the dispersion below grows at 1 ppm
+ * and a client can watch the claim decay. Past this, the honest answer is
+ * "do not use me" again. */
+constexpr int64_t kHoldoverWindowUs = 600000000;
+
+/* What the anchor is worth while it is fresh: the PPS interrupt's latency, a
+ * microsecond or two, plus esp_timer's own resolution. Stated rather than
+ * discovered, and an order of magnitude above the measured agreement, because
+ * root dispersion is a promise and not a boast. */
+constexpr int64_t kBaseDispersionNs = 10000;
+
+/* How fast that promise decays in a holdover: 1 ppm, i.e. 1000 ns of age per
+ * second. A small XTAL across a room's temperature swing moves by about this
+ * much, and no amount of fitting the last five minutes predicts it. */
+constexpr int64_t kWanderNsPerS = 1000;
+
+/* A step in (UTC - esp_timer) larger than this is not the crystal drifting: it
+ * is the module moving the clock, or a pairing that landed a second out. Either
+ * way the servo's history is about a different clock now, so it starts again. */
+constexpr int64_t kRateResetNs = 100000000; /* 100 ms */
+
+/* A larger estimate than this is a bad fit rather than a bad crystal (200 ppm
+ * is already ten times a cheap XTAL's worst case), so it is clamped instead of
+ * being applied to every timestamp. */
+constexpr int32_t kRateLimitPpb = 200000;
 
 /* Edge spacing below this is not a second passing: it is bounce on a header pin
  * or a module reconfiguring its pulse, and counting it would shift every anchor
@@ -123,11 +156,17 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
     const int64_t nowUs = esp_timer_get_time();
 
     portENTER_CRITICAL_ISR(&self->m_mux);
-    if (self->m_ppsCount == 0 || nowUs - self->m_ppsMonoUs >= kMinEdgeSpacingUs) {
+    /* The POST /gps/pps hook swallows the edge here rather than further up, so
+     * what it produces is the real holdover code path and not an imitation of
+     * it. One extra comparison, against a word that is zero unless somebody
+     * asked for the test. */
+    if (nowUs >= self->m_ppsSuppressUntilUs &&
+        (self->m_ppsCount == 0 || nowUs - self->m_ppsMonoUs >= kMinEdgeSpacingUs)) {
         self->m_ppsMonoUs = nowUs;
         ++self->m_ppsCount;
     }
     portEXIT_CRITICAL_ISR(&self->m_mux);
+
 }
 
 void GpsTime::taskEntry(void *arg)
@@ -269,8 +308,14 @@ void GpsTime::configureModule()
     /* UBX-CFG-MSG (class 0x06, id 0x01): the payload is the message class, its
      * id, then one output rate per port -- DDC, UART1, UART2, USB, SPI. NAV-PVT
      * once a second on UART1, and the NMEA sentences off so the line carries
-     * what is read here and nothing else. */
-    static constexpr uint8_t kNavPvt[8] = {0x01, 0x07, 0, 1, 0, 0, 0, 0};
+     * what is read here and nothing else.
+     *
+     * NAV-TIMELS is the leap-second notice: the current GPS-UTC offset, whether
+     * a leap is pending, and how many seconds until it. It is 24 bytes a second
+     * on a line that carries 1 Hz at 9600 baud with room to spare, and it is the
+     * only source for the leap indicator a reply puts in its first byte. */
+    static constexpr uint8_t kNavPvt[8]    = {0x01, 0x07, 0, 1, 0, 0, 0, 0};
+    static constexpr uint8_t kNavTimels[8] = {0x01, 0x26, 0, 1, 0, 0, 0, 0};
     static constexpr uint8_t kSilence[][2] = {
         {0xF0, 0x00}, /* GGA */ {0xF0, 0x01}, /* GLL */ {0xF0, 0x02}, /* GSA */
         {0xF0, 0x03}, /* GSV */ {0xF0, 0x04}, /* RMC */ {0xF0, 0x05}, /* VTG */
@@ -278,6 +323,8 @@ void GpsTime::configureModule()
     };
 
     sendUbx(0x06, 0x01, kNavPvt, sizeof(kNavPvt));
+    sendUbx(0x06, 0x01, kNavTimels, sizeof(kNavTimels));
+
 
     for (const auto &msg : kSilence) {
         const uint8_t off[8] = {msg[0], msg[1], 0, 0, 0, 0, 0, 0};
@@ -287,7 +334,7 @@ void GpsTime::configureModule()
     /* Deliberately not followed by UBX-CFG-CFG: saving this to the receiver's
      * flash would outlive the firmware and take away the module's own defaults,
      * which is a rude thing to do to a receiver someone may want to read with
-     * u-center later. Sending it at every boot costs eight short frames. */
+     * u-center later. Sending it at every boot costs nine short frames. */
 }
 
 void GpsTime::sendUbx(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len)
@@ -407,7 +454,7 @@ void GpsTime::onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
     if (cls == 0x05 && id == 0x01) { /* UBX-ACK-ACK */
         if (!m_ackLogged) {
             m_ackLogged = true;
-            ESP_LOGI(TAG, "module accepted the configuration (NAV-PVT at 1 Hz, NMEA off)");
+            ESP_LOGI(TAG, "module accepted the configuration (NAV-PVT + NAV-TIMELS at 1 Hz, NMEA off)");
         }
     } else if (cls == 0x05 && id == 0x00) { /* UBX-ACK-NAK */
         if (!m_nakLogged) {
@@ -417,6 +464,8 @@ void GpsTime::onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
         }
     } else if (cls == 0x01 && id == 0x07) { /* UBX-NAV-PVT */
         onNavPvt(payload, len);
+    } else if (cls == 0x01 && id == 0x26) { /* UBX-NAV-TIMELS */
+        onNavTimels(payload, len);
     }
 }
 
@@ -479,6 +528,50 @@ void GpsTime::onNavPvt(const uint8_t *p, uint16_t len)
     anchor(stamp);
 }
 
+void GpsTime::onNavTimels(const uint8_t *p, uint16_t len)
+{
+    /* 24 bytes, version 0, from the u-blox 8 interface description:
+     *   8  srcOfCurrLs (u1)   9  currLs (i1)
+     *   10 srcOfLsChange (u1) 11 lsChange (i1)
+     *   12 timeToLsEvent (i4) 16 dateOfLsGpsWn (u2) 18 dateOfLsGpsDn (u2)
+     *   23 valid (u1): bit 0 says currLs is known, bit 1 says the event time is */
+    if (len < 24) {
+        return;
+    }
+
+    const int8_t  current = static_cast<int8_t>(p[9]);
+    const int8_t  change  = static_cast<int8_t>(p[11]);
+    const int32_t inS     = le32(p + 12);
+    const uint8_t valid   = p[23];
+    const bool    haveOffset  = (valid & 0x01) != 0;
+    const bool    haveEventAt = (valid & 0x02) != 0;
+
+    portENTER_CRITICAL(&m_mux);
+    if (haveOffset) {
+        m_leapSeconds = current;
+        m_leapValid   = true;
+    }
+    /* A module that has an offset but no announcement is the normal case: it
+     * means nothing is pending, which is different from not knowing. */
+    m_leapChange = haveEventAt ? change : 0;
+    m_leapInS    = haveEventAt ? inS : 0;
+    portEXIT_CRITICAL(&m_mux);
+
+    /* Once when it changes, not every second: the countdown ticks, and a line
+     * a second about a leap months away is noise in a log that is read on a
+     * serial console. */
+    if (m_leapLoggedSeconds != m_leapSeconds || m_leapLoggedChange != m_leapChange) {
+        m_leapLoggedSeconds = m_leapSeconds;
+        m_leapLoggedChange  = m_leapChange;
+        if (m_leapChange == 0) {
+            ESP_LOGI(TAG, "leap: GPS-UTC offset %+d s, nothing announced", m_leapSeconds);
+        } else {
+            ESP_LOGW(TAG, "leap: GPS-UTC offset %+d s, and %+d s in %ld s (leap indicator 1 for that minute)",
+                     m_leapSeconds, m_leapChange, static_cast<long>(m_leapInS));
+        }
+    }
+}
+
 void GpsTime::anchor(time_t second)
 {
     int64_t  ppsMonoUs = 0;
@@ -506,6 +599,21 @@ void GpsTime::anchor(time_t second)
 
     m_pairedCount = ppsCount;
 
+    /* What the servo predicted for this instant before it knew. Across an
+     * ordinary second this is a check on the rate; across a holdover it is the
+     * error a client was served while the edge was missing, and the only
+     * honest way to quote what a holdover was worth. */
+    int64_t predictedNs = 0;
+    int64_t gapUs       = 0;
+    {
+        portENTER_CRITICAL(&m_mux);
+        if (m_anchorValid && ppsMonoUs > m_anchorMonoUs) {
+            gapUs       = ppsMonoUs - m_anchorMonoUs;
+            predictedNs = m_anchorUtcNs + gapUs * 1000 - gapUs * m_ratePpb / 1000000;
+        }
+        portEXIT_CRITICAL(&m_mux);
+    }
+
     portENTER_CRITICAL(&m_mux);
     m_anchorUtcNs  = static_cast<int64_t>(second) * 1000000000;
     m_anchorMonoUs = ppsMonoUs;
@@ -513,7 +621,133 @@ void GpsTime::anchor(time_t second)
     m_lastFix      = second;
     portEXIT_CRITICAL(&m_mux);
 
+    if (gapUs >= kLockWindowUs) {
+        /* The edge had gone stale and the servo carried the clock: this is what
+         * that cost, and it is logged rather than served in the hope that
+         * nobody looks. */
+        const int64_t errorNs = static_cast<int64_t>(second) * 1000000000 - predictedNs;
+        portENTER_CRITICAL(&m_mux);
+        m_lastHoldoverUs    = gapUs;
+        m_lastHoldoverErrNs = errorNs;
+        portEXIT_CRITICAL(&m_mux);
+        ESP_LOGW(TAG, "PPS back after %.1f s: the servo was %+lld us out across the gap "
+                      "(%+.3f ppm residual)",
+                 static_cast<double>(gapUs) / 1e6, static_cast<long long>(errorNs / 1000),
+                 static_cast<double>(errorNs) / static_cast<double>(gapUs) * 1e3);
+    }
+
+    /* The same pair is one sample of the crystal against the GPS: the anchor
+     * says where the second started, this says how fast our own counter got
+     * here. */
+    pushRateSample(ppsMonoUs, static_cast<int64_t>(second) * 1000000000);
+
     steer();
+}
+
+void GpsTime::pushRateSample(int64_t monoUs, int64_t utcNs)
+{
+    const int64_t offsetNs = utcNs - monoUs * 1000;
+
+    if (m_lastRateOffsetSet &&
+        (offsetNs - m_lastRateOffsetNs > kRateResetNs || m_lastRateOffsetNs - offsetNs > kRateResetNs)) {
+        /* The module moved the clock under us, or a pairing landed a second out.
+         * A slope fitted across that step is about nothing, so the window starts
+         * again -- and a second out is worth saying out loud, because it is the
+         * one failure that would otherwise look like a healthy clock. */
+        const int64_t stepMs = (offsetNs - m_lastRateOffsetNs) / 1000000;
+        m_rateCount          = 0;
+        m_rateNext           = 0;
+        ESP_LOGW(TAG, "servo: %+lld ms step in the reference, refitting the rate",
+                 static_cast<long long>(stepMs));
+    }
+    m_lastRateOffsetNs  = offsetNs;
+    m_lastRateOffsetSet = true;
+
+    m_rate[m_rateNext] = RateSample{monoUs, utcNs};
+    m_rateNext         = (m_rateNext + 1) % kRateWindow;
+    if (m_rateCount < kRateWindow) {
+        ++m_rateCount;
+    }
+
+    fitRate();
+}
+
+void GpsTime::fitRate()
+{
+    if (m_rateCount < kRateMinSamples) {
+        return;
+    }
+
+    /* Least squares of UTC nanoseconds against esp_timer microseconds, both
+     * taken relative to the newest sample first: UTC nanoseconds are 1.8e18 at
+     * the moment, which is past the point where a double holds every integer,
+     * and what is wanted here is a slope of 1e-8. Relative, the numbers are
+     * hundreds of seconds in size and the fit is exact enough that the residual
+     * below is the receiver's jitter and nothing else.
+     *
+     * The window order does not matter to the sums, so the ring is read as a
+     * flat array of however many slots are filled. */
+    const RateSample &base = m_rate[(m_rateNext + kRateWindow - 1) % kRateWindow];
+
+    int64_t sumX = 0;
+    int64_t sumY = 0;
+    for (int i = 0; i < m_rateCount; ++i) {
+        sumX += m_rate[i].monoUs - base.monoUs;
+        sumY += m_rate[i].utcNs - base.utcNs;
+    }
+    const double meanX = static_cast<double>(sumX) / m_rateCount;
+    const double meanY = static_cast<double>(sumY) / m_rateCount;
+
+    double sxy = 0.0;
+    double sxx = 0.0;
+    for (int i = 0; i < m_rateCount; ++i) {
+        const double dx = static_cast<double>(m_rate[i].monoUs - base.monoUs) - meanX;
+        double       dy = static_cast<double>(m_rate[i].utcNs - base.utcNs) - meanY;
+        sxy += dx * dy;
+        sxx += dx * dx;
+    }
+    if (sxx <= 0.0) {
+        return;
+    }
+
+    /* A perfect esp_timer gives exactly 1000 ns per microsecond. A counter that
+     * runs fast by p gives 1000 * (1 - p), because it covers each GPS second in
+     * slightly fewer of its own microseconds -- so p, in parts per billion, is
+     * 1e9 - slope * 1e6. */
+    const double  slope = sxy / sxx;
+    int64_t       ppb   = static_cast<int64_t>(std::llround(1e9 - slope * 1e6));
+    if (ppb > kRateLimitPpb) {
+        ppb = kRateLimitPpb;
+    } else if (ppb < -kRateLimitPpb) {
+        ppb = -kRateLimitPpb;
+    }
+
+    portENTER_CRITICAL(&m_mux);
+    m_ratePpb     = static_cast<int32_t>(ppb);
+    m_rateSamples = static_cast<uint16_t>(m_rateCount);
+    portEXIT_CRITICAL(&m_mux);
+
+    /* Once when it is first known, and then only when it moves by enough to be
+     * worth a line: a servo that logs its estimate every second has made the
+     * console unusable for everything else. */
+    if (!m_rateLogged || std::llabs(ppb - m_lastLoggedPpb) > 500) {
+        /* Residual: the thing that says the samples are actually samples of a
+         * clock and not of the receiver's mood. */
+        double sse = 0.0;
+        for (int i = 0; i < m_rateCount; ++i) {
+            const double dx    = static_cast<double>(m_rate[i].monoUs - base.monoUs) - meanX;
+            const double dy    = static_cast<double>(m_rate[i].utcNs - base.utcNs) - meanY;
+            const double resid = dy - slope * dx;
+            sse += resid * resid;
+        }
+        const double sigmaNs = m_rateCount > 2 ? std::sqrt(sse / (m_rateCount - 2)) : 0.0;
+
+        ESP_LOGI(TAG, "servo: %+lld ppb (%+.3f ppm) over %d anchors, residual %.1f us",
+                 static_cast<long long>(ppb), static_cast<double>(ppb) / 1000.0, m_rateCount,
+                 sigmaNs / 1000.0);
+        m_rateLogged    = true;
+        m_lastLoggedPpb = ppb;
+    }
 }
 
 void GpsTime::steer()
@@ -580,23 +814,46 @@ void GpsTime::steer()
 
 GpsTime::Status GpsTime::status() const
 {
-    Status  st;
-    int64_t ppsMonoUs = 0;
+    Status   st;
+    int64_t  ppsMonoUs     = 0;
+    int64_t  suppressUntil = 0;
 
     portENTER_CRITICAL(&m_mux);
-    st.ppsCount   = m_ppsCount;
-    st.timeValid  = m_timeValid;
-    st.fixType    = m_fixType;
-    st.satellites = m_satellites;
-    st.anchored   = m_anchorValid;
-    st.lastFix    = m_lastFix;
-    st.offsetUs   = m_offsetUs;
-    ppsMonoUs     = m_ppsMonoUs;
+    st.ppsCount    = m_ppsCount;
+    st.timeValid   = m_timeValid;
+    st.fixType     = m_fixType;
+    st.satellites  = m_satellites;
+    st.anchored    = m_anchorValid;
+    st.lastFix     = m_lastFix;
+    st.offsetUs    = m_offsetUs;
+    st.ratePpb     = m_ratePpb;
+    st.rateSamples = m_rateSamples;
+    st.leapSeconds = m_leapSeconds;
+    st.leapChange  = m_leapChange;
+    st.leapInS     = m_leapInS;
+    st.leapValid   = m_leapValid;
+    st.lastHoldoverUs    = m_lastHoldoverUs;
+    st.lastHoldoverErrNs = m_lastHoldoverErrNs;
+    ppsMonoUs      = m_ppsMonoUs;
+    suppressUntil  = m_ppsSuppressUntilUs;
     portEXIT_CRITICAL(&m_mux);
 
+    const int64_t nowUs = esp_timer_get_time();
     if (st.ppsCount != 0) {
-        st.ppsAgeUs = esp_timer_get_time() - ppsMonoUs;
+        st.ppsAgeUs = nowUs - ppsMonoUs;
     }
+    if (suppressUntil > nowUs) {
+        st.ppsSuppressUs = suppressUntil - nowUs;
+    }
+
+    st.rateKnown = st.rateSamples >= kRateMinSamples;
+
+    /* Two windows, and the difference between them is the servo. Without a rate
+     * there is nothing to hold over with, so three missed edges demote; with one
+     * the crystal's known error is taken out of every timestamp and ten minutes
+     * of holdover is worth serving, with the claim decaying as it ages. */
+    st.lockWindowUs = (st.rateKnown && st.timeValid && st.fixType >= 2) ? kHoldoverWindowUs
+                                                                       : kLockWindowUs;
 
     /* Lock needs all three: a fix to trust the date, a valid NAV-PVT to know
      * which second, and an edge recent enough that the clock is still being
@@ -604,42 +861,117 @@ GpsTime::Status GpsTime::status() const
      * does not put the receiver anywhere, and this reference does not want to
      * explain that difference in its stratum. */
     st.locked = st.anchored && st.timeValid && st.fixType >= 2 && st.ppsAgeUs >= 0 &&
-                st.ppsAgeUs < kLockWindowUs;
+                st.ppsAgeUs < st.lockWindowUs;
+
+    if (st.locked) {
+        /* What this reference states as its own dispersion: ten microseconds
+         * while the anchor is fresh, then one ppm of age. Not the fit's
+         * confidence -- that is parts per billion, and the crystal will wander
+         * further than that before the fit notices. */
+        const int64_t ageS = st.ppsAgeUs > 0 ? st.ppsAgeUs / 1000000 : 0;
+        st.dispersionNs    = kBaseDispersionNs + ageS * kWanderNsPerS;
+    }
+
     return st;
+}
+
+uint8_t GpsTime::leapIndicator() const
+{
+    int8_t  change = 0;
+    int32_t inS    = 0;
+    bool    valid  = false;
+
+    portENTER_CRITICAL(&m_mux);
+    change = m_leapChange;
+    inS    = m_leapInS;
+    valid  = m_leapValid;
+    portEXIT_CRITICAL(&m_mux);
+
+    /* RFC 5905 7.3: the indicator describes the last minute of the UTC day.
+     * TIMELS counts down to the event, so "0 < timeToLsEvent <= 60" is that
+     * minute, and a larger number means a leap is known about but is not yet
+     * the client's problem. */
+    if (!valid || change == 0 || inS <= 0 || inS > 60) {
+        return 0;
+    }
+    return change > 0 ? 1 : 2;
+}
+
+uint32_t GpsTime::suppressPps(uint32_t seconds)
+{
+    const int64_t until =
+        seconds == 0 ? 0 : esp_timer_get_time() + static_cast<int64_t>(seconds) * 1000000;
+
+    portENTER_CRITICAL(&m_mux);
+    m_ppsSuppressUntilUs = until;
+    portEXIT_CRITICAL(&m_mux);
+
+    if (seconds == 0) {
+        ESP_LOGW(TAG, "PPS edges counted again: the holdover test is over");
+        return 0;
+    }
+
+    const Status st = status();
+    ESP_LOGW(TAG, "PPS edges ignored for %u s at the request of POST /gps/pps: the holdover from "
+                  "here is deliberate, and %s",
+             static_cast<unsigned>(seconds),
+             st.rateKnown ? "the servo is carrying it" : "with no rate yet it demotes in 3 s");
+    return seconds;
 }
 
 bool GpsTime::now(struct timespec &ts) const
 {
-    int64_t utcNs  = 0;
-    int64_t monoUs = 0;
+    int64_t utcNs   = 0;
+    int64_t monoUs  = 0;
+    int32_t ratePpb = 0;
 
     portENTER_CRITICAL(&m_mux);
     const bool valid = m_anchorValid;
     utcNs            = m_anchorUtcNs;
     monoUs           = m_anchorMonoUs;
+    ratePpb          = m_ratePpb;
     portEXIT_CRITICAL(&m_mux);
 
     if (!valid) {
         return false;
     }
 
-    /* The anchor plus elapsed monotonic time. Reading the counter (1 us) rather
-     * than CLOCK_REALTIME also means a slew in flight cannot make a timestamp
-     * go backwards between two replies. */
-    const int64_t totalNs = utcNs + (esp_timer_get_time() - monoUs) * 1000;
-    ts.tv_sec             = static_cast<time_t>(totalNs / 1000000000);
-    ts.tv_nsec            = static_cast<long>(totalNs % 1000000000);
+    /* The anchor plus elapsed monotonic time, with the servo's rate taken out of
+     * the elapsed part: positive ppb means our counter runs fast, so a GPS
+     * second takes slightly fewer of its microseconds than it claims and the
+     * elapsed time has to be handed back a little. Reading the counter (1 us)
+     * rather than CLOCK_REALTIME also means a slew in flight cannot make a
+     * timestamp go backwards between two replies.
+     *
+     * The unit of the correction is the easy thing to get wrong by a thousand:
+     * elapsed_us * 1000 is nanoseconds, times ppb * 1e-9 is parts, so the
+     * divisor is 1e6 and not 1e3.
+     *
+     * With no rate yet -- the first minute -- this is exactly what it was
+     * before: the anchor plus raw elapsed time. */
+    const int64_t elapsedUs = esp_timer_get_time() - monoUs;
+    const int64_t totalNs   = utcNs + elapsedUs * 1000 - elapsedUs * ratePpb / 1000000;
+    ts.tv_sec               = static_cast<time_t>(totalNs / 1000000000);
+    ts.tv_nsec              = static_cast<long>(totalNs % 1000000000);
     return true;
 }
 
 std::string GpsTime::describe() const
 {
     const Status st = status();
-    char         text[64];
+    char         text[96];
 
     if (st.locked) {
-        std::snprintf(text, sizeof(text), "GPS/PPS, %s fix, %u satellites", fixText(st.fixType),
-                      st.satellites);
+        if (st.ppsAgeUs > kLockWindowUs) {
+            /* Still servable, and worth saying why in a line somebody reads
+             * later: this is the holdover the servo bought. */
+            std::snprintf(text, sizeof(text), "GPS/PPS, %s fix, %u satellites, holding over %.1f s",
+                          fixText(st.fixType), st.satellites,
+                          static_cast<double>(st.ppsAgeUs) / 1e6);
+        } else {
+            std::snprintf(text, sizeof(text), "GPS/PPS, %s fix, %u satellites", fixText(st.fixType),
+                          st.satellites);
+        }
     } else if (st.fixType >= 2 && st.timeValid) {
         /* A fix but no edge we can pair it with: the receiver is fine and the
          * pulse is not, which is a different fault from "no fix" and worth
@@ -655,19 +987,35 @@ std::string GpsTime::describe() const
 void GpsTime::logLockChange()
 {
     const Status st = status();
-    if (st.locked == m_wasLocked) {
-        return;
-    }
-    m_wasLocked = st.locked;
 
-    if (st.locked) {
-        ESP_LOGI(TAG, "locked: stratum 1 from here on (PPS edges so far: %u)",
-                 static_cast<unsigned>(st.ppsCount));
-    } else if (st.ppsCount == 0) {
-        ESP_LOGW(TAG, "no PPS edges: is the module's timepulse wired to GPIO%d?", static_cast<int>(kPpsPin));
-    } else {
-        ESP_LOGW(TAG, "not locked (fix %s, last edge %lld ms ago): stratum 16 until it returns",
-                 fixText(st.fixType), static_cast<long long>(st.ppsAgeUs / 1000));
+    if (st.locked != m_wasLocked) {
+        m_wasLocked = st.locked;
+        if (st.locked) {
+            ESP_LOGI(TAG, "locked: stratum 1 from here on (PPS edges so far: %u, rate %+ld ppb)",
+                     static_cast<unsigned>(st.ppsCount), static_cast<long>(st.ratePpb));
+        } else if (st.ppsCount == 0) {
+            ESP_LOGW(TAG, "no PPS edges: is the module's timepulse wired to GPIO%d?",
+                     static_cast<int>(kPpsPin));
+        } else {
+            ESP_LOGW(TAG, "not locked (fix %s, last edge %lld ms ago): stratum 16 until it returns",
+                     fixText(st.fixType), static_cast<long long>(st.ppsAgeUs / 1000));
+        }
+    }
+
+    /* Inside a holdover nothing above changes for ten minutes, which would
+     * otherwise look like a healthy clock that has quietly lost its PPS. Say it
+     * when the edge goes stale, and say it again when it comes back. */
+    const bool holding = st.locked && st.ppsAgeUs > kLockWindowUs;
+    if (holding != m_holdoverLogged) {
+        m_holdoverLogged = holding;
+        if (holding) {
+            ESP_LOGW(TAG, "holding over: no PPS for %.1f s, serving on the servo's rate (%+ld ppb) "
+                          "with dispersion %lld us",
+                     static_cast<double>(st.ppsAgeUs) / 1e6, static_cast<long>(st.ratePpb),
+                     static_cast<long long>(st.dispersionNs / 1000));
+        } else if (st.locked) {
+            ESP_LOGI(TAG, "PPS back: the anchor is fresh again");
+        }
     }
 }
 
@@ -681,7 +1029,8 @@ class GpsTimeRef : public TimeRef {
 public:
     TimeReference reference() const override
     {
-        const GpsTime::Status st = GpsTime::instance().status();
+        GpsTime             &gps = GpsTime::instance();
+        const GpsTime::Status st = gps.status();
 
         TimeReference ref;
         ref.lastSync = st.lastFix;
@@ -691,6 +1040,20 @@ public:
          * the same reason the upstream ref does it: a client reading stratum 16
          * needs the refid to look like a refusal, not like a reference. */
         ref.refId = st.locked ? kRefIdGps : kRefIdInit;
+
+        /* The receiver's own leap notice, straight into the packet: only it
+         * knows whether the end of the UTC day has 59, 60 or 61 seconds. */
+        ref.leap = gps.leapIndicator();
+
+        /* And its own error budget. Root delay is zero because there is no path
+         * to measure -- the reference is wired, not networked -- and dispersion
+         * is the ten microseconds plus wander that status() works out. While it
+         * is not locked there is no budget to state, so both stay zero and the
+         * responder falls back to its own ageing model. */
+        if (st.dispersionNs > 0) {
+            ref.rootDelayNs  = 0;
+            ref.dispersionNs = static_cast<uint32_t>(st.dispersionNs);
+        }
         return ref;
     }
 

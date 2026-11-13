@@ -65,6 +65,17 @@ public:
     /* What a reply would claim right now (also what /healthz reports). */
     TimeReference reference() const;
 
+    /* The root delay and dispersion a reply would carry right now, in
+     * microseconds, before the 16.16 field rounds them: the reference's own
+     * figures where it states them (the GPS), the LAN guesses where it cannot
+     * (the upstream). /healthz reports these so the endpoint and the wire cannot
+     * disagree about how stale the claim is. */
+    struct RootFigures {
+        double delayUs      = 0.0;
+        double dispersionUs = 0.0;
+    };
+    RootFigures wireRootFigures() const;
+
 private:
     static constexpr const char *TAG = "ntp_server";
 

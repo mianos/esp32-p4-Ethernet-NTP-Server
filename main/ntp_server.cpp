@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <optional>
@@ -130,14 +131,47 @@ void writeTimestamp(uint8_t *out, time_t when)
     writeTimestamp(out, ts);
 }
 
-uint32_t rootDispersion(const TimeReference &ref, time_t now)
+/* 16.16 fixed point, which resolves about 15 us. A microsecond-accurate
+ * reference therefore rounds *up* to one least significant bit rather than
+ * claiming zero uncertainty -- the field cannot say 10 us, and 15 is closer to
+ * the truth than 0. */
+uint32_t toFixed(double seconds)
 {
-    double seconds = static_cast<double>(kRootDelay) / 65536.0;
-    if (ref.lastSync != 0 && now > ref.lastSync) {
-        seconds += static_cast<double>(now - ref.lastSync) * kDispersionPpm * 1e-6;
+    const double fixed = std::ceil(seconds * 65536.0);
+    if (fixed <= 0.0) {
+        return 0;
     }
-    const double fixed = seconds * 65536.0;
     return fixed >= 65535.0 ? 0xFFFFu : static_cast<uint32_t>(fixed);
+}
+
+/* Root delay and dispersion, before the 16.16 field rounds them: what the
+ * reference states about itself if it can, the generic LAN guesses if it
+ * cannot. The difference is the point -- the GPS measures microseconds and says
+ * so, the upstream SNTP server has no way to measure the round trip and says
+ * 1 ms rather than pretend, and a holdover grows the GPS's number until a
+ * client can see it degrade. */
+struct RootUncertainty {
+    double delayS      = 0.0;
+    double dispersionS = 0.0;
+};
+
+RootUncertainty rootUncertainty(const TimeReference &ref, time_t now)
+{
+    if (ref.dispersionNs != 0) {
+        return {static_cast<double>(ref.rootDelayNs) * 1e-9,
+                static_cast<double>(ref.dispersionNs) * 1e-9};
+    }
+
+    /* Ageing at the rate of a cheap crystal: after an hour without the
+     * reference this is 54 ms of claimed uncertainty, which is what a client
+     * needs in order to demote this server instead of trusting a clock nobody
+     * is correcting. */
+    const double lanS = static_cast<double>(kRootDelay) / 65536.0;
+    RootUncertainty figures{lanS, lanS};
+    if (ref.lastSync != 0 && now > ref.lastSync) {
+        figures.dispersionS += static_cast<double>(now - ref.lastSync) * kDispersionPpm * 1e-6;
+    }
+    return figures;
 }
 
 /* Rate limiting is per address, so a v4 client arriving over the dual-stack
@@ -300,8 +334,15 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
                 const struct timespec &received, const struct timespec &transmitted)
 {
     const uint8_t  stratum = kod ? 0 : ref.stratum;
-    const uint8_t  leap    = (kod || ref.locked) ? kLeapNoWarning : kLeapAlarm;
+    /* The reference's own leap indicator while it is locked, "not
+     * synchronised" when it is not, and no warning attached to a KoD: a client
+     * told to slow down has not been told anything about leap seconds. */
+    const uint8_t  leap    = kod ? kLeapNoWarning : (ref.locked ? ref.leap : kLeapAlarm);
     const uint32_t refId   = kod ? kRefIdRate : ref.refId;
+
+    const RootUncertainty uncertainty = rootUncertainty(ref, received.tv_sec);
+    const uint32_t        delay       = toFixed(uncertainty.delayS);
+    const uint32_t        dispersion  = toFixed(uncertainty.dispersionS);
 
     /* The version echoes the request's: that is what ntpd does and what RFC 5905
      * asks for, and a v3-only client is entitled to reject a v4 reply. */
@@ -309,9 +350,10 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
     out[1] = stratum;
     out[2] = req.poll;
     out[3] = kPrecision;
-    store32(out + 4, kRootDelay);
-    store32(out + 8, rootDispersion(ref, received.tv_sec));
+    store32(out + 4, delay);
+    store32(out + 8, dispersion);
     store32(out + 12, refId);
+
     /* Never synchronised means a zero reference timestamp (RFC 5905 7.3), not
      * the Unix epoch dressed up in NTP seconds: a client that sees stratum 16
      * also expects to see nothing claimed here. */
@@ -590,6 +632,12 @@ esp_err_t NtpServer::applySettings()
 TimeReference NtpServer::reference() const
 {
     return m_ref ? m_ref->reference() : TimeReference{};
+}
+
+NtpServer::RootFigures NtpServer::wireRootFigures() const
+{
+    const RootUncertainty uncertainty = rootUncertainty(reference(), std::time(nullptr));
+    return {uncertainty.delayS * 1e6, uncertainty.dispersionS * 1e6};
 }
 
 void NtpServer::serveLoop()

@@ -11,6 +11,15 @@
  * phrase for the boot log: everything needed to answer a client honestly is in
  * the first, including `locked`, which is what turns a stratum-1 claim into
  * "do not use me" the moment the reference goes away.
+ *
+ * TimeReference carries three more things than stratum and refid, and each one
+ * is a claim the packet makes that the reference is the only party able to fill
+ * in: the leap indicator (the receiver knows, the responder cannot guess), and
+ * the reference's own delay and dispersion (a GPS with a PPS line measures
+ * itself in microseconds; an upstream SNTP server that is only ever polled
+ * cannot be measured at all, so it says nothing and the responder falls back to
+ * its LAN guesses). A field the reference leaves at zero means exactly that --
+ * not stated -- never "zero error".
  */
 #pragma once
 
@@ -24,6 +33,22 @@ struct TimeReference {
     uint8_t  stratum  = 16;    /* 1 with a real reference; 3 from upstream SNTP */
     uint32_t refId    = 0;     /* NTP reference id, host order: store32() writes it */
     time_t   lastSync = 0;     /* when the reference last agreed with us */
+
+    /* Leap indicator, 0-2, and meaningful only while locked: the responder
+     * substitutes 3 ("clock not synchronised") itself when it is not. 1 means
+     * the last minute of the UTC day has 61 seconds, 2 means 59. Zero is both
+     * "no warning" and "no opinion", which are the same thing to a client. */
+    uint8_t  leap     = 0;
+
+    /* The reference's own error budget, in nanoseconds, with 0 for "not
+     * stated". The responder then falls back to its LAN guesses -- 1 ms of
+     * round trip, 15 ppm of ageing -- which is the honest thing to say about an
+     * upstream nobody measured. A reference that can measure itself states
+     * microseconds instead, so that a client watching root dispersion sees a
+     * holdover getting worse rather than a number that never moves. The two are
+     * read together: dispersionNs == 0 means rootDelayNs is not stated either. */
+    uint32_t rootDelayNs  = 0;
+    uint32_t dispersionNs = 0;
 };
 
 /* "INIT" in ASCII. RFC 5905 7.3: a server that cannot vouch for its clock says
