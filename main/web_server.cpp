@@ -229,88 +229,24 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         if (gps.ppsAgeUs >= 0) {
             json.AddItem("gps_pps_age_ms", static_cast<double>(gps.ppsAgeUs / 1000));
         }
-        json.AddItem("gps_offset_us", static_cast<double>(gps.offsetUs));
-
-        /* The servo, and what it buys: the rate it has measured for the
-         * crystal, how many anchors that is based on, and the window that rate
-         * is worth holding over for. Before the first fit the rate is 0 and
-         * rate_n grows towards 60; after it, this number is the difference
-         * between a 3-second holdover and a 10-minute one. */
-        json.AddItem("gps_rate_ppm", static_cast<double>(gps.ratePpb) / 1000.0);
-        json.AddItem("gps_rate_n", static_cast<double>(gps.rateSamples));
-        if (gps.locked) {
-            json.AddItem("gps_dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);
-            json.AddItem("gps_lock_window_s",
-                         static_cast<double>(gps.lockWindowUs / 1000000));
-        }
-        /* What the receiver says about its own pulse, once it has said
-         * anything: the quantisation it admits to, the spread our stamps
-         * actually show, and whether the pulse is on the UTC second. These are
-         * the numbers behind root delay and dispersion -- before TIM-TP they
-         * were a constant and an assumption. */
-        if (gps.timTpCount != 0) {
-            if (gps.qErrValid) {
-                json.AddItem("gps_tp_qerr_ns", static_cast<double>(gps.qErrNs));
-            }
-            json.AddItem("gps_tp_jitter_ns", static_cast<double>(gps.jitterNs));
-            json.AddItem("gps_tp_on_second", gps.pulseOnSecond);
-        }
-        /* Only what moves. The receiver's identity, its pin map and whether it
-         * took its configuration are static for a boot, so they live at
-         * /gps/info -- except the two failures, which stay here because they are
-         * the difference between numbers that mean something and numbers that do
-         * not. */
+        /* Only what answers "is it working": time, lock and satellites. Every
+         * number behind those -- the servo, the signal, the antenna, the pulse
+         * -- is at /gps/info, where a caller who is tuning something can get it
+         * without a poller carrying it. The two configuration failures stay,
+         * because a refused switch or pulse makes the rest meaningless. */
         if (gps.tp5Rejected) {
             json.AddItem("gps_tp5_rejected", true);
         }
         if (gps.antCfgRejected) {
             json.AddItem("gps_ant_cfg_rejected", true);
         }
-
-        /* The antenna group, for swapping leads and comparing them. `gps_ant`
-         * is what the supervisor found (ok / short / open, or no reading), and
-         * `gps_ant_power` what the bias is doing -- the two questions a
-         * high-gain antenna with a preamp actually raises. `gps_cn0_*` is the
-         * comparison metric: C/N0 on used satellites, not satellite count,
-         * because a better antenna adds the marginal ones last. agc/noise/jam
-         * are the overload tell-tales -- a preamp that is too strong for this
-         * receiver drives agc down and the jamming state up while the C/N0
-         * still looks flattering. */
-        json.AddItem("gps_ant_bias", gps.antBiasOn ? "on" : "off");
-        json.AddItem("gps_ant_short", gps.antShort);
+        /* Present only when there is something wrong to say. */
+        if (gps.antShort) {
+            json.AddItem("gps_ant_short", true);
+        }
         if (gps.antLatched) {
             json.AddItem("gps_ant_latched", true);
         }
-        if (gps.monHwValid) {
-            static constexpr const char *kAntStatus[] = {"init", "unknown", "ok", "short", "open"};
-            static constexpr const char *kAntPower[]  = {"off", "on", "unknown"};
-            static constexpr const char *kJam[]       = {"unknown", "ok", "warning", "critical"};
-            json.AddItem("gps_ant", gps.antStatus <= 4 ? kAntStatus[gps.antStatus] : "unknown");
-            json.AddItem("gps_ant_power", gps.antPower <= 2 ? kAntPower[gps.antPower] : "unknown");
-            json.AddItem("gps_noise_dbm", -static_cast<double>(gps.noisePerMs));
-            json.AddItem("gps_agc", static_cast<double>(gps.agcCnt));
-            json.AddItem("gps_jam_ind", static_cast<double>(gps.jamInd));
-            json.AddItem("gps_jam", gps.jamState <= 3 ? kJam[gps.jamState] : "unknown");
-        }
-        /* Absent until a NAV-SAT has been parsed. */
-        if (gps.cn0Used != 0 || gps.navSatAgeUs >= 0) {
-            json.AddItem("gps_cn0_max", static_cast<double>(gps.cn0Max));
-            json.AddItem("gps_cn0_mean", static_cast<double>(gps.cn0Mean));
-            json.AddItem("gps_cn0_used", static_cast<double>(gps.cn0Used));
-        }
-        /* The leap-second notice a reply would carry. leap_pending is what puts
-         * the indicator at 1 (or 2); leap_in_s only exists while something is
-         * actually pending. */
-        if (gps.leapValid) {
-            json.AddItem("gps_leap_s", static_cast<double>(gps.leapSeconds));
-            const bool pending = gps.leapChange != 0 && gps.leapInS > 0;
-            json.AddItem("gps_leap_pending", pending);
-            if (pending) {
-                json.AddItem("gps_leap_in_s", static_cast<double>(gps.leapInS));
-            }
-        }
-        /* Only while the holdover test hook is armed, so an artificial state is
-         * never mistaken for a fault. */
         if (gps.ppsSuppressUs > 0) {
             json.AddItem("gps_pps_suppressed_s",
                          static_cast<double>(gps.ppsSuppressUs / 1000000));
@@ -518,6 +454,54 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
                                                                              : "silent");
     doc.AddItem("tp5_ok", !gps.tp5Rejected);
     doc.AddItem("timtp", gps.timTpRejected ? "rejected" : gps.timTpAcked ? "accepted" : "silent");
+
+    /* The servo and what it buys. */
+    doc.AddItem("offset_us", static_cast<double>(gps.offsetUs));
+    doc.AddItem("rate_ppm", static_cast<double>(gps.ratePpb) / 1000.0);
+    doc.AddItem("rate_n", static_cast<double>(gps.rateSamples));
+    if (gps.locked) {
+        doc.AddItem("dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);
+        doc.AddItem("lock_window_s", static_cast<double>(gps.lockWindowUs) / 1000000);
+    }
+    /* The pulse's own quality, once TIM-TP says anything. */
+    if (gps.timTpCount != 0) {
+        if (gps.qErrValid) {
+            doc.AddItem("tp_qerr_ns", static_cast<double>(gps.qErrNs));
+        }
+        doc.AddItem("tp_jitter_ns", static_cast<double>(gps.jitterNs));
+        doc.AddItem("tp_on_second", gps.pulseOnSecond);
+    }
+    /* The signal and the front end behind it: C/N0 is the antenna metric, and
+     * agc/noise/jam are the overload tell-tales. */
+    if (gps.monHwValid) {
+        static constexpr const char *kAntStatus[] = {"init", "unknown", "ok", "short", "open"};
+        static constexpr const char *kAntPower[]  = {"off", "on", "unknown"};
+        static constexpr const char *kJam[]       = {"unknown", "ok", "warning", "critical"};
+        doc.AddItem("ant", gps.antStatus <= 4 ? kAntStatus[gps.antStatus] : "unknown");
+        doc.AddItem("ant_power", gps.antPower <= 2 ? kAntPower[gps.antPower] : "unknown");
+        doc.AddItem("ant_bias", gps.antBiasOn ? "on" : "off");
+        doc.AddItem("ant_short", gps.antShort);
+        doc.AddItem("noise_dbm", -static_cast<double>(gps.noisePerMs));
+        doc.AddItem("agc", static_cast<double>(gps.agcCnt));
+        doc.AddItem("jam_ind", static_cast<double>(gps.jamInd));
+        doc.AddItem("jam", gps.jamState <= 3 ? kJam[gps.jamState] : "unknown");
+    }
+    doc.AddItem("cn0_max", static_cast<double>(gps.cn0Max));
+    doc.AddItem("cn0_mean", static_cast<double>(gps.cn0Mean));
+    doc.AddItem("cn0_used", static_cast<double>(gps.cn0Used));
+    /* The leap-second notice and the last holdover, both diagnostics. */
+    if (gps.leapValid) {
+        doc.AddItem("leap_s", static_cast<double>(gps.leapSeconds));
+        const bool pending = gps.leapChange != 0 && gps.leapInS > 0;
+        doc.AddItem("leap_pending", pending);
+        if (pending) {
+            doc.AddItem("leap_in_s", static_cast<double>(gps.leapInS));
+        }
+    }
+    if (gps.lastHoldoverUs > 0) {
+        doc.AddItem("holdover_s", static_cast<double>(gps.lastHoldoverUs) / 1e6);
+        doc.AddItem("holdover_error_us", static_cast<double>(gps.lastHoldoverErrNs) / 1000.0);
+    }
 
     if (gps.monHwValid) {
         /* Hex strings: these are bit maps, not quantities. */
