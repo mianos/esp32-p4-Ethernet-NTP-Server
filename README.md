@@ -696,10 +696,12 @@ go and look. The module's answer is reported, not swallowed: `/healthz` carries
 `gps_tp5_ok`, and a refusal is a warning at boot.
 
 Each configuration message is sent on its own and the firmware waits for that
-message's own ACK or NAK before sending the next, because this receiver **does not
-answer everything** — `MON-VER` gets silence, so `gps_module` stays absent — and an
-order-based guess drifts apart inside one boot. The three replies it does give are
-acted on directly rather than matched up afterwards.
+message's own ACK or NAK before sending the next, because this receiver answers
+some of what it is asked and ignores the rest — `MON-COMMS` gets silence, so a
+port list has to be synthesised for `u-center`
+([below](#u-center-at-the-same-time-as-the-server)) — and an order-based guess
+drifts apart inside one boot. The three replies it does give are acted on directly
+rather than matched up afterwards.
 
 **`UBX-NAV-TIM-TP`** is the obvious way to stop guessing: every pulse would arrive
 with the receiver's own quantisation error (`qErr`) and its nominal time of week,
@@ -871,6 +873,67 @@ moves to 38400, 115200, 57600 and 19200, then starts over — a receiver that ha
 been through `u-center` once is usually not on 9600 any more, and sweeping five
 baud rates at boot is cheaper for everyone than a datasheet. The rate that
 produced frames is logged.
+
+### u-center, at the same time as the server
+
+`u-center` wants the receiver to itself, and the server wants the receiver's time.
+Both can have it, but only because of how the firmware behaves while a client is
+attached — UBX has no arbitration, so on one line the rule has to come from
+somewhere.
+
+```
+tcp/3333, straight through to UART1
+```
+
+`tools/mon_comms_probe.py` and `tools/poll_matrix.py` speak to it the same way
+`u-center` does; `tools/serial_cap.py` captures the console beside them.
+
+**The client is the only writer for the duration.** Polls, configuration, rates,
+the lot are the client's, and they are forwarded byte for byte with nothing
+filtered. What the firmware stops doing is talking over it:
+
+- it stops reading the port, because two readers on one stream is the bug the
+  bridge exists to avoid. The bridge reads, and taps what it reads into the same
+  parser the clock is driven from, so `NAV-PVT` and the PPS still discipline
+  `CLOCK_REALTIME` while the session runs and `/healthz` still tells the truth;
+- `configureModule()` stands aside, so its eleven `CFG-MSG` frames do not stamp
+  over whatever the client just set. It re-runs half a second after the last
+  client leaves, which also puts `NAV-SAT` back to half rate — a session needs it
+  at 1 Hz for the sky view and C/N0 bars, and the line is better off without it
+  afterwards;
+- an ACK the firmware is waiting for arrives through the bridge's own read rather
+  than a private one, so an antenna request or retry during a session no longer
+  swallows bytes out of the client's stream.
+
+Two exceptions where the firmware *does* write, both deliberate. Attaching sends
+three `CFG-MSG` frames — `NAV-PVT`, `NAV-TIMELS`, `NAV-SAT`, all 1 Hz on UART1 —
+because a client is free to set every rate to zero (its revert-to-defaults does
+exactly that) and a session should not be able to stop the clock as well as draw
+nothing. And a reset or clear-to-defaults forces the full message set back,
+because the module comes out of those speaking NMEA at 9600 with no stream for
+anyone.
+
+**`MON-COMMS` is answered locally.** `u-center` opens a TCP port by polling it and
+this receiver ignores the poll outright — `MON-VER`, `CFG-PRT` and `NAV-SAT` polls
+on the same line are all answered, that one is not. After 400 ms of silence the
+bridge replies for the module: version 0, one port (UART1), every counter zero.
+The counters stay honest zeros because the module never reports them and an
+invented figure is worse than a blank.
+
+Four clients are served at once and the listening socket stays open, so `u-center`
+holding the port does not lock a shell out. A fifth is refused rather than
+silently accepted and closed, and `/gps/info` carries `bridge_refused` — the two
+look identical from the outside otherwise. `bridge_sessions`, `bridge_rx`,
+`bridge_tx`, `bridge_end` and `bridge_last` say what a session carried and how it
+ended; `bridge_last` is the client's last bytes as hex, which is how the handshake
+above was identified.
+
+**The other way, if the carrier is ever rewired.** UBX keeps a separate output
+rate per port, so a monitor on UART2 could ask for its own messages at its own
+rates without touching UART1 at all — `CFG-MSG` already carries a rate byte per
+port and the session frames set only UART1. This carrier wires UART1 alone, so
+two masters on one line is what there is; if a second pair ever reaches the
+module, point the session's `CFG-MSG` at port 2 and stop sharing.
 
 ### Lock, holdover, and what a client sees
 

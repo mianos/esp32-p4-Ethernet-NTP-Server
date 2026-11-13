@@ -174,6 +174,7 @@ public:
         int64_t  monHwAgeUs   = -1;
         int64_t  fitUs        = 0; /* how long the last rate fit took */
         uint32_t bridgeSessions = 0;
+        uint32_t bridgeRefused  = 0;
         uint32_t bridgeRx       = 0;
         uint32_t bridgeTx       = 0;
         std::string bridgeEnd;
@@ -249,12 +250,26 @@ public:
     void requestReset(bool cold = false, bool hardware = false, bool powerCycle = false);
     void requestDefaults();
 
-    /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort. While a
-     * client is attached the GPS task stops reading the port so exactly one
-     * thread owns it, and everything -- polls, configuration, the lot -- is the
-     * client's. On disconnect the task resumes and re-applies its own
-     * configuration, so a session cannot leave the receiver somewhere the
-     * firmware does not expect. */
+    /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort.
+     *
+     * UBX has no arbitration: on one UART, whoever writes while another writes
+     * collides and whoever reads takes the bytes. There are two ways to have a
+     * bench tool and this firmware on the same receiver, and only one of them is
+     * available here.
+     *
+     * The one that is: the client is the single master for the duration, the
+     * firmware stops writing anything the client did not cause, and the bridge
+     * is the single reader, tapping what it reads into the same parser the
+     * clock is driven from. u-center configures the receiver; the firmware
+     * consumes the result rather than competing with it. That is why pump()
+     * waits instead of reading while a client is attached, and why
+     * configureModule() stands aside until the last client has gone.
+     *
+     * The one that is not: port separation. UBX keeps a separate output rate
+     * per port, so a monitor on UART2 could ask for its own messages without
+     * disturbing UART1 -- this carrier wires only UART1, so it would need a
+     * second pair to the module. If that is ever added, the session's CFG-MSG
+     * in bridgeTask() wants to name port 2 rather than port 1. */
     static constexpr int kBridgePort = 3333;
 
     /* The antenna switch, on the ESP side: AADET_N is pulled low to power the
@@ -284,9 +299,11 @@ private:
      * before the next is sent. The reply's payload names the class and id of
      * the message it answers, so a single outstanding message is unambiguous --
      * and it has to be, because this receiver does not answer everything (it
-     * never answers MON-VER) and an order-based guess drifts apart within one
-     * boot. pump() keeps parsing while it waits; the GPS task would otherwise
-     * be blind for the duration. */
+     * answers MON-VER but ignores MON-COMMS) and an order-based guess drifts
+     * apart within one boot. pump() keeps parsing while it waits; the GPS task
+     * would otherwise be blind for the duration -- and while a client holds the
+     * port, pump() only parses what the bridge feeds it, because a second
+     * reader would take the client's bytes. */
     int8_t  sendAndWait(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len,
                         uint32_t timeoutUs = 250000);
     void    pump(int64_t timeoutUs);
@@ -442,11 +459,13 @@ private:
     int            m_shortSamples  = 0;
     int            m_senseLogged   = -1;
     void applyBias(bool on);
+    bool           m_reconfigForce = false;
     int64_t         m_reconfigAtUs = 0;
     int64_t    m_monHwAtUs         = 0;
     volatile uint32_t m_bridgeRx   = 0;
     volatile uint32_t m_bridgeTx   = 0;
     volatile uint32_t m_bridgeSessions = 0;
+    volatile uint32_t m_bridgeRefused  = 0;
     char       m_bridgeEnd[48]     = "none";
     char       m_bridgeLast[128]   = "";
     uint8_t    m_cn0Max            = 0;
