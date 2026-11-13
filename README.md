@@ -704,16 +704,22 @@ answer everything** — `MON-VER` gets silence, so `gps_module` stays absent —
 order-based guess drifts apart inside one boot. The three replies it does give are
 acted on directly rather than matched up afterwards.
 
-**`UBX-NAV-TIM-TP` is asked for and refused.** It would be the obvious way to stop
-guessing: every pulse would arrive with the receiver's own quantisation error
-(`qErr`) and its nominal time of week, turning root delay from an assumption into
-a measurement. This unit acknowledges nothing — it NAKs the enable — so the
-message is in the code and dormant. The budget does not depend on it: the jitter
+**`UBX-NAV-TIM-TP`** is the obvious way to stop guessing: every pulse would arrive
+with the receiver's own quantisation error (`qErr`) and its nominal time of week,
+turning root delay from an assumption into a measurement. The receiver is a
+LEA-M8T with `PROTVER 22.00`, well past the protocol 15 that introduced the
+message, and it still refused the enable for most of a session — until a hardware
+reset, after which the same bytes are acknowledged. So a refusal here is worth
+suspecting as module state before capability; `/healthz` reports the answer as
+`gps_timtp` (`rejected`, `accepted` or `silent`), and the three are worth keeping
+apart for exactly that reason.
+
+The message also stays silent without a time solution, so it says nothing while
+the receiver has no fix — which is why the budget never depends on it. The jitter
 it would have described is measured instead from the servo's own residuals
-([the numbers](#accuracy-and-the-parts-that-are-not)), and if a module that has
-the message is ever fitted, `qErr` and the pulse-position check start contributing
-on their own. `/healthz` reports the answer as `gps_timtp`: `rejected`, `accepted`
-or `silent`, which are three different faults and worth keeping apart.
+([the numbers](#accuracy-and-the-parts-that-are-not)), and `qErr` plus the
+pulse-position check start contributing the moment both a fix and the message
+exist.
 
 Nothing here is followed by `UBX-CFG-CFG`: saving it to the receiver's flash would
 outlive the firmware and take the module's own defaults away from `u-center`.
@@ -721,8 +727,9 @@ Eleven short frames per boot is the cheaper trade.
 
 ### Antennas, and what the front end says about one
 
-The M8T has **no antenna supervisor**: `CFG-ANT` is refused, at boot and after
-three retries ten seconds apart, so `gps_ant` and `gps_ant_power` stay `unknown`
+The M8T has **no antenna supervisor**: `CFG-ANT` is refused, at boot, after three
+retries ten seconds apart, and again after a hardware reset that made the receiver
+accept other messages it had been refusing, so `gps_ant` and `gps_ant_power` stay `unknown`
 and the bias can be neither switched nor read back from software. Whether the
 board puts DC on the feed is a hardware question about the module's bias
 arrangement, not a register — worth a multimeter at the connector, and worth
@@ -744,13 +751,24 @@ Two hooks exist for a bench session:
 ```console
 $ curl -s -X POST -d '{"bias":"on"}' http://192.0.2.20/gps/ant
 {"requested":"on","read_back_after_s":3,...}
-$ curl -s -X POST http://192.0.2.20/gps/reset    # controlled hot start, almanac kept
+$ curl -s -X POST http://192.0.2.20/gps/reset                      # hot start, almanac kept
+$ curl -s -X POST -d '{"cold":true}' http://192.0.2.20/gps/reset  # discard the almanac
+$ curl -s -X POST -d '{"hardware":true}' http://192.0.2.20/gps/reset
 ```
 
 `/gps/ant` queues the change for the GPS task, which owns the UART, and the answer
 is a `gps_ant_power` reading three seconds later. On this module it changes
 nothing — there is no supervisor to accept it — but it is the right hook for one
 that has.
+
+The three reset strengths are ordered deliberately: a hot start restarts the
+navigation engine; a cold one also throws the almanac away; a hardware reset
+re-initialises the receiver and drops its whole runtime configuration, so the
+message set is re-sent three seconds later — without that it comes back speaking
+NMEA at 9600 and the parser has nothing to read. The hardware reset is the one
+that changed anything here: it turned a refused `NAV-TIM-TP` enable into an
+acknowledged one while leaving `CFG-ANT` refused. Reach for it before concluding
+that a message is unsupported.
 
 **The state while this was written is bad, and worth keeping as a baseline.** As
 received, the board reported `gps_cn0_max` 11 and `gps_cn0_mean` 9 across 12 used
@@ -762,9 +780,13 @@ gps_fix 0  gps_sats 0  gps_cn0_max 0  gps_noise_dbm -100  gps_agc 5460  gps_jam_
 ```
 
 Zero satellites while PPS still arrives, over a −100 dBm floor, is an open or
-unpowered feed rather than a configuration fault: `NAV-PVT` and `NAV-TIMELS` are
-acknowledged and arriving, the timepulse is asserted, and nothing in this firmware
-touches the RF path. A high-gain antenna whose preamp is not powered is *worse*
+unpowered feed rather than a configuration fault. The firmware was cleared by
+putting the previous build back on the same module, same power, same cable: it saw
+zero satellites too. Then, with nothing physical touched, the receiver was taken
+through a hot start, a cold start and a hardware reset — all three left it at zero,
+while the hardware reset was enough to make it acknowledge messages it had been
+refusing. `NAV-PVT` and `NAV-TIMELS` are acknowledged and arriving throughout and
+the timepulse is asserted. A high-gain antenna whose preamp is not powered is *worse*
 than a passive one — the bypass path is a loss, not a gain — which is what 9 dBHz
 looks like.
 

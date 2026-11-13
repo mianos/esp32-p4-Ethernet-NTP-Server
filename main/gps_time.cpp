@@ -171,9 +171,10 @@ void GpsTime::requestAntennaBias(bool on)
     m_biasReq = on ? 1 : 0;
 }
 
-void GpsTime::requestReset(bool cold)
+void GpsTime::requestReset(bool cold, bool hardware)
 {
     m_resetCold = cold;
+    m_resetHard = hardware;
     m_resetReq  = true;
 }
 
@@ -359,6 +360,10 @@ void GpsTime::task()
             }
         }
 
+        if (m_reconfigAtUs != 0 && nowUs >= m_reconfigAtUs) {
+            m_reconfigAtUs = 0;
+            configureModule();
+        }
         if (m_resetReq) {
             m_resetReq = false;
             /* CFG-RST. Hot by default: restart the navigation engine and keep
@@ -366,10 +371,22 @@ void GpsTime::task()
              * not leave on its own. Cold when asked, which throws the almanac
              * away -- the thing to try when a hot start changed nothing and the
              * receiver's own stored state is suspect. */
-            const bool    cold   = m_resetCold;
+            const bool    cold = m_resetCold;
+            const bool    hard = m_resetHard;
+            m_resetHard        = false;
+            /* resetMode: 0x00 is a hardware reset, 0x02 a controlled software
+             * one (GNSS only). A hardware reset also drops the module's whole
+             * runtime configuration back to its defaults, so the message set is
+             * re-sent a few seconds later -- otherwise it comes back speaking
+             * NMEA at 9600 and the parser has nothing to read. */
             const uint8_t rst[4] = {static_cast<uint8_t>(cold ? 0xFF : 0x00),
-                                    static_cast<uint8_t>(cold ? 0xFF : 0x00), 0x02, 0x00};
-            ESP_LOGW(TAG, "receiver %s start requested", cold ? "COLD" : "hot");
+                                    static_cast<uint8_t>(cold ? 0xFF : 0x00),
+                                    static_cast<uint8_t>(hard ? 0x00 : 0x02), 0x00};
+            ESP_LOGW(TAG, "receiver %s%s start requested", hard ? "HARDWARE " : "",
+                     cold ? "cold" : "hot");
+            if (hard) {
+                m_reconfigAtUs = esp_timer_get_time() + 3000000;
+            }
             sendUbx(0x06, 0x04, rst, sizeof(rst));
         }
 

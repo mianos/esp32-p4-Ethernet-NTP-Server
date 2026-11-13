@@ -544,6 +544,7 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
      * will not leave on its own. */
     /* The body is optional, so an empty POST still means the cheap thing. */
     bool cold = false;
+    bool hard = false;
     const int len = req->content_len;
     if (len > 0 && len < 512) {
         char buf[512];
@@ -552,16 +553,18 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
             JsonWrapper doc = JsonWrapper::Parse(std::string(buf, static_cast<size_t>(got)));
             if (!doc.Empty()) {
                 doc.GetField("cold", cold);
+                doc.GetField("hardware", hard);
             }
         }
     }
 
-    GpsTime::instance().requestReset(cold);
-    ESP_LOGW(TAG, "POST /gps/reset from %s: %s start", callerAddress(req).c_str(),
-             cold ? "cold" : "hot");
+    GpsTime::instance().requestReset(cold, hard);
+    ESP_LOGW(TAG, "POST /gps/reset from %s: %s%s start", callerAddress(req).c_str(),
+             hard ? "hardware " : "", cold ? "cold" : "hot");
 
     JsonWrapper resp;
-    resp.AddItem("reset", cold ? "cold start queued" : "hot start queued");
+    resp.AddItem("reset", hard ? "hardware reset queued" : cold ? "cold start queued"
+                                                                 : "hot start queued");
     resp.AddItem("note", cold ? "the almanac is discarded; expect a slow reacquisition"
                               : "the almanac is kept; send {\"cold\":true} to discard it");
     return sendJson(req, resp, 200);
