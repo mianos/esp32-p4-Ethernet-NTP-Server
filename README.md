@@ -732,13 +732,25 @@ retries ten seconds apart, and again after a hardware reset that made the receiv
 accept other messages it had been refusing, so `gps_ant` and `gps_ant_power` stay `unknown`
 and the bias can be neither switched nor read back from software.
 
-**There is no DC on the centre pin on this board** — measured, not inferred. So an
-active antenna's preamp gets nothing, and an unpowered preamp is a 10 to 20 dB
-attenuator: worse than a passive antenna, not better. That is what `gps_cn0_max`
-11 dBHz over a working fix was, and when the path faded the last few dB it went to
-zero and stayed there. Any antenna with a preamp needs its bias supplied
-externally, by a bias tee on the feed; a passive antenna needs no such thing and
-is the cheaper way to keep the receiver usable indoors.
+**The board is a WD22UGRC**, a Huawei carrier for the LEA-M8T, and it does not
+generate antenna power: the 8-pin header takes `V_ANT` on pin 1 as a *supply
+input* separate from Vcc on pin 2, and the transistor pair switches it. No supply
+on pin 1 means no bias, however the receiver is configured — it was measured dry
+here, and an unpowered preamp is a 10 to 20 dB attenuator: worse than a passive
+antenna, not better. That is what `gps_cn0_max` 11 dBHz over a working fix was, and
+when the path faded the last few dB it went to zero and stayed there.
+
+There is a documented second failure on this board, matching what happened here —
+volts on `V_ANT` and still nothing on the pin, with a configuration reset not
+helping. In that case the switch is not conducting and the answer is an external
+DC injector on the feed, leaving `AADET_N` and `SCS1_N` idle. An active antenna
+therefore needs either a working switch and a supply on pin 1, or an injector;
+a passive antenna needs neither, and is the cheaper way to keep the receiver
+usable indoors.
+
+The RF connector is SMB, and the SMA adapter often used on a bench is a snap-fit
+with real loss and contact risk — worth reseating, and worth suspecting before the
+antenna is blamed for a weak sky.
 
 The module stays a LEA-M8T and is not suspected: unplugging and refitting the
 antenna moves `gps_noise_dbm` by 2 dB, `gps_agc` by 78 counts and `gps_jam_ind` by
