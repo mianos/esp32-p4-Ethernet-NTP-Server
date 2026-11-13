@@ -129,6 +129,7 @@ void NtpWebServer::register_routes()
         {"/ntp/sync",     HTTP_POST, sync_post_handler},
         {"/gps/pps",      HTTP_POST, gps_pps_post_handler},
         {"/gps/ant",      HTTP_POST, gps_ant_post_handler},
+        {"/gps/info",     HTTP_GET,  gps_info_get_handler},
         {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
         {"/firmware",     HTTP_POST, firmware_post_handler},
@@ -254,39 +255,32 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
             json.AddItem("gps_tp_jitter_ns", static_cast<double>(gps.jitterNs));
             json.AddItem("gps_tp_on_second", gps.pulseOnSecond);
         }
-        /* Which receiver this is, and whether it took the two configuration
-         * messages that make the rest of these numbers mean anything. Read here
-         * rather than from the boot log: the console drops bytes exactly when
-         * both of these are decided. */
-        if (!gps.moduleId.empty()) {
-            json.AddItem("gps_module", gps.moduleId);
+        /* Only what moves. The receiver's identity, its pin map and whether it
+         * took its configuration are static for a boot, so they live at
+         * /gps/info -- except the two failures, which stay here because they are
+         * the difference between numbers that mean something and numbers that do
+         * not. */
+        if (gps.tp5Rejected) {
+            json.AddItem("gps_tp5_rejected", true);
         }
-        json.AddItem("gps_tp5_ok", !gps.tp5Rejected);
-        /* Three states, because they mean different things: refused (no such
-         * message on this firmware), accepted (it exists and still never
-         * arrived -- something else is wrong), or neither (never asked). */
-        json.AddItem("gps_timtp", gps.timTpRejected ? "rejected"
-                                   : gps.timTpAcked  ? "accepted"
-                                                     : "silent");
+        if (gps.antCfgRejected) {
+            json.AddItem("gps_ant_cfg_rejected", true);
+        }
 
         /* The antenna group, for swapping leads and comparing them. `gps_ant`
          * is what the supervisor found (ok / short / open, or no reading), and
-         * `gps_ant_power` what the bias tee is doing -- the two questions a
+         * `gps_ant_power` what the bias is doing -- the two questions a
          * high-gain antenna with a preamp actually raises. `gps_cn0_*` is the
          * comparison metric: C/N0 on used satellites, not satellite count,
          * because a better antenna adds the marginal ones last. agc/noise/jam
          * are the overload tell-tales -- a preamp that is too strong for this
          * receiver drives agc down and the jamming state up while the C/N0
          * still looks flattering. */
-        /* The switch this firmware drives, since the module has no supervisor. */
         json.AddItem("gps_ant_bias", gps.antBiasOn ? "on" : "off");
         json.AddItem("gps_ant_short", gps.antShort);
         if (gps.antLatched) {
             json.AddItem("gps_ant_latched", true);
         }
-        json.AddItem("gps_ant_cfg", gps.antCfgRejected ? "rejected"
-                                    : gps.antCfgAcked  ? "accepted"
-                                                       : "silent");
         if (gps.monHwValid) {
             static constexpr const char *kAntStatus[] = {"init", "unknown", "ok", "short", "open"};
             static constexpr const char *kAntPower[]  = {"off", "on", "unknown"};
@@ -297,25 +291,12 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
             json.AddItem("gps_agc", static_cast<double>(gps.agcCnt));
             json.AddItem("gps_jam_ind", static_cast<double>(gps.jamInd));
             json.AddItem("gps_jam", gps.jamState <= 3 ? kJam[gps.jamState] : "unknown");
-            /* How stale the supervisor reading is, so a frozen set of these
-             * cannot pass for a live one. */
-            json.AddItem("gps_ant_age_s", static_cast<double>(gps.monHwAgeUs) / 1e6);
-            /* Hex strings: these are bit maps, not quantities. */
-            char pins[32];
-            std::snprintf(pins, sizeof(pins), "%08lx", static_cast<unsigned long>(gps.pinSel));
-            json.AddItem("gps_pin_sel", std::string(pins));
-            std::snprintf(pins, sizeof(pins), "%08lx", static_cast<unsigned long>(gps.pinDir));
-            json.AddItem("gps_pin_dir", std::string(pins));
-            std::snprintf(pins, sizeof(pins), "%08lx", static_cast<unsigned long>(gps.pinVal));
-            json.AddItem("gps_pin_val", std::string(pins));
         }
-        /* Absent until a NAV-SAT has been parsed, and stale-flagged after 5 s,
-         * so a stopped message cannot pass an old C/N0 off as a live one. */
+        /* Absent until a NAV-SAT has been parsed. */
         if (gps.cn0Used != 0 || gps.navSatAgeUs >= 0) {
             json.AddItem("gps_cn0_max", static_cast<double>(gps.cn0Max));
             json.AddItem("gps_cn0_mean", static_cast<double>(gps.cn0Mean));
             json.AddItem("gps_cn0_used", static_cast<double>(gps.cn0Used));
-            json.AddItem("gps_cn0_age_s", static_cast<double>(gps.navSatAgeUs) / 1e6);
         }
         /* The leap-second notice a reply would carry. leap_pending is what puts
          * the indicator at 1 (or 2); leap_in_s only exists while something is
@@ -518,6 +499,41 @@ esp_err_t NtpWebServer::gps_pps_post_handler(httpd_req_t *req)
     ESP_LOGW(TAG, "POST /gps/pps from %s: suppress_s=%u", caller.c_str(),
              static_cast<unsigned>(applied));
     return sendJson(req, resp, 200);
+}
+
+esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
+{
+    /* The static half of the receiver, out of /healthz because none of it
+     * changes while the board is up and a poller should not have to carry it.
+     * This is what a bench session reads: what the module says it is, which pins
+     * it has, and which configuration messages it took. The ages come with it
+     * because they are only meaningful next to the readings they date. */
+    const GpsTime::Status gps = GpsTime::instance().status();
+
+    JsonWrapper doc;
+    if (!gps.moduleId.empty()) {
+        doc.AddItem("module", gps.moduleId);
+    }
+    doc.AddItem("ant_cfg", gps.antCfgRejected ? "rejected" : gps.antCfgAcked ? "accepted"
+                                                                             : "silent");
+    doc.AddItem("tp5_ok", !gps.tp5Rejected);
+    doc.AddItem("timtp", gps.timTpRejected ? "rejected" : gps.timTpAcked ? "accepted" : "silent");
+
+    if (gps.monHwValid) {
+        /* Hex strings: these are bit maps, not quantities. */
+        char bits[32];
+        std::snprintf(bits, sizeof(bits), "%08lx", static_cast<unsigned long>(gps.pinSel));
+        doc.AddItem("pin_sel", std::string(bits));
+        std::snprintf(bits, sizeof(bits), "%08lx", static_cast<unsigned long>(gps.pinDir));
+        doc.AddItem("pin_dir", std::string(bits));
+        std::snprintf(bits, sizeof(bits), "%08lx", static_cast<unsigned long>(gps.pinVal));
+        doc.AddItem("pin_val", std::string(bits));
+        doc.AddItem("mon_hw_age_s", static_cast<double>(gps.monHwAgeUs) / 1e6);
+    }
+    if (gps.navSatAgeUs >= 0) {
+        doc.AddItem("cn0_age_s", static_cast<double>(gps.navSatAgeUs) / 1e6);
+    }
+    return sendJson(req, doc, 200);
 }
 
 esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)

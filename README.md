@@ -424,20 +424,24 @@ source: `ntp_server` is `null` (nothing is polled, so there is no upstream),
 2 2D, 3 3D), `gps_sats`, `gps_pps_age_ms` and `gps_offset_us` describe the
 receiver itself — see [GPS](#gps-u-blox-lea-8--pps) for what those numbers mean.
 
-`gps_tp5_ok` and `gps_timtp` are the receiver's answers to the two configuration
-messages that decide whether any of the rest can be trusted: whether the 1 Hz
-timepulse was asserted, and whether `NAV-TIM-TP` exists on this firmware
-(`rejected`, `accepted` or `silent` — three different faults). `gps_module` is what
-`MON-VER` said, and is absent because this unit does not answer it. When `TIM-TP`
-does flow, `gps_tp_qerr_ns` is the quantisation the receiver admits to,
-`gps_tp_jitter_ns` the spread the stamps actually show, and `gps_tp_on_second`
-whether the pulse is on the UTC second.
+`/healthz` carries what moves. Anything that is fixed for the life of a boot —
+the receiver's identity, its pin map, and whether it accepted its configuration
+messages — lives at [`GET /gps/info`](#gpsinfo-for-the-static-half) instead, so a
+poller does not carry a 250-byte version string and three hex bit maps it will
+never look at. The exceptions are the two failures, `gps_tp5_rejected` and
+`gps_ant_cfg_rejected`, which stay here because they are the difference between
+these numbers meaning something and meaning nothing.
 
-`gps_ant`, `gps_ant_power`, `gps_noise_dbm`, `gps_agc`, `gps_jam_ind` and the
-`gps_cn0_*` group describe the antenna and the front end behind it — see
-[Antennas](#antennas-and-what-the-front-end-says-about-one) for which of those is
-the one to compare two antennas with, and which is the tell for a preamp that is
-not running.
+When `TIM-TP` does flow, `gps_tp_qerr_ns` is the quantisation the receiver admits
+to, `gps_tp_jitter_ns` the spread the stamps actually show, and
+`gps_tp_on_second` whether the pulse is on the UTC second.
+
+`gps_ant`, `gps_ant_power`, `gps_ant_bias`, `gps_noise_dbm`, `gps_agc`,
+`gps_jam_ind` and the `gps_cn0_*` group describe the antenna and the front end
+behind it — see [Antennas](#antennas-and-what-the-front-end-says-about-one) for
+which of those is the one to compare two antennas with, and which is the tell for a
+preamp that is not running. `gps_ant_latched` appears only after a short has cut
+the bias.
 
 The last group is the responder's: `serve_ntp` is whether it is listening,
 `ntp_stratum` / `ntp_refid` / `ntp_leap` are what a reply would claim *right now*
@@ -788,7 +792,26 @@ enough to spot a dead antenna path without a supervisor:
 | `gps_noise_dbm` | `MON-HW` noise floor, and the preamp tell. A running preamp raises it to roughly −30…−50 dBm; **−100 dBm means the preamp is not powered, or the feed is open.** |
 | `gps_agc` | AGC count, for context against the two above. |
 | `gps_jam_ind` / `gps_jam` | Interference index, and the receiver's verdict where the firmware offers one. High alongside high C/N0 is a preamp that is too much for this receiver. |
-| `gps_ant_age_s` | Age of the `MON-HW` reading, so a frozen set of these cannot pass for a live one. |
+| `gps_ant_latched` | Present only after a short has cut the bias, and cleared by the next `POST /gps/ant`. |
+
+### GET /gps/info, for the static half
+
+What the receiver is, which pins it has, and which configuration messages it took.
+None of it changes while the board is up, so none of it sits in `/healthz`:
+
+```console
+$ curl -s http://192.0.2.20/gps/info | python3 -m json.tool
+{"module":"EXT CORE 3.01 ... PROTVER=22.00 MOD=LEA-M8T-0",
+ "ant_cfg":"accepted","tp5_ok":true,"timtp":"rejected",
+ "pin_sel":"0001f400","pin_dir":"00010000","pin_val":"0000f7af",
+ "mon_hw_age_s":0.66,"cn0_age_s":0.75}
+```
+
+`ant_cfg` and `timtp` are three-state — `rejected`, `accepted`, `silent` — because
+a refusal, an acceptance that never arrived, and a message never asked for are
+three different faults. `pin_dir` having a bit set is the receiver driving the
+antenna switch; `pin_sel` and `pin_val` are the rest of the pin map. The two ages
+are there because a reading is only worth anything next to when it was taken.
 
 Two hooks exist for a bench session:
 
@@ -800,7 +823,7 @@ $ curl -s -X POST -d '{"cold":true}' http://192.0.2.20/gps/reset  # discard the 
 $ curl -s -X POST -d '{"hardware":true}' http://192.0.2.20/gps/reset
 ```
 
-`/gps/ant` queues the change for the GPS task, which owns the UART, and the answer
+`/gps/ant` queued the change for the GPS task, which owns the UART, and the answer
 is a `gps_ant_power` reading three seconds later. On this module it changes
 nothing — there is no supervisor to accept it — but it is the right hook for one
 that has.
