@@ -284,6 +284,10 @@ public:
      * than none. */
     void requestSurvey(bool start, uint32_t durS = 86400, uint32_t accMm = 3000);
     void requestFixPosition();
+    /* Learn the time mode from the receiver, and put a known position hold back
+     * after something has cleared it. */
+    void adoptTimeMode();
+    void reassertFix();
 
     /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort.
      *
@@ -360,6 +364,7 @@ private:
     void onMonHw(const uint8_t *p, uint16_t len);
     void onNavSat(const uint8_t *p, uint16_t len);
     void onNavSvin(const uint8_t *p, uint16_t len);
+    void onCfgTmode(const uint8_t *p, uint16_t len);
     void anchor(time_t second);
 
     /* The servo. Each anchor is one sample of esp_timer against the GPS; the
@@ -505,6 +510,23 @@ private:
     bool             m_svinValid    = false;
     bool             m_svinActive   = false;
     int64_t          m_svinAtUs     = 0;
+    /* A position hold lives in the module's RAM and this firmware's copy of it
+     * does not survive a reboot, so the receiver is asked what its time mode
+     * actually is rather than the firmware assuming. When it answers "fixed"
+     * the position is kept here, which is what lets a reconfigure put it back
+     * after a reset has taken it away. */
+    int32_t          m_fixedMean[3] = {};
+    uint32_t         m_fixedAcc     = 0;
+    /* Two separate questions: is there a position worth putting back, and does
+     * anything want it held. Adoption inside configureModule() runs before a
+     * re-assert and would otherwise clear the first one by reading the "off"
+     * that the reset it is recovering from has just put there. */
+    bool             m_fixedValid   = false;
+    bool             m_holdWanted   = false;
+    /* Set around the reconfigure that follows a reset: the module is often
+     * still booting then, so its answer describes the state *before* the hold
+     * has been put back and reading it would undo the re-assert. */
+    bool             m_skipAdopt    = false;
     volatile bool   m_resetReq     = false;
     volatile bool   m_resetCold    = false;
     volatile bool   m_resetHard    = false;

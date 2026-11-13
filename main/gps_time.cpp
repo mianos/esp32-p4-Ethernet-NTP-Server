@@ -201,6 +201,64 @@ void GpsTime::requestFixPosition()
     m_svinCmd = 3;
 }
 
+void GpsTime::onCfgTmode(const uint8_t *p, uint16_t len)
+{
+    /* CFG-TMODE2 has no reason to arrive except in answer to a poll: the ACK
+     * acknowledges it separately and carries only class and id. So anything
+     * that gets here describes the receiver's actual state, which is the point
+     * of asking -- the firmware cannot otherwise tell a fixed position from a
+     * moving one across a reboot, and a reset would take one away silently. */
+    if (len < 28) {
+        return;
+    }
+    const uint8_t mode = p[0];
+    int32_t       mean[3];
+    for (int i = 0; i < 3; ++i) {
+        std::memcpy(&mean[i], p + 4 + 4 * i, 4);
+    }
+    const uint32_t acc = static_cast<uint32_t>(p[16]) | (static_cast<uint32_t>(p[17]) << 8) |
+                         (static_cast<uint32_t>(p[18]) << 16) | (static_cast<uint32_t>(p[19]) << 24);
+
+    m_tmode = mode > 2 ? 0 : mode;
+    if (mode == 2 && (mean[0] != 0 || mean[1] != 0 || mean[2] != 0)) {
+        for (int i = 0; i < 3; ++i) {
+            m_fixedMean[i] = mean[i];
+        }
+        m_fixedAcc   = acc;
+        m_fixedValid = true;
+        /* Locked by anyone -- a request here, or somebody in u-center -- wants
+         * holding. A "moving" reading does not clear the saved position: it is
+         * what a reset looks like on the way past, and the position is still
+         * worth putting back. Only an explicit stop says otherwise. */
+        m_holdWanted = true;
+    }
+}
+
+void GpsTime::adoptTimeMode()
+{
+    /* Only the answer matters, and onCfgTmode stores it. */
+    sendAndWait(0x06, 0x3D, nullptr, 0);
+}
+
+void GpsTime::reassertFix()
+{
+    if (!m_fixedValid || !m_holdWanted) {
+        return;
+    }
+    uint8_t tm[28] = {};
+    tm[0]          = 2; /* fixed */
+    for (int i = 0; i < 3; ++i) {
+        std::memcpy(tm + 4 + 4 * i, &m_fixedMean[i], 4);
+    }
+    std::memcpy(tm + 16, &m_fixedAcc, 4);
+    if (sendAndWait(0x06, 0x3D, tm, sizeof(tm)) == 1) {
+        m_tmode = 2;
+        ESP_LOGW(TAG, "position hold put back after the reset");
+    } else {
+        ESP_LOGW(TAG, "position hold could not be put back");
+    }
+}
+
 void GpsTime::requestDefaults()
 {
     m_defaultsReq = true;
@@ -780,7 +838,8 @@ void GpsTime::task()
             std::memcpy(tm + 24, &accLimit, 4);
             const int8_t r = sendAndWait(0x06, 0x3D, tm, sizeof(tm));
             if (r == 1) {
-                m_tmode = cmd == 1 ? 1 : cmd == 3 ? 2 : 0;
+                m_tmode      = cmd == 1 ? 1 : cmd == 3 ? 2 : 0;
+                m_holdWanted = cmd == 3;
                 m_svinAtUs = 0;
                 if (cmd == 1) {
                     ESP_LOGW(TAG, "survey-in started: %u s minimum, %u mm variance limit",
@@ -835,9 +894,19 @@ void GpsTime::task()
                  * aside -- detaching re-arms this anyway. */
                 m_reconfigAtUs = 0;
             } else {
-                m_reconfigAtUs  = 0;
-                m_reconfigForce = false;
+                const bool forced = m_reconfigForce;
+                m_reconfigAtUs    = 0;
+                m_reconfigForce   = false;
+                m_skipAdopt       = forced;
                 configureModule();
+                m_skipAdopt = false;
+                if (forced) {
+                    /* A reset or a clear-to-defaults took the time mode with it.
+                     * Put a known position hold back, and do not ask the module
+                     * what its mode is first: it is still rebooting and would
+                     * answer with the mode the reset left behind. */
+                    reassertFix();
+                }
             }
         }
         if (m_defaultsReq) {
@@ -1187,6 +1256,14 @@ void GpsTime::configureModule()
         sendAndWait(0x06, 0x01, off, sizeof(off));
     }
 
+    /* Last, because it describes state this function does not set. Asking the
+     * receiver what its time mode is after every reconfigure means a reboot, a
+     * reset or somebody in u-center cannot leave the firmware believing the
+     * position is moving when it is held -- or the other way round. */
+    if (!m_skipAdopt) {
+        adoptTimeMode();
+    }
+
     /* Deliberately not followed by UBX-CFG-CFG: saving this to the receiver's
      * flash would outlive the firmware and take away the module's own defaults,
      * which is a rude thing to do to a receiver someone may want to read with
@@ -1376,6 +1453,8 @@ void GpsTime::onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
         onNavTimels(payload, len);
     } else if (cls == 0x01 && id == 0x27) { /* UBX-NAV-TIM-TP */
         onNavTimTp(payload, len);
+    } else if (cls == 0x06 && id == 0x3D) { /* UBX-CFG-TMODE2 */
+        onCfgTmode(payload, len);
     } else if (cls == 0x0A && id == 0x04) { /* UBX-MON-VER */
         onMonVer(payload, len);
     } else if (cls == 0x0A && id == 0x09) { /* UBX-MON-HW */
