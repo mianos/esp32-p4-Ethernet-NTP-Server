@@ -239,7 +239,8 @@ void GpsTime::bridgeTask()
         m_bridgeActive = true;
         vTaskDelay(pdMS_TO_TICKS(100));
 
-        uint8_t buf[256];
+        uint8_t  buf[256];
+        uint32_t pendingBaud = 0;
         for (;;) {
             fd_set set;
             FD_ZERO(&set);
@@ -273,17 +274,33 @@ void GpsTime::bridgeTask()
                     for (int i = 0; i + 15 < n; ++i) {
                         if (buf[i] == 0xB5 && buf[i + 1] == 0x62 && buf[i + 2] == 0x06 &&
                             buf[i + 3] == 0x00) {
+                            /* Port 1 is UART1, which is where the module is and
+                             * where this end is. A CFG-PRT for USB or DDC names
+                             * a rate the module is not using for this line, so
+                             * following it would desynchronise both directions
+                             * -- which is what made u-center go deaf. */
+                            const uint8_t  port = buf[i + 6];
                             const uint32_t baud = static_cast<uint32_t>(buf[i + 14]) |
                                                   (static_cast<uint32_t>(buf[i + 15]) << 8);
-                            if (baud >= 4800 && baud <= 921600 && baud != m_baud) {
-                                uart_set_baudrate(kUart, baud);
-                                m_baud = baud;
-                                ESP_LOGW(TAG, "client changed the port rate: following to %u",
-                                         static_cast<unsigned>(baud));
+                            if (port != 1) {
+                                ESP_LOGI(TAG, "client set port %u to %u: not this line, ignoring",
+                                         port, static_cast<unsigned>(baud));
+                            } else if (baud >= 4800 && baud <= 921600 && baud != m_baud) {
+                                /* Applied after the write below, never before:
+                                 * the frame has to go out at the old rate or the
+                                 * module receives rubbish and never changes. */
+                                pendingBaud = baud;
                             }
                         }
                     }
                     uart_write_bytes(kUart, buf, n);
+                    if (pendingBaud != 0) {
+                        uart_set_baudrate(kUart, pendingBaud);
+                        m_baud = pendingBaud;
+                        ESP_LOGW(TAG, "client changed the port rate: following to %u",
+                                 static_cast<unsigned>(pendingBaud));
+                        pendingBaud = 0;
+                    }
                 }
             }
             const int got = uart_read_bytes(kUart, buf, sizeof(buf), 0);
