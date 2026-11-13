@@ -70,7 +70,8 @@ With the u-blox receiver wired (PPS on GPIO14, UART1 on 15/16) and
 `timeSource=gps`, it is a stratum-1 server instead: `li=0 stratum=1
 refid=GPS` over both families, locked 1.4 s after boot — before the lease
 lands — and `/healthz` reported `gps_fix:3`, `gps_sats:5`,
-`gps_pps_age_ms:301`, `gps_offset_us:29` while this was being written. Asked at
+`gps_pps_age_ms:301` while this was being written, and `offset_us:29` at
+`/gps/info`. Asked at
 the same moment, macOS `sntp` put the board and the upstream server 2 ms apart
 (`+0.136669 ± 0.001914` vs `+0.138697 ± 0.006242`): the two references agree to
 within the LAN's own measurement noise, and the board's clock is the one that is
@@ -421,27 +422,19 @@ omitted until each address exists.
 With `timeSource=gps` the same object answers the same question about the other
 source: `ntp_server` is `null` (nothing is polled, so there is no upstream),
 `ntp_synced` is the receiver's lock, and `gps_fix` (u-blox fix type: 0 none,
-2 2D, 3 3D), `gps_sats`, `gps_pps_age_ms` and `gps_offset_us` describe the
-receiver itself — see [GPS](#gps-u-blox-lea-8--pps) for what those numbers mean.
+2 2D, 3 3D), `gps_sats` and `gps_pps_age_ms` describe the receiver itself — see [GPS](#gps-u-blox-lea-8--pps) for what those numbers mean.
 
-`/healthz` carries what moves. Anything that is fixed for the life of a boot —
-the receiver's identity, its pin map, and whether it accepted its configuration
-messages — lives at [`GET /gps/info`](#gpsinfo-for-the-static-half) instead, so a
-poller does not carry a 250-byte version string and three hex bit maps it will
-never look at. The exceptions are the two failures, `gps_tp5_rejected` and
-`gps_ant_cfg_rejected`, which stay here because they are the difference between
-these numbers meaning something and meaning nothing.
+The GPS side of `/healthz` is deliberately five fields: `gps_fix`, `gps_sats`,
+`gps_pps_age_ms`, and the two configuration failures below when they are set. It
+answers "is it working", not "how well". Everything numeric — the servo, the
+signal, the antenna, the pulse — is at
+[`GET /gps/info`](#gpsinfo-for-the-diagnostics), where a caller tuning something
+can have it without a poller carrying it.
 
-When `TIM-TP` does flow, `gps_tp_qerr_ns` is the quantisation the receiver admits
-to, `gps_tp_jitter_ns` the spread the stamps actually show, and
-`gps_tp_on_second` whether the pulse is on the UTC second.
-
-`gps_ant`, `gps_ant_power`, `gps_ant_bias`, `gps_noise_dbm`, `gps_agc`,
-`gps_jam_ind` and the `gps_cn0_*` group describe the antenna and the front end
-behind it — see [Antennas](#antennas-and-what-the-front-end-says-about-one) for
-which of those is the one to compare two antennas with, and which is the tell for a
-preamp that is not running. `gps_ant_latched` appears only after a short has cut
-the bias.
+The failure fields appear only when true, because a healthy board has nothing to
+say about them: `gps_tp5_rejected`, `gps_ant_cfg_rejected`, `gps_ant_short`, and
+`gps_ant_latched` after a short has cut the bias. `gps_pps_suppressed_s` is
+likewise present only while the holdover test hook is armed.
 
 The last group is the responder's: `serve_ntp` is whether it is listening,
 `ntp_stratum` / `ntp_refid` / `ntp_leap` are what a reply would claim *right now*
@@ -748,7 +741,7 @@ unsupported bit hides an otherwise complete feature. Vary the bits before
 concluding a message is absent.
 
 With the switch closed the front end recovers completely: `agc` falls from ~5300 to
-the low hundreds, `gps_cn0_max` goes from 0 to **42–44**, and the receiver holds a
+the low hundreds, `cn0_max` goes from 0 to **42–44**, and the receiver holds a
 3D fix and stratum 1. That C/N0 is the number to judge an antenna by; 11 was an
 unpowered preamp, 42 is a working one.
 
@@ -763,7 +756,7 @@ generate antenna power: the 8-pin header takes `V_ANT` on pin 1 as a *supply
 input* separate from Vcc on pin 2, and the transistor pair switches it. No supply
 on pin 1 means no bias, however the receiver is configured — it was measured dry
 here, and an unpowered preamp is a 10 to 20 dB attenuator: worse than a passive
-antenna, not better. That is what `gps_cn0_max` 11 dBHz over a working fix was, and
+antenna, not better. That is what `cn0_max` 11 dBHz over a working fix was, and
 when the path faded the last few dB it went to zero and stayed there.
 
 The switch is the board's, not the firmware's: the two PNPs take base drive from
@@ -786,24 +779,30 @@ front end and the board's trace are both alive. What is missing is L1 at the pin
 What software can say is what the front end is doing, which turns out to be
 enough to spot a dead antenna path without a supervisor:
 
-| Key | Means |
+| Key at `/gps/info` | Means |
 |-----|-------|
-| `gps_cn0_max` / `gps_cn0_mean` / `gps_cn0_used` | C/N0 on **used** satellites, in dBHz. This is how two antennas are compared. Satellite count is not: a better antenna adds the marginal ones last, and a worse one can hold the count up on the strongest handful while everything near the horizon goes. |
-| `gps_noise_dbm` | `MON-HW` noise floor, and the preamp tell. A running preamp raises it to roughly −30…−50 dBm; **−100 dBm means the preamp is not powered, or the feed is open.** |
-| `gps_agc` | AGC count, for context against the two above. |
-| `gps_jam_ind` / `gps_jam` | Interference index, and the receiver's verdict where the firmware offers one. High alongside high C/N0 is a preamp that is too much for this receiver. |
-| `gps_ant_latched` | Present only after a short has cut the bias, and cleared by the next `POST /gps/ant`. |
+| `cn0_max` / `cn0_mean` / `cn0_used` | C/N0 on **used** satellites, in dBHz. This is how two antennas are compared. Satellite count is not: a better antenna adds the marginal ones last, and a worse one can hold the count up on the strongest handful while everything near the horizon goes. |
+| `noise_dbm` | `MON-HW` noise floor, and the preamp tell. A running preamp raises it to roughly −30…−50 dBm; **−100 dBm means the preamp is not powered, or the feed is open.** |
+| `agc` | AGC count, for context against the two above. |
+| `jam_ind` / `jam` | Interference index, and the receiver's verdict where the firmware offers one. High alongside high C/N0 is a preamp that is too much for this receiver. |
+| `ant` / `ant_power` / `ant_bias` | What the supervisor reports, and what the switch is doing. |
 
-### GET /gps/info, for the static half
+### GET /gps/info, for the diagnostics
 
-What the receiver is, which pins it has, and which configuration messages it took.
-None of it changes while the board is up, so none of it sits in `/healthz`:
+Everything `/healthz` does not carry: the receiver's identity, the pin map, the
+servo, the signal, the antenna, and which configuration messages it took.
 
 ```console
 $ curl -s http://192.0.2.20/gps/info | python3 -m json.tool
 {"module":"EXT CORE 3.01 ... PROTVER=22.00 MOD=LEA-M8T-0",
  "ant_cfg":"accepted","tp5_ok":true,"timtp":"rejected",
- "pin_sel":"0001f400","pin_dir":"00010000","pin_val":"0000f7af",
+ "offset_us":31,"rate_ppm":-30.06,"rate_n":300,
+ "dispersion_us":2.4,"lock_window_s":600,
+ "ant":"ok","ant_power":"on","ant_bias":"on","ant_short":false,
+ "noise_dbm":-100,"agc":1638,"jam_ind":8,"jam":"unknown",
+ "cn0_max":43,"cn0_mean":29,"cn0_used":14,
+ "leap_s":18,"leap_pending":false,
+ "pin_sel":"0001f400","pin_dir":"00010000","pin_val":"0000f7ef",
  "mon_hw_age_s":0.66,"cn0_age_s":0.75}
 ```
 
@@ -812,6 +811,10 @@ a refusal, an acceptance that never arrived, and a message never asked for are
 three different faults. `pin_dir` having a bit set is the receiver driving the
 antenna switch; `pin_sel` and `pin_val` are the rest of the pin map. The two ages
 are there because a reading is only worth anything next to when it was taken.
+
+`cn0_*` is the antenna metric and `noise_dbm` the preamp tell — see
+[Antennas](#antennas-and-what-the-front-end-says-about-one) for which number to
+compare on and which to diagnose with.
 
 Two hooks exist for a bench session:
 
@@ -838,13 +841,13 @@ acknowledged one while leaving `CFG-ANT` refused. Reach for it before concluding
 that a message is unsupported.
 
 **What this looked like before the flag bit was found**, kept because it is what an
-unswitched preamp does. As received the board reported `gps_cn0_max` 11 and
+unswitched preamp does. As received the board reported `cn0_max` 11 and
 `gps_cn0_mean` 9 across 12 used satellites with a 3D fix — 25 to 35 dB below a
 healthy active antenna — and then fell to zero satellites and stayed there through
 a hot start:
 
 ```console
-gps_fix 0  gps_sats 0  gps_cn0_max 0  gps_noise_dbm -100  gps_agc 5460  gps_jam_ind 58
+gps_fix 0  gps_sats 0  cn0_max 0  noise_dbm -100  agc 5460  jam_ind 58
 ```
 
 Zero satellites while PPS still arrives, over a −100 dBm floor, is an open or
@@ -926,10 +929,10 @@ holdover ran, and then the edge back:
 
 ```console
 # POST /gps/pps {"suppress_s":120}, dispersion as the anchor ages away
-"gps_pps_age_ms":28721   "gps_dispersion_us":30.529
-"gps_pps_age_ms":56801   "gps_dispersion_us":58.529
-"gps_pps_age_ms":84885   "gps_dispersion_us":86.529
-"gps_pps_age_ms":112963  "gps_dispersion_us":114.529
+"gps_pps_age_ms":28721   "dispersion_us":30.529
+"gps_pps_age_ms":56801   "dispersion_us":58.529
+"gps_pps_age_ms":84885   "dispersion_us":86.529
+"gps_pps_age_ms":112963  "dispersion_us":114.529
 # the first edge back, 121 s later
 "gps_holdover_s":120.9964  "gps_holdover_error_us":-2.94
 ```
@@ -1061,40 +1064,41 @@ $ curl -s -X POST -H 'Content-Type: application/json' \
 
 $ curl -s http://192.0.2.20/healthz
 { ... "ntp_source":"gps","ntp_server":null,"ntp_synced":true,"last_sync":1794526208,
-  "gps_fix":3,"gps_sats":18,"gps_pps_age_ms":82111,"gps_offset_us":30,
-  "gps_rate_ppm":-29.968,"gps_rate_n":183,"gps_dispersion_us":84.5,
-  "gps_lock_window_s":600,"gps_leap_s":18,"gps_leap_pending":false,
-  "gps_tp5_ok":true,"gps_timtp":"rejected",
-  "gps_holdover_s":150.9955,"gps_holdover_error_us":-2.032,
+  "gps_fix":3,"gps_sats":18,"gps_pps_age_ms":82111,
   "serve_ntp":true,"ntp_stratum":1,"ntp_refid":"GPS","ntp_leap":0,
-  "ntp_root_delay_us":0,"ntp_root_dispersion_us":92,"ntp_requests":17}
+  "ntp_root_delay_us":2,"ntp_root_dispersion_us":84,"ntp_requests":17}
+
+$ curl -s http://192.0.2.20/gps/info          # the numbers behind the above
+{"offset_us":30,"rate_ppm":-29.968,"rate_n":183,"dispersion_us":84.5,
+ "lock_window_s":600,"cn0_max":43,"noise_dbm":-100,"agc":1638,
+ "ant":"ok","ant_power":"on","leap_s":18,"leap_pending":false, ...}
 
 $ curl -s -X POST http://192.0.2.20/ntp/sync     # nothing to poll: it reports the lock
 {"synced":true,"time":"2026-11-13T10:30:25+1100","source":"gps","gps_fix":3,"gps_sats":5}
 ```
 
 That dump is mid-holdover on purpose — `gps_pps_age_ms` 82111 is the dead edge,
-`gps_dispersion_us` 92 is the claim decaying at 1 ppm of it, and the reference is
+`ntp_root_dispersion_us` 84 is the claim decaying at 1 ppm of it, and the reference is
 still serving because the rate is known.
 
 `gps_pps_age_ms` counts 0→1000 every second: a value near 1000 means the last edge
 is a whole second old, which is normal just before the next one arrives.
-`gps_offset_us` is how far `CLOCK_REALTIME` was from the anchor at the last edge —
-a few tens of microseconds here, and the number the slew is working on.
+`offset_us` (`/gps/info`) is how far `CLOCK_REALTIME` was from the anchor at the
+last edge — a few tens of microseconds here, and the number the slew is working on.
 `ntp_synced` is the lock, not "was set once", so a receiver that loses its fix
 changes its mind within the lock window.
 
 The servo and the notice fields:
 
-- `gps_rate_ppm` is the crystal's rate as the servo has measured it (negative:
-  `esp_timer` undercounts), `gps_rate_n` how many anchors that rests on — it climbs
-  to 60 and the first fit lands, which is when the holdover window becomes ten
+- `rate_ppm` is the crystal's rate as the servo has measured it (negative:
+  `esp_timer` undercounts), `rate_n` how many anchors that rests on — it climbs to
+  60 and the first fit lands, which is when the holdover window becomes ten
   minutes;
-- `gps_dispersion_us` and `gps_lock_window_s` appear only while locked, because
-  they are what a reply would claim and a demoted reply claims neither;
-- `gps_leap_s` is the GPS-UTC offset from `NAV-TIMELS`, `gps_leap_pending` whether
-  a leap is announced, and `gps_leap_in_s` only while one is — together these are
-  the first byte of every reply;
+- `dispersion_us` and `lock_window_s` appear only while locked, because they are
+  what a reply would claim and a demoted reply claims neither;
+- `leap_s` is the GPS-UTC offset from `NAV-TIMELS`, `leap_pending` whether a leap
+  is announced, and `leap_in_s` only while one is — together these are the first
+  byte of every reply;
 - `gps_pps_suppressed_s` exists only while `POST /gps/pps` has a test armed, and
   `gps_holdover_s` / `gps_holdover_error_us` only after the first holdover, so
   nothing in this group can be mistaken for a permanent state.
@@ -1441,7 +1445,7 @@ server) is a mianesp component.
   (`gps_pps_age_ms`) and how much dispersion the replies had accumulated. If
   `gps_pps_suppressed_s` is present, someone armed `POST /gps/pps` and the outage
   is a test — `{"suppress_s":0}` stands the edges back up.
-- **`gps_rate_n` climbs but `gps_rate_ppm` stays 0**: the fit needs 60 anchors, so
+- **`rate_n` climbs but `rate_ppm` stays 0** (both at `/gps/info`): the fit needs 60 anchors, so
   that would be a boot less than a minute old. If `gps_rate_n` sits still instead,
   no anchors are being paired: the PPS interrupt or the UBX frames are missing
   (`no PPS edges` / `no UBX frames` in the log), and the holdover will stay at
