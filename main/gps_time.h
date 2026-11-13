@@ -282,7 +282,7 @@ public:
      * because position error is cheap in time -- 3.3 ns per metre, averaged
      * over the constellation -- so a survey that lands metres is still better
      * than none. */
-    void requestSurvey(bool start, uint32_t durS = 86400, uint32_t accMm = 3000);
+    void requestSurvey(bool start, uint32_t durS = 86400, uint32_t accMm = 30000);
     void requestFixPosition();
     /* Learn the time mode from the receiver, and put a known position hold back
      * after something has cleared it. */

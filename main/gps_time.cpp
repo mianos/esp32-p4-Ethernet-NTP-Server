@@ -178,6 +178,31 @@ void GpsTime::applyBias(bool on)
     gpio_set_level(static_cast<gpio_num_t>(kAntDrivePin), on ? 0 : 1);
 }
 
+namespace {
+
+/* Integer square root, for turning a variance in mm squared into an accuracy in
+ * mm without pulling in floats. */
+uint32_t isqrt(uint32_t v)
+{
+    uint32_t r = 0;
+    uint32_t bit = 1u << 30;
+    while (bit > v) {
+        bit >>= 2;
+    }
+    while (bit != 0) {
+        if (v >= r + bit) {
+            v -= r + bit;
+            r = (r >> 1) + bit;
+        } else {
+            r >>= 1;
+        }
+        bit >>= 2;
+    }
+    return r;
+}
+
+}  // namespace
+
 void GpsTime::requestAntennaBias(bool on)
 {
     m_biasReq = on ? 1 : 0;
@@ -815,17 +840,16 @@ void GpsTime::task()
             if (cmd == 1) {
                 tm[0]    = 1; /* survey-in */
                 minDur   = m_svinDurS;
-                /* Two conversions, both the receiver's units rather than the
-                 * caller's: the limit is a *variance*, and the receiver works
-                 * in centimetres while everybody thinks in millimetres. So a
-                 * requested 3000 mm is 300 cm is 90000 of variance. The
-                 * centimetres are not documented where it matters -- what
-                 * settled it is that the ECEF the receiver reports has a
-                 * magnitude of 6.37e8, which is 6371 km in centimetres and 637
-                 * km in millimetres, and 637 km is a tenth of the way to the
-                 * centre of the earth. */
-                const uint32_t cm = m_svinAccMm / 10;
-                accLimit = cm * cm;
+                /* The limit is a *variance*, so it is squared -- and in mm
+                 * squared, even though the positions in the same message are in
+                 * centimetres. Mixed units, which is why this was got wrong
+                 * once in each direction. What settles it is behaviour rather
+                 * than a datasheet: this site's variance sits near 6.8e8, a
+                 * limit of 9e8 lets the survey finish and a limit of 9e6 never
+                 * does, so the two numbers are compared directly and direct
+                 * comparison of that magnitude is only millimetres. The cap
+                 * keeps the square inside a uint32 (60000^2 is 3.6e9). */
+                accLimit = m_svinAccMm * m_svinAccMm;
             } else if (cmd == 3) {
                 /* ECEF from the receiver's own mean: it reports ECEF and takes
                  * ECEF, so staying in it avoids a projection between two things
@@ -848,8 +872,17 @@ void GpsTime::task()
                 m_holdWanted = cmd == 3;
                 m_svinAtUs = 0;
                 if (cmd == 1) {
-                    ESP_LOGW(TAG, "survey-in started: %u s minimum, %u mm variance limit",
-                             static_cast<unsigned>(minDur), static_cast<unsigned>(accLimit));
+                    ESP_LOGW(TAG, "survey-in started: %u s minimum, %u mm limit",
+                             static_cast<unsigned>(minDur), static_cast<unsigned>(m_svinAccMm));
+                    /* The limit is compared against the site's wander, so one
+                     * below what the receiver is already scattering can never
+                     * be met and the survey will run the duration out. Say so
+                     * at the start rather than 24 hours later. */
+                    if (m_svinAcc != 0 && m_svinAcc > accLimit) {
+                        ESP_LOGW(TAG, "  the limit is tighter than this site scatters (%u mm "
+                                      "now): expect it to run the full duration",
+                                 static_cast<unsigned>(isqrt(m_svinAcc)));
+                    }
                 } else if (cmd == 3) {
                     ESP_LOGW(TAG, "position locked fixed at %d %d %d mm", m_svinMean[0],
                              m_svinMean[1], m_svinMean[2]);
@@ -1631,31 +1664,6 @@ void GpsTime::onNavSat(const uint8_t *p, uint16_t len)
     portEXIT_CRITICAL(&m_mux);
 }
 
-namespace {
-
-/* Integer square root, for turning a variance in mm squared into an accuracy in
- * mm without pulling in floats. */
-uint32_t isqrt(uint32_t v)
-{
-    uint32_t r = 0;
-    uint32_t bit = 1u << 30;
-    while (bit > v) {
-        bit >>= 2;
-    }
-    while (bit != 0) {
-        if (v >= r + bit) {
-            v -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    return r;
-}
-
-}  // namespace
-
 void GpsTime::onNavSvin(const uint8_t *p, uint16_t len)
 {
     /* UBX-TIM-SVIN: dur U4, meanX/Y/Z I4, meanV U4, obs U4, valid, active,
@@ -1663,10 +1671,10 @@ void GpsTime::onNavSvin(const uint8_t *p, uint16_t len)
      * running (dur, obs and active all read correctly; nothing else in the
      * message moves that way in step with a survey).
      *
-     * meanV is a **variance**, not an accuracy, and its unit follows the
-     * position's -- centimetres here, so cm squared. It is square-rooted for
-     * the accuracy and scaled to millimetres, and the limit is put in the same
-     * cm-squared terms when it is set.
+     * meanV is a **variance in mm squared**, not an accuracy in mm, so it gets
+     * square-rooted for display and the limit is squared when it is set. Note
+     * that it is millimetres even though the positions beside it are
+     * centimetres: the receiver mixes units inside one message.
      *
      * The mean is kept after the survey ends, because locking the position
      * afterwards is the whole point of having run one and the receiver carries
@@ -2235,8 +2243,7 @@ GpsTime::Status GpsTime::status() const
     }
     st.timeMode = m_tmode == 1 ? "survey" : m_tmode == 2 ? "fixed" : "moving";
     st.svinDurS = static_cast<double>(m_svinDur);
-    /* cm of standard deviation, in mm, for a figure in mm. */
-    st.svinAccMm = static_cast<double>(isqrt(m_svinAcc)) * 10.0;
+    st.svinAccMm = static_cast<double>(isqrt(m_svinAcc));
     st.svinVarMm2 = static_cast<double>(m_svinAcc);
     st.svinObs  = static_cast<double>(m_svinObs);
     st.svinValid = m_svinValid;

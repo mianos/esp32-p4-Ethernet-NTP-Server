@@ -724,10 +724,16 @@ esp_err_t NtpWebServer::gps_survey_post_handler(httpd_req_t *req)
     if (hours < 2 || hours > 48) {
         return sendJsonError(req, 400, "hours must be 2..48");
     }
-    double accMm = 3000;
+    /* Default 30 m, not the 3 m that "survey-grade" suggests. The limit is
+     * compared against the receiver's mean variance -- the *site's wander*,
+     * measured here at about 26 m -- and not against how well the mean is known.
+     * A limit under the wander does not make the result better, it only stops
+     * the survey ever satisfying its own condition and leaves it running to the
+     * duration with valid false. 30 m clears this site; 3 m never did. */
+    double accMm = 30000;
     doc.GetField("acc_mm", accMm);
-    if (accMm < 50 || accMm > 20000) {
-        return sendJsonError(req, 400, "acc_mm must be 50..20000");
+    if (accMm < 50 || accMm > 60000) {
+        return sendJsonError(req, 400, "acc_mm must be 50..60000");
     }
 
     GpsTime::instance().requestSurvey(true, static_cast<uint32_t>(hours * 3600),

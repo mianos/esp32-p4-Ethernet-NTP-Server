@@ -775,11 +775,17 @@ $ curl -s -X POST -d '{"action":"fix"}'   http://192.0.2.20/gps/survey    # lock
 $ curl -s -X POST -d '{"action":"stop"}'  http://192.0.2.20/gps/survey    # back to moving
 ```
 
-`acc_mm` is required rather than given a tight default, because it is what decides
-whether the survey ever finishes: `CFG-TMODE2` ends a survey only when the minimum
-duration **and** the mean variance limit are both met. A limit tighter than the sky
-supports runs until somebody gives up — and while a survey runs the position is
-*not* held, which is worse than the moving mode it replaced.
+`CFG-TMODE2` ends a survey only when the minimum duration **and** the mean variance
+limit are both met, so `acc_mm` decides whether it ever finishes. The default is
+**30 m, not the 3 m "survey-grade" suggests**, because the limit is compared against
+the *site's wander* — measured here at about 26–30 m — and not against how well the
+mean is known. A limit under the wander does not give a better position, it only
+means the survey never satisfies its own condition: the 2 h run at 3 m ended with
+`valid` false having scrolled from 32 m to 26 m and stopped. 30 m crosses within
+about five minutes on this site
+
+A start whose limit is tighter than what the receiver is already scattering is
+logged as such, rather than being discovered a day later.
 
 `gnss`'s siblings: `gps_time_mode` is `moving`, `survey` or `fixed`; `gps_svin_dur_s`,
 `gps_svin_obs`, `gps_svin_valid`, `gps_svin_age_s` and the accuracy pair
@@ -799,9 +805,13 @@ prefix is the tell: this is a TIM firmware, and the `onNavSvin` parser reads `du
 the mean position, `meanV` and `obs` from offsets confirmed against live frames
 rather than from a specification.
 
-`meanV` is a **variance in mm²**, not an accuracy in mm. The API takes mm and squares
-it on the way in; the read-back divides it back, and `gps_svin_acc_mm` is the square
-root. Both are published so a disagreement between them is visible.
+`meanV` is a **variance in mm²**, not an accuracy in mm — and in millimetres even
+though the positions beside it in the same message are in **centimetres**. Mixed
+units: what settles the variance being millimetres is behaviour rather than a
+datasheet, since this site sits near 6.8e8 and a limit of 9e8 finishes a survey
+while 9e6 never can, so the two are compared directly. The API takes an accuracy in
+mm and squares it on the way in; the read-back roots it, and both `gps_svin_var_mm2`
+and `gps_svin_acc_mm` are published so a disagreement is visible.
 
 Changing the time mode while one is already running does not restart it — the
 duration keeps counting. `stop` then `start` is the way to begin again with
