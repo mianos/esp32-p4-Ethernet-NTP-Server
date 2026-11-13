@@ -240,11 +240,28 @@ void GpsTime::bridgeTask()
                 if (n <= 0) {
                     break; /* closed */
                 }
+                /* Log what the client sends, as hex. u-center builds these and
+                 * a refused message is only diagnosable by looking at the bytes
+                 * it actually put on the wire. */
+                char hex[3 * 40 + 1];
+                int  hn = 0;
+                for (int i = 0; i < n && i < 40 && hn < static_cast<int>(sizeof(hex)) - 4; ++i) {
+                    hn += std::snprintf(hex + hn, sizeof(hex) - hn, "%02x ", buf[i]);
+                }
+                ESP_LOGI(TAG, "u-center -> %d bytes: %s", n, hex);
                 uart_write_bytes(kUart, buf, n);
             }
             const int got = uart_read_bytes(kUart, buf, sizeof(buf), 0);
-            if (got > 0 && send(client, buf, got, 0) < 0) {
-                break;
+            if (got > 0) {
+                /* Tapped as well as forwarded, so /healthz keeps working and a
+                 * NAK from the module is recorded rather than vanishing into the
+                 * socket. */
+                for (int i = 0; i < got; ++i) {
+                    feed(buf[i]);
+                }
+                if (send(client, buf, got, 0) < 0) {
+                    break;
+                }
             }
         }
 
