@@ -542,12 +542,28 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
      * has been worked hard on a bench; this restarts the navigation engine
      * without clearing the almanac, which is the cheap way back from a state it
      * will not leave on its own. */
-    GpsTime::instance().requestReset();
-    ESP_LOGW(TAG, "POST /gps/reset from %s: hot start", callerAddress(req).c_str());
+    /* The body is optional, so an empty POST still means the cheap thing. */
+    bool cold = false;
+    const int len = req->content_len;
+    if (len > 0 && len < 512) {
+        char buf[512];
+        const int got = httpd_req_recv(req, buf, len);
+        if (got > 0) {
+            JsonWrapper doc = JsonWrapper::Parse(std::string(buf, static_cast<size_t>(got)));
+            if (!doc.Empty()) {
+                doc.GetField("cold", cold);
+            }
+        }
+    }
+
+    GpsTime::instance().requestReset(cold);
+    ESP_LOGW(TAG, "POST /gps/reset from %s: %s start", callerAddress(req).c_str(),
+             cold ? "cold" : "hot");
 
     JsonWrapper resp;
-    resp.AddItem("reset", "hot start queued");
-    resp.AddItem("note", "the almanac is kept; a cold start needs u-center");
+    resp.AddItem("reset", cold ? "cold start queued" : "hot start queued");
+    resp.AddItem("note", cold ? "the almanac is discarded; expect a slow reacquisition"
+                              : "the almanac is kept; send {\"cold\":true} to discard it");
     return sendJson(req, resp, 200);
 }
 

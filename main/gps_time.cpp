@@ -171,9 +171,10 @@ void GpsTime::requestAntennaBias(bool on)
     m_biasReq = on ? 1 : 0;
 }
 
-void GpsTime::requestReset()
+void GpsTime::requestReset(bool cold)
 {
-    m_resetReq = true;
+    m_resetCold = cold;
+    m_resetReq  = true;
 }
 
 void IRAM_ATTR GpsTime::ppsIsr(void *arg)
@@ -360,11 +361,15 @@ void GpsTime::task()
 
         if (m_resetReq) {
             m_resetReq = false;
-            /* CFG-RST, controlled hot start: restart the navigation engine, keep
-             * the almanac. A module reconfigured into a corner comes back from
-             * this without losing the sky it already knows. */
-            const uint8_t rst[4] = {0x00, 0x00, 0x02, 0x00};
-            ESP_LOGW(TAG, "receiver hot start requested");
+            /* CFG-RST. Hot by default: restart the navigation engine and keep
+             * the almanac, which is the cheap way back from a state a module will
+             * not leave on its own. Cold when asked, which throws the almanac
+             * away -- the thing to try when a hot start changed nothing and the
+             * receiver's own stored state is suspect. */
+            const bool    cold   = m_resetCold;
+            const uint8_t rst[4] = {static_cast<uint8_t>(cold ? 0xFF : 0x00),
+                                    static_cast<uint8_t>(cold ? 0xFF : 0x00), 0x02, 0x00};
+            ESP_LOGW(TAG, "receiver %s start requested", cold ? "COLD" : "hot");
             sendUbx(0x06, 0x04, rst, sizeof(rst));
         }
 

@@ -229,7 +229,7 @@ public:
      * that has been reconfigured into a corner. Both return false if the module
      * refused. */
     void requestAntennaBias(bool on);
-    void requestReset();
+    void requestReset(bool cold = false);
 
 private:
     static constexpr const char *TAG = "gps_time";
@@ -390,6 +390,7 @@ private:
      * that only one thread ever writes the UART or advances the parser. */
     volatile int8_t m_biasReq      = -1; /* -1 none, 0 off, 1 on */
     volatile bool   m_resetReq     = false;
+    volatile bool   m_resetCold    = false;
     int64_t    m_monHwAtUs         = 0;
     uint8_t    m_cn0Max            = 0;
     uint8_t    m_cn0Mean           = 0;
