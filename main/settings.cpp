@@ -38,6 +38,7 @@ Settings::Settings(NvsStorageManager &nvs)
     field("gpsTimeMode", m_gpsTimeMode);
     field("gpsFixedPos", m_gpsFixedPos);
     field("gpsSurvey", m_gpsSurvey);
+    field("antDelayNs", m_antDelayNs);
     field("boots", m_boots);
 
     /* A new TZ string takes effect immediately, including after POST

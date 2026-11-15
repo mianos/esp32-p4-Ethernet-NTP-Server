@@ -94,6 +94,13 @@ public:
     const std::string &gpsTimeMode() const { return m_gpsTimeMode; }
     const std::string &gpsFixedPos() const { return m_gpsFixedPos; }
     const std::string &gpsSurvey() const { return m_gpsSurvey; }
+    /* The antenna lead's one-way delay, in nanoseconds, for the receiver to
+     * subtract. A constant that never averages out, so it is the one error a
+     * single receiver cannot measure for itself and the installer has to state.
+     * Coax runs about 5 ns/m whatever its loss class, so the number is ~5x the
+     * cable length. */
+    const std::string &antDelayNs() const { return m_antDelayNs; }
+    void setAntDelayNs(const std::string &v) { m_antDelayNs = v; }
     /* Power cuts are a normal event here -- street works, storms -- so the count
      * of boots is worth carrying: a survey that vanished is otherwise
      * indistinguishable from one that was never started. */
@@ -127,6 +134,7 @@ private:
     std::string m_gpsTimeMode = "moving";
     std::string m_gpsFixedPos;
     std::string m_gpsSurvey;
+    std::string m_antDelayNs = "0";
     std::string m_boots      = "0";
 
     /* "off", "dhcp", "static", "gps": anything else is Off. Used to seed

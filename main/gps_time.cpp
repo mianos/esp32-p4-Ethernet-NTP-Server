@@ -226,6 +226,11 @@ void GpsTime::requestFixPosition()
     m_svinCmd = 3;
 }
 
+void GpsTime::requestAntDelay()
+{
+    m_tp5Cmd = true;
+}
+
 void GpsTime::onCfgTmode(const uint8_t *p, uint16_t len)
 {
     /* CFG-TMODE2 has no reason to arrive except in answer to a poll: the ACK
@@ -968,6 +973,18 @@ void GpsTime::task()
                          r == 0 ? "rejected" : "unanswered");
             }
         }
+        /* A new cable delay re-sends the pulse frame and nothing else. The
+         * survey and the mask are untouched: this is a property of the lead, and
+         * restarting a day's survey to change it would be a poor trade. */
+        if (m_tp5Cmd) {
+            m_tp5Cmd = false;
+            const int8_t r = sendTp5();
+            m_tp5Acked     = r == 1;
+            m_tp5Naked     = r == 0;
+            if (r != 1) {
+                ESP_LOGW(TAG, "CFG-TP5 delay change %s", r == 0 ? "rejected" : "unanswered");
+            }
+        }
         /* Three more tries at the two messages a module still booting may have
          * refused, ten seconds apart. The boot burst goes out about half a
          * second after power-up, which on this receiver is before it is ready
@@ -1150,6 +1167,43 @@ void GpsTime::advanceBaud()
     configureModule();
 }
 
+/* The pulse frame on its own, so the delay can be changed without re-running the
+ * whole of configureModule() (which throws the acquisition away with a GNSS mask
+ * reset). Split out for that reason only: at boot it is still called from there.
+ * Returns sendAndWait's convention -- 1 ACK, 0 NAK, -1 silence. */
+int8_t GpsTime::sendTp5()
+{
+    uint8_t tp5[32] = {};
+    tp5[1]          = 1; /* version */
+    /* The antenna lead's delay, nanoseconds (offset 4). Positive tells the
+     * receiver the signal arrives late so it brings the pulse forward by the
+     * same amount; leaving it at zero puts the whole cable's delay into the
+     * pulse, where nothing downstream can tell it from a real offset. */
+    const int32_t cableNs = static_cast<int32_t>(std::strtol(Settings::instance().antDelayNs().c_str(),
+                                                             nullptr, 10));
+    std::memcpy(tp5 + 4, &cableNs, 4);
+    /* freqPeriod and freqPeriodLock, in microseconds: isFreq (bit 3) is clear. */
+    constexpr uint32_t kOneHzUs = 1000000;
+    constexpr uint32_t kRatio10 = 429496730; /* 0.1 of the period in 2^-32 */
+    std::memcpy(tp5 + 8, &kOneHzUs, 4);
+    std::memcpy(tp5 + 12, &kOneHzUs, 4);
+    std::memcpy(tp5 + 16, &kRatio10, 4);
+    std::memcpy(tp5 + 20, &kRatio10, 4);
+    /* active, lockGnssFreq, lockedOtherSet, alignToTow, rising, gridUtcGps. */
+    constexpr uint32_t kTp5Flags = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5) | (1u << 6) |
+                                   (1u << 7);
+    std::memcpy(tp5 + 28, &kTp5Flags, 4);
+
+    /* Each result is acted on by the caller rather than by whoever reads the log
+     * later: an ACK means the pulse shape is asserted, a NAK means it is not, and
+     * a silence means the module does not know the message -- which for CFG-TP5
+     * would be a very old receiver indeed. */
+    if (cableNs != 0) {
+        ESP_LOGW(TAG, "pulse cable delay set to %ld ns", static_cast<long>(cableNs));
+    }
+    return sendAndWait(0x06, 0x31, tp5, sizeof(tp5));
+}
+
 void GpsTime::configureModule()
 {
     /* UBX-CFG-MSG (class 0x06, id 0x01): the payload is the message class, its
@@ -1185,28 +1239,14 @@ void GpsTime::configureModule()
      * being clever cannot slow the pulse down when it loses the fix. Rising edge
      * (bit 6), UTC grid (bit 7), aligned to the top of the second (bit 5), 100 ms
      * wide as a ratio of the period -- the module's own default width, so this
-     * asserts the shape rather than changing it. antCableDelay and
-     * userConfigDelay stay zero: the antenna lead's delay is not known, and
-     * pretending a figure would be worse than leaving it. */
-    uint8_t tp5[32] = {};
-    tp5[1]          = 1; /* version */
-    /* freqPeriod and freqPeriodLock, in microseconds: isFreq (bit 3) is clear. */
-    constexpr uint32_t kOneHzUs = 1000000;
-    constexpr uint32_t kRatio10 = 429496730; /* 0.1 of the period in 2^-32 */
-    std::memcpy(tp5 + 8, &kOneHzUs, 4);
-    std::memcpy(tp5 + 12, &kOneHzUs, 4);
-    std::memcpy(tp5 + 16, &kRatio10, 4);
-    std::memcpy(tp5 + 20, &kRatio10, 4);
-    /* active, lockGnssFreq, lockedOtherSet, alignToTow, rising, gridUtcGps. */
-    constexpr uint32_t kTp5Flags = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5) | (1u << 6) |
-                                   (1u << 7);
-    std::memcpy(tp5 + 28, &kTp5Flags, 4);
-
-    /* Each result is acted on here rather than by whoever reads the log later:
-     * an ACK means the pulse shape is asserted, a NAK means it is not, and a
-     * silence means the module does not know the message -- which for CFG-TP5
-     * would be a very old receiver indeed. */
-    int8_t r = sendAndWait(0x06, 0x31, tp5, sizeof(tp5));
+     * asserts the shape rather than changing it.
+     *
+     * Offset 4 is the cable delay in nanoseconds, and the module's own reply to
+     * a CFG-TP5 poll is 32 bytes with the flags at 28 and this field at 4: it is
+     * one antenna-delay slot, not the antCableDelay/rfGroupDelay pair the
+     * 36-byte M8 layout has, so a 32-byte frame is the whole message and the
+     * delay is the first word of it. */
+    int8_t r = sendTp5();
     m_tp5Acked = r == 1;
     m_tp5Naked = r == 0;
     if (r == 1) {
@@ -2205,6 +2245,7 @@ void GpsTime::steer()
     {
         portENTER_CRITICAL(&m_mux);
         m_offsetUs = offsetNs / 1000;
+        m_offsetNs = offsetNs;
         portEXIT_CRITICAL(&m_mux);
     }
 
@@ -2261,6 +2302,7 @@ GpsTime::Status GpsTime::status() const
     st.anchored    = m_anchorValid;
     st.lastFix     = m_lastFix;
     st.offsetUs    = m_offsetUs;
+    st.offsetNs    = m_offsetNs;
     st.ratePpb     = m_ratePpb;
     st.rateSamples = m_rateSamples;
     st.leapSeconds = m_leapSeconds;
@@ -2280,6 +2322,7 @@ GpsTime::Status GpsTime::status() const
     st.antBiasOn         = m_antBiasOn;
     st.antShort          = m_antShort;
     st.antLatched        = m_antLatched;
+    st.antDelayNs        = std::strtod(Settings::instance().antDelayNs().c_str(), nullptr);
     st.antCfgAcked       = m_antCfgAcked;
     st.antCfgRejected    = m_antCfgNaked;
     st.antStatus         = m_antStatus;

@@ -100,6 +100,11 @@ public:
         bool     anchored   = false; /* an edge and a NAV-PVT have been paired */
         time_t   lastFix    = 0;     /* UTC second of the last accepted anchor */
         int64_t  offsetUs   = 0;     /* GPS minus the system clock, last measured */
+        /* The same offset in nanoseconds. Microseconds hide the one step a cable
+         * delay change makes -- a few metres of lead is a few tens of ns -- and
+         * that step is the only way to check the correction went the right way
+         * without a reference the box does not have. */
+        int64_t  offsetNs   = 0;
         bool     locked     = false; /* a stratum-1 reference right now */
 
         /* The servo: esp_timer's rate error against the GPS in parts per
@@ -145,6 +150,9 @@ public:
         bool     antBiasOn     = false;
         bool     antShort      = false;
         bool     antLatched    = false;
+        /* What the receiver has been told the lead delays the signal by, so the
+         * installed figure can be read back rather than remembered. */
+        double   antDelayNs    = 0;
 
         bool     tp5Rejected   = false;
         bool     timTpRejected = false;
@@ -289,6 +297,9 @@ public:
      * than none. */
     void requestSurvey(bool start, uint32_t durS = 86400, uint32_t accMm = 30000);
     void requestFixPosition();
+    /* Re-send the pulse frame with a new antenna cable delay, in nanoseconds.
+     * Persisted by the caller: this only queues the frame for the task. */
+    void requestAntDelay();
     /* Learn the time mode from the receiver, and put a known position hold back
      * after something has cleared it. */
     void adoptTimeMode();
@@ -352,6 +363,7 @@ private:
      * reader would take the client's bytes. */
     int8_t  sendAndWait(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len,
                         uint32_t timeoutUs = 250000);
+    int8_t  sendTp5();
     void    pump(int64_t timeoutUs);
     uint8_t m_awaitCls      = 0;
     uint8_t m_awaitId       = 0;
@@ -403,6 +415,7 @@ private:
     uint8_t      m_fixType      = 0;
     uint8_t      m_satellites   = 0;
     int64_t      m_offsetUs     = 0;
+    int64_t      m_offsetNs     = 0;
     int32_t      m_ratePpb      = 0; /* the servo's answer, used by now() */
     uint16_t     m_rateSamples  = 0;
 
@@ -507,6 +520,7 @@ private:
      * position as a fixed one. The reported position is the receiver's own mean
      * from NAV-SVIN, kept here so "lock it" does not have to invent one. */
     volatile uint8_t m_svinCmd     = 0;
+    volatile bool    m_tp5Cmd      = false;
     volatile uint32_t m_svinDurS   = 86400;
     volatile uint32_t m_svinAccMm  = 3000;
     uint8_t          m_tmode        = 0; /* 0 disabled, 1 surveying, 2 fixed */

@@ -483,6 +483,7 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
 
     /* The servo and what it buys. */
     doc.AddItem("offset_us", static_cast<double>(gps.offsetUs));
+    doc.AddItem("offset_ns", static_cast<double>(gps.offsetNs));
     doc.AddItem("rate_ppm", static_cast<double>(gps.ratePpb) / 1000.0);
     doc.AddItem("rate_n", static_cast<double>(gps.rateSamples));
     doc.AddItem("fit_us", static_cast<double>(gps.fitUs));
@@ -529,6 +530,7 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         doc.AddItem("ant_power", gps.antPower <= 2 ? kAntPower[gps.antPower] : "unknown");
         doc.AddItem("ant_bias", gps.antBiasOn ? "on" : "off");
         doc.AddItem("ant_short", gps.antShort);
+        doc.AddItem("ant_delay_ns", gps.antDelayNs);
         doc.AddItem("noise_dbm", -static_cast<double>(gps.noisePerMs));
         doc.AddItem("agc", static_cast<double>(gps.agcCnt));
         doc.AddItem("jam_ind", static_cast<double>(gps.jamInd));
@@ -581,20 +583,50 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    /* Two independent jobs on one endpoint: the bias switch, and the lead's
+     * delay. Either may be present. */
     std::string bias;
-    if (!doc.GetField("bias", bias) || (bias != "on" && bias != "off")) {
+    const bool  haveBias = doc.GetField("bias", bias);
+    double      delayNs  = 0;
+    const bool  haveDelay = doc.GetField("delay_ns", delayNs);
+
+    if (!haveBias && !haveDelay) {
+        return sendJsonError(req, 400, "give \"bias\" (on|off) and/or \"delay_ns\"");
+    }
+    if (haveBias && bias != "on" && bias != "off") {
         return sendJsonError(req, 400, "bias must be \"on\" or \"off\"");
     }
+    /* 200 us is more than 40 km of cable; below that the resolution of the
+     * receiver's own solution is the limit, not the number. */
+    if (haveDelay && (delayNs < 0 || delayNs > 200000)) {
+        return sendJsonError(req, 400, "delay_ns must be 0..200000");
+    }
 
-    GpsTime::instance().requestAntennaBias(bias == "on");
-    ESP_LOGW(TAG, "POST /gps/ant from %s: bias %s", callerAddress(req).c_str(), bias.c_str());
+    JsonWrapper resp;
+    if (haveBias) {
+        GpsTime::instance().requestAntennaBias(bias == "on");
+        ESP_LOGW(TAG, "POST /gps/ant from %s: bias %s", callerAddress(req).c_str(), bias.c_str());
+        resp.AddItem("requested", bias);
+    }
+    if (haveDelay) {
+        /* Coax is about 5 ns per metre whatever its loss class (velocity factor
+         * 0.66, and the spread across real cables is under 20%). The delay is
+         * taken off the pulse, which is the same correction whether the extra
+         * metres are in the lead or the antenna is simply further away. */
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(delayNs));
+        Settings::instance().setAntDelayNs(buf);
+        GpsTime::instance().requestAntDelay();
+        ESP_LOGW(TAG, "POST /gps/ant from %s: cable delay %u ns", callerAddress(req).c_str(),
+                 static_cast<unsigned>(delayNs));
+        resp.AddItem("delay_ns", delayNs);
+    }
 
     /* Answered before it has happened: the GPS task owns the UART, so the
      * change is queued for its next pass. Say so, and say when to look. */
-    JsonWrapper resp;
-    resp.AddItem("requested", bias);
     resp.AddItem("read_back_after_s", 3.0);
-    resp.AddItem("note", "drives GPIO17; gps_ant_bias and gps_ant_short report the result");
+    resp.AddItem("note", "drives GPIO17 for the bias; ant_bias, ant_short and ant_delay_ns at "
+                         "/gps/info report the result");
     return sendJson(req, resp, 200);
 }
 
