@@ -288,6 +288,8 @@ public:
      * after something has cleared it. */
     void adoptTimeMode();
     void reassertFix();
+    void restoreTimeMode();
+    void saveTimeMode();
 
     /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort.
      *

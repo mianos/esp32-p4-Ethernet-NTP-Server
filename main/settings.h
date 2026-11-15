@@ -83,6 +83,26 @@ public:
      * anything -- it can only spend electricity. */
     bool serveNtp() const { return m_serveNtpOn.load(std::memory_order_relaxed); }
 
+    /* Where the receiver's time mode was left, so a power cut does not cost it.
+     * The grid goes off, and a locked position or a survey in progress lives in
+     * the module's RAM and dies with the supply -- there is no other copy.
+     *
+     * Three strings, encoded rather than structured, because that is what this
+     * config holds: "moving", "fixed" or "survey"; the fixed position as
+     * "x,y,z,acc"; and the survey parameters as "hours,acc_mm" so a wanted
+     * survey can be resumed rather than silently forgotten. */
+    const std::string &gpsTimeMode() const { return m_gpsTimeMode; }
+    const std::string &gpsFixedPos() const { return m_gpsFixedPos; }
+    const std::string &gpsSurvey() const { return m_gpsSurvey; }
+    /* Power cuts are a normal event here -- street works, storms -- so the count
+     * of boots is worth carrying: a survey that vanished is otherwise
+     * indistinguishable from one that was never started. */
+    const std::string &boots() const { return m_boots; }
+    void setBoots(const std::string &v) { m_boots = v; }
+    void setGpsTimeMode(const std::string &v) { m_gpsTimeMode = v; }
+    void setGpsFixedPos(const std::string &v) { m_gpsFixedPos = v; }
+    void setGpsSurvey(const std::string &v) { m_gpsSurvey = v; }
+
     /* Apply whichever registered keys are present in `doc`; unknown keys and
      * wrong-typed values are ignored. Long values are truncated to
      * kMaxValueLen. SettingsBase fires the onChange callbacks for the fields
@@ -104,6 +124,10 @@ private:
     std::string m_timeSource = "dhcp";
     std::string m_ntpServer;
     std::string m_serveNtp   = "on";
+    std::string m_gpsTimeMode = "moving";
+    std::string m_gpsFixedPos;
+    std::string m_gpsSurvey;
+    std::string m_boots      = "0";
 
     /* "off", "dhcp", "static", "gps": anything else is Off. Used to seed
      * m_timeSourceEnum in begin() and on every change. */

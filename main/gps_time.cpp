@@ -265,9 +265,68 @@ void GpsTime::adoptTimeMode()
     sendAndWait(0x06, 0x3D, nullptr, 0);
 }
 
+void GpsTime::saveTimeMode()
+{
+    /* Called on every transition. NVS writes are cheap at this rate and the
+     * whole point is that the next boot knows what the last one wanted. */
+    Settings &settings = Settings::instance();
+    settings.setGpsTimeMode(m_tmode == 1 ? "survey" : m_tmode == 2 ? "fixed" : "moving");
+    settings.save();
+}
+
+void GpsTime::restoreTimeMode()
+{
+    /* The module's RAM died with the supply, so what was wanted is read back
+     * from NVS and re-sent. A survey resumes with its own parameters; a locked
+     * position goes back as it was. Without this, a power cut (or street works)
+     * costs a day's survey and leaves nothing to say it ever existed. */
+    Settings   &settings = Settings::instance();
+    const std::string &mode = settings.gpsTimeMode();
+
+    if (mode == "fixed") {
+        long long x = 0;
+        long long y = 0;
+        long long z = 0;
+        unsigned  long acc = 0;
+        if (std::sscanf(settings.gpsFixedPos().c_str(), "%lld,%lld,%lld,%lu", &x, &y, &z, &acc) == 4) {
+            for (int i = 0; i < 3; ++i) {
+                m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
+            }
+            m_fixedAcc   = acc;
+            m_fixedValid = true;
+            m_holdWanted = true;
+            ESP_LOGW(TAG, "position hold restored from NVS");
+            return;
+        }
+    }
+    if (mode == "survey") {
+        unsigned long hours = 0;
+        unsigned long accMm = 0;
+        if (std::sscanf(settings.gpsSurvey().c_str(), "%lu,%lu", &hours, &accMm) == 2 && hours >= 2 &&
+            hours <= 48 && accMm >= 50 && accMm <= 60000) {
+            m_svinDurS  = hours * 3600;
+            m_svinAccMm = accMm;
+            m_svinCmd   = 1;
+            ESP_LOGW(TAG, "survey resumed from NVS: %lu h, %lu mm", hours, accMm);
+        }
+    }
+}
+
 void GpsTime::reassertFix()
 {
     if (!m_fixedValid || !m_holdWanted) {
+        /* Not a hold: a survey may be the thing that was wanted. Restarting it
+         * loses its elapsed time, which is still better than a reset silently
+         * ending a day's run. */
+        unsigned long hours = 0;
+        unsigned long accMm = 0;
+        if (Settings::instance().gpsTimeMode() == "survey" &&
+            std::sscanf(Settings::instance().gpsSurvey().c_str(), "%lu,%lu", &hours, &accMm) == 2) {
+            m_svinDurS  = hours * 3600;
+            m_svinAccMm = accMm;
+            m_svinCmd   = 1;
+            ESP_LOGW(TAG, "survey restarted after the reset");
+        }
         return;
     }
     uint8_t tm[28] = {};
@@ -737,6 +796,7 @@ void GpsTime::task()
      * make room for the messages this reference actually reads. Harmless noise
      * if there is nothing on the other end. */
     configureModule();
+    restoreTimeMode();
 
     /* Power the antenna once the receiver has been configured. Off during the
      * baud scan so a wrong lead is not sitting powered through it. */
@@ -870,6 +930,20 @@ void GpsTime::task()
             if (r == 1) {
                 m_tmode      = cmd == 1 ? 1 : cmd == 3 ? 2 : 0;
                 m_holdWanted = cmd == 3;
+                if (cmd == 1) {
+                    char buf[32];
+                    std::snprintf(buf, sizeof(buf), "%u,%u", static_cast<unsigned>(m_svinDurS / 3600),
+                                  static_cast<unsigned>(m_svinAccMm));
+                    Settings::instance().setGpsSurvey(buf);
+                }
+                if (cmd == 3) {
+                    char buf[48];
+                    std::snprintf(buf, sizeof(buf), "%ld,%ld,%ld,%lu",
+                                  static_cast<long>(m_svinMean[0]), static_cast<long>(m_svinMean[1]),
+                                  static_cast<long>(m_svinMean[2]), static_cast<unsigned long>(m_svinAcc));
+                    Settings::instance().setGpsFixedPos(buf);
+                }
+                saveTimeMode();
                 m_svinAtUs = 0;
                 if (cmd == 1) {
                     ESP_LOGW(TAG, "survey-in started: %u s minimum, %u mm limit",

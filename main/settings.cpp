@@ -35,6 +35,10 @@ Settings::Settings(NvsStorageManager &nvs)
     field("timeSource", m_timeSource);
     field("ntpServer", m_ntpServer);
     field("serveNtp", m_serveNtp);
+    field("gpsTimeMode", m_gpsTimeMode);
+    field("gpsFixedPos", m_gpsFixedPos);
+    field("gpsSurvey", m_gpsSurvey);
+    field("boots", m_boots);
 
     /* A new TZ string takes effect immediately, including after POST
      * /config/reset. Safe to attach here: it only touches this object and the C
@@ -51,6 +55,10 @@ Settings::Settings(NvsStorageManager &nvs)
 void Settings::begin()
 {
     load();           // stored blob over the defaults (SettingsBase)
+    /* Counted before anything else can fail, and saved at once: the interesting
+     * boot is the one that does not reach the end. */
+    m_boots = std::to_string(std::strtoul(m_boots.c_str(), nullptr, 10) + 1);
+    save();
     /* The onChange hooks only fire for a field that actually changed, so a
      * stored value equal to the default would never reach the atomics without
      * this. */

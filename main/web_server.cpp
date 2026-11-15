@@ -50,6 +50,26 @@ constexpr const char *kNotAnImage = "not a valid app image for this chip";
  * context carries nothing; WebServer just wants a non-null one for /healthz. */
 WebContext s_web_context;
 
+/* esp_reset_reason() as text. BROWNOUT and POWERON are what the mains looks
+ * like; PANIC and TASK_WDT are the firmware's own doing, and conflating them
+ * wastes an afternoon. */
+const char *resetReasonText()
+{
+    switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "power-on";
+    case ESP_RST_BROWNOUT: return "brown-out";
+    case ESP_RST_EXT:      return "external-pin";
+    case ESP_RST_SW:       return "software";
+    case ESP_RST_PANIC:    return "panic";
+    case ESP_RST_INT_WDT:  return "interrupt-watchdog";
+    case ESP_RST_TASK_WDT: return "task-watchdog";
+    case ESP_RST_WDT:      return "other-watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_SDIO:     return "sdio";
+    default:               return "unknown";
+    }
+}
+
 /* The RTC reads 1970 until something sets it, and this device has no RTC of
  * its own, so say which it is instead of presenting 1970 as a fact. */
 bool clockIsSet()
@@ -182,6 +202,10 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
     }
     const esp_partition_t *running = esp_ota_get_running_partition();
     json.AddItem("partition", running != nullptr ? running->label : "?");
+    /* Why this boot happened, and how many there have been. A power cut used to
+     * be inferable only from what had silently gone missing. */
+    json.AddItem("reset_reason", resetReasonText());
+    json.AddItem("boots", std::strtoul(Settings::instance().boots().c_str(), nullptr, 10));
     json.AddItem("heap_free", static_cast<double>(esp_get_free_heap_size()));
 
     const Settings &settings = Settings::instance();
