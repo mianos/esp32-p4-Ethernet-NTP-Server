@@ -244,7 +244,7 @@ void GpsTime::onCfgTmode(const uint8_t *p, uint16_t len)
     const uint8_t mode = p[0];
     int32_t       mean[3];
     for (int i = 0; i < 3; ++i) {
-        std::memcpy(&mean[i], p + 4 + 4 * i, 4);
+        mean[i] = text::getLe<int32_t>(p + 4 + 4 * i);
     }
     const uint32_t acc = static_cast<uint32_t>(p[16]) | (static_cast<uint32_t>(p[17]) << 8) |
                          (static_cast<uint32_t>(p[18]) << 16) | (static_cast<uint32_t>(p[19]) << 24);
@@ -289,11 +289,11 @@ void GpsTime::restoreTimeMode()
     const std::string &mode = settings.gpsTimeMode();
 
     if (mode == "fixed") {
-        long long x = 0;
-        long long y = 0;
-        long long z = 0;
-        unsigned  long acc = 0;
-        if (std::sscanf(settings.gpsFixedPos().c_str(), "%lld,%lld,%lld,%lu", &x, &y, &z, &acc) == 4) {
+        long long     x   = 0;
+        long long     y   = 0;
+        long long     z   = 0;
+        unsigned long acc = 0;
+        if (text::getList(settings.gpsFixedPos(), ',', x, y, z, acc)) {
             for (int i = 0; i < 3; ++i) {
                 m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
             }
@@ -307,8 +307,8 @@ void GpsTime::restoreTimeMode()
     if (mode == "survey") {
         unsigned long hours = 0;
         unsigned long accMm = 0;
-        if (std::sscanf(settings.gpsSurvey().c_str(), "%lu,%lu", &hours, &accMm) == 2 && hours >= 2 &&
-            hours <= 48 && accMm >= 50 && accMm <= 60000) {
+        if (text::getList(settings.gpsSurvey(), ',', hours, accMm) && hours >= 2 && hours <= 48 &&
+            accMm >= 50 && accMm <= 60000) {
             m_svinDurS  = hours * 3600;
             m_svinAccMm = accMm;
             m_svinCmd   = 1;
@@ -326,7 +326,7 @@ void GpsTime::reassertFix()
         unsigned long hours = 0;
         unsigned long accMm = 0;
         if (Settings::instance().gpsTimeMode() == "survey" &&
-            std::sscanf(Settings::instance().gpsSurvey().c_str(), "%lu,%lu", &hours, &accMm) == 2) {
+            text::getList(Settings::instance().gpsSurvey(), ',', hours, accMm)) {
             m_svinDurS  = hours * 3600;
             m_svinAccMm = accMm;
             m_svinCmd   = 1;
@@ -337,9 +337,9 @@ void GpsTime::reassertFix()
     uint8_t tm[28] = {};
     tm[0]          = 2; /* fixed */
     for (int i = 0; i < 3; ++i) {
-        std::memcpy(tm + 4 + 4 * i, &m_fixedMean[i], 4);
+        text::putLe(tm + 4 + 4 * i, m_fixedMean[i]);
     }
-    std::memcpy(tm + 16, &m_fixedAcc, 4);
+    text::putLe(tm + 16, m_fixedAcc);
     if (sendAndWait(0x06, 0x3D, tm, sizeof(tm)) == 1) {
         m_tmode = 2;
         ESP_LOGW(TAG, "position hold put back after the reset");
@@ -426,7 +426,7 @@ void GpsTime::bridgeTask()
          * listening socket itself failed, so after the first session the task
          * never read the port again and the receiver kept a session's rates. */
         auto dropClient = [&](int i, const char *why) {
-            snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "%s", why);
+            text::put(m_bridgeEnd, "{}", why);
             ESP_LOGW(TAG, "client gone: %s", why);
             close(clients[i]);
             clients[i] = -1;
@@ -486,14 +486,14 @@ void GpsTime::bridgeTask()
                          * the outside to one that attaches and is ignored, and
                          * telling those apart has cost a round already. */
                         m_bridgeRefused = m_bridgeRefused + 1;
-                        snprintf(m_bridgeEnd, sizeof(m_bridgeEnd), "refused: both slots taken");
+                        text::put(m_bridgeEnd, "refused: both slots taken");
                         ESP_LOGW(TAG, "client refused from %s: both slots taken",
                                  inet_ntoa(peer.sin_addr));
                         close(c);
                     } else {
                         fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK);
                         clients[slot] = c;
-                        snprintf(m_bridgeLast, sizeof(m_bridgeLast), "attach");
+                        text::put(m_bridgeLast, "attach");
                         ESP_LOGW(TAG, "client attached from %s", inet_ntoa(peer.sin_addr));
                         m_bridgeSessions = m_bridgeSessions + 1;
                         m_bridgeClients  = m_bridgeClients + 1;
@@ -520,9 +520,9 @@ void GpsTime::bridgeTask()
                 uint8_t       in[256];
                 const int     n = recv(clients[i], in, sizeof(in), 0);
                 if (n <= 0 && !(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-                    char why[48];
-                    snprintf(why, sizeof(why), "recv %d errno %d", n, errno);
-                    dropClient(i, why);
+                    text::Buf<48> why;
+                    text::put(why, "recv {} errno {}", n, errno);
+                    dropClient(i, why.data());
                     continue;
                 }
                 if (n <= 0) {
@@ -530,13 +530,16 @@ void GpsTime::bridgeTask()
                 }
                 m_bridgeRx = m_bridgeRx + static_cast<uint32_t>(n);
 
-                char hex[3 * 40 + 1] = {};
-                int  hn              = 0;
-                for (int k = 0; k < n && k < 40 && hn < static_cast<int>(sizeof(hex)) - 4; ++k) {
-                    hn += snprintf(hex + hn, sizeof(hex) - hn, "%02x ", in[k]);
+                /* Built up as text and then cut to the buffer: snprintf returns
+                 * the length it *wanted*, so accumulating its return value into
+                 * an offset lets the offset pass the end of the array on a long
+                 * frame and `sizeof - offset` underflow to something huge. */
+                std::string hex;
+                for (int k = 0; k < n && k < 40; ++k) {
+                    hex += std::format("{:02x} ", static_cast<unsigned>(in[k]));
                 }
-                snprintf(m_bridgeLast, sizeof(m_bridgeLast), "%s", hex);
-                ESP_LOGI(TAG, "client -> %d bytes: %s", n, hex);
+                text::put(m_bridgeLast, "{}", hex);
+                ESP_LOGI(TAG, "client -> %d bytes: %s", n, hex.c_str());
 
                 /* A port-rate change has to be applied after the frame is out, or
                  * the module receives the request at the wrong rate. */
@@ -635,9 +638,9 @@ void GpsTime::bridgeTask()
                         } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                             vTaskDelay(pdMS_TO_TICKS(2));
                         } else {
-                            char why[48];
-                            snprintf(why, sizeof(why), "send errno %d", errno);
-                            dropClient(i, why);
+                            text::Buf<48> why;
+                            text::put(why, "send errno {}", errno);
+                            dropClient(i, why.data());
                             break;
                         }
                     }
@@ -924,29 +927,29 @@ void GpsTime::task()
                 tm[0]    = 2; /* fixed */
                 fixedAcc = m_svinAcc;
                 for (int i = 0; i < 3; ++i) {
-                    std::memcpy(tm + 4 + 4 * i, &m_svinMean[i], 4);
+                    text::putLe(tm + 4 + 4 * i, m_svinMean[i]);
                 }
             }
             /* flags stay zero: ECEF, not LLA. */
-            std::memcpy(tm + 16, &fixedAcc, 4);
-            std::memcpy(tm + 20, &minDur, 4);
-            std::memcpy(tm + 24, &accLimit, 4);
+            text::putLe(tm + 16, fixedAcc);
+            text::putLe(tm + 20, minDur);
+            text::putLe(tm + 24, accLimit);
             const int8_t r = sendAndWait(0x06, 0x3D, tm, sizeof(tm));
             if (r == 1) {
                 m_tmode      = cmd == 1 ? 1 : cmd == 3 ? 2 : 0;
                 m_holdWanted = cmd == 3;
+                /* The two persisted forms, read once into plain values: the
+                 * members are volatile, and a volatile reference is not one of
+                 * the types std::formatter is specialised for. */
                 if (cmd == 1) {
-                    char buf[32];
-                    std::snprintf(buf, sizeof(buf), "%u,%u", static_cast<unsigned>(m_svinDurS / 3600),
-                                  static_cast<unsigned>(m_svinAccMm));
-                    Settings::instance().setGpsSurvey(buf);
+                    const auto hours = static_cast<uint32_t>(m_svinDurS / 3600);
+                    const auto accMm = static_cast<uint32_t>(m_svinAccMm);
+                    Settings::instance().setGpsSurvey(std::format("{},{}", hours, accMm));
                 }
                 if (cmd == 3) {
-                    char buf[48];
-                    std::snprintf(buf, sizeof(buf), "%ld,%ld,%ld,%lu",
-                                  static_cast<long>(m_svinMean[0]), static_cast<long>(m_svinMean[1]),
-                                  static_cast<long>(m_svinMean[2]), static_cast<unsigned long>(m_svinAcc));
-                    Settings::instance().setGpsFixedPos(buf);
+                    Settings::instance().setGpsFixedPos(std::format("{},{},{},{}", m_svinMean[0],
+                                                                   m_svinMean[1], m_svinMean[2],
+                                                                   m_svinAcc));
                 }
                 saveTimeMode();
                 m_svinAtUs = 0;
@@ -1179,20 +1182,21 @@ int8_t GpsTime::sendTp5()
      * receiver the signal arrives late so it brings the pulse forward by the
      * same amount; leaving it at zero puts the whole cable's delay into the
      * pulse, where nothing downstream can tell it from a real offset. */
-    const int32_t cableNs = static_cast<int32_t>(std::strtol(Settings::instance().antDelayNs().c_str(),
-                                                             nullptr, 10));
-    std::memcpy(tp5 + 4, &cableNs, 4);
+    unsigned long asked = 0;
+    text::getList(Settings::instance().antDelayNs(), ',', asked);
+    const auto cableNs = static_cast<int32_t>(asked > 200000 ? 200000 : asked);
+    text::putLe(tp5 + 4, cableNs);
     /* freqPeriod and freqPeriodLock, in microseconds: isFreq (bit 3) is clear. */
     constexpr uint32_t kOneHzUs = 1000000;
     constexpr uint32_t kRatio10 = 429496730; /* 0.1 of the period in 2^-32 */
-    std::memcpy(tp5 + 8, &kOneHzUs, 4);
-    std::memcpy(tp5 + 12, &kOneHzUs, 4);
-    std::memcpy(tp5 + 16, &kRatio10, 4);
-    std::memcpy(tp5 + 20, &kRatio10, 4);
+    text::putLe(tp5 + 8, kOneHzUs);
+    text::putLe(tp5 + 12, kOneHzUs);
+    text::putLe(tp5 + 16, kRatio10);
+    text::putLe(tp5 + 20, kRatio10);
     /* active, lockGnssFreq, lockedOtherSet, alignToTow, rising, gridUtcGps. */
     constexpr uint32_t kTp5Flags = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5) | (1u << 6) |
                                    (1u << 7);
-    std::memcpy(tp5 + 28, &kTp5Flags, 4);
+    text::putLe(tp5 + 28, kTp5Flags);
 
     /* Each result is acted on by the caller rather than by whoever reads the log
      * later: an ACK means the pulse shape is asserted, a NAK means it is not, and
@@ -1333,7 +1337,7 @@ void GpsTime::configureModule()
             b[1]                 = kBlocks[i].res;
             b[2]                 = kBlocks[i].max;
             b[3]                 = 0;
-            std::memcpy(b + 4, &flags, 4);
+            text::putLe(b + 4, flags);
         }
         r = sendAndWait(0x06, 0x3E, cfg, sizeof(cfg));
         m_gnssAcked = r == 1;
@@ -1631,18 +1635,20 @@ void GpsTime::onMonVer(const uint8_t *p, uint16_t len)
      * become spaces and the result is kept for /healthz, which is where it is
      * actually read -- the serial console drops bytes in exactly this part of
      * the boot, when the Ethernet task is also talking. */
-    char text[160] = {};
-    uint16_t n     = 0;
-    for (uint16_t i = 0; i < len && n < sizeof(text) - 1; ++i) {
+    std::string text;
+    text.reserve(len);
+    for (uint16_t i = 0; i < len; ++i) {
         const char c = static_cast<char>(p[i]);
-        text[n++]    = c == '\0' ? ' ' : (c >= 0x20 && c < 0x7F ? c : '.');
+        text += c == '\0' ? ' ' : (c >= 0x20 && c < 0x7F ? c : '.');
     }
 
+    /* The member is fixed storage because status() copies it under the mux, so
+     * the truncation has to be explicit -- put() does it and terminates. */
     portENTER_CRITICAL(&m_mux);
-    std::memcpy(m_moduleId, text, sizeof(m_moduleId));
+    text::put(m_moduleId, "{}", text);
     portEXIT_CRITICAL(&m_mux);
 
-    ESP_LOGI(TAG, "module: %.48s", text);
+    ESP_LOGI(TAG, "module: %.48s", text.c_str());
 }
 
 void GpsTime::onMonHw(const uint8_t *p, uint16_t len)
@@ -1796,16 +1802,12 @@ void GpsTime::onNavSvin(const uint8_t *p, uint16_t len)
     if (len < 28) {
         return;
     }
-    const auto word = [p](int at) {
-        return static_cast<uint32_t>(p[at]) | (static_cast<uint32_t>(p[at + 1]) << 8) |
-               (static_cast<uint32_t>(p[at + 2]) << 16) | (static_cast<uint32_t>(p[at + 3]) << 24);
-    };
-    const uint32_t dur  = word(0);
-    const uint32_t var  = word(16);
-    const uint32_t obs  = word(20);
+    const uint32_t dur  = text::getLe<uint32_t>(p);
+    const uint32_t var  = text::getLe<uint32_t>(p + 16);
+    const uint32_t obs  = text::getLe<uint32_t>(p + 20);
     int32_t        mean[3];
     for (int i = 0; i < 3; ++i) {
-        std::memcpy(&mean[i], p + 4 + 4 * i, 4);
+        mean[i] = text::getLe<int32_t>(p + 4 + 4 * i);
     }
 
     portENTER_CRITICAL(&m_mux);
@@ -2322,7 +2324,7 @@ GpsTime::Status GpsTime::status() const
     st.antBiasOn         = m_antBiasOn;
     st.antShort          = m_antShort;
     st.antLatched        = m_antLatched;
-    st.antDelayNs        = std::strtod(Settings::instance().antDelayNs().c_str(), nullptr);
+    text::getList(Settings::instance().antDelayNs(), ',', st.antDelayNs);
     st.antCfgAcked       = m_antCfgAcked;
     st.antCfgRejected    = m_antCfgNaked;
     st.antStatus         = m_antStatus;
@@ -2339,8 +2341,8 @@ GpsTime::Status GpsTime::status() const
     st.bridgeClients     = m_bridgeClients;
     st.bridgeRx          = m_bridgeRx;
     st.bridgeTx          = m_bridgeTx;
-    st.bridgeEnd.assign(m_bridgeEnd);
-    st.bridgeLast.assign(m_bridgeLast);
+    st.bridgeEnd.assign(m_bridgeEnd.data());
+    st.bridgeLast.assign(m_bridgeLast.data());
     /* Named rather than numeric: the interesting thing is which constellations
      * are being solved, and a reader should not have to hold the gnssId table
      * in their head to find out. */
@@ -2376,7 +2378,7 @@ GpsTime::Status GpsTime::status() const
     st.cn0Used           = m_cn0Used;
     navSatAtUs           = m_navSatAtUs;
     monHwAtUs            = m_monHwAtUs;
-    st.moduleId          = m_moduleId;
+    st.moduleId          = m_moduleId.data();
     ppsMonoUs      = m_ppsMonoUs;
     suppressUntil  = m_ppsSuppressUntilUs;
     portEXIT_CRITICAL(&m_mux);
@@ -2518,29 +2520,24 @@ bool GpsTime::now(struct timespec &ts) const
 std::string GpsTime::describe() const
 {
     const Status st = status();
-    char         text[96];
 
     if (st.locked) {
         if (st.ppsAgeUs > kLockWindowUs) {
             /* Still servable, and worth saying why in a line somebody reads
              * later: this is the holdover the servo bought. */
-            std::snprintf(text, sizeof(text), "GPS/PPS, %s fix, %u satellites, holding over %.1f s",
-                          fixText(st.fixType), st.satellites,
-                          static_cast<double>(st.ppsAgeUs) / 1e6);
-        } else {
-            std::snprintf(text, sizeof(text), "GPS/PPS, %s fix, %u satellites", fixText(st.fixType),
-                          st.satellites);
+            return std::format("GPS/PPS, {} fix, {} satellites, holding over {:.1f} s",
+                               fixText(st.fixType), st.satellites,
+                               static_cast<double>(st.ppsAgeUs) / 1e6);
         }
-    } else if (st.fixType >= 2 && st.timeValid) {
+        return std::format("GPS/PPS, {} fix, {} satellites", fixText(st.fixType), st.satellites);
+    }
+    if (st.fixType >= 2 && st.timeValid) {
         /* A fix but no edge we can pair it with: the receiver is fine and the
          * pulse is not, which is a different fault from "no fix" and worth
          * saying differently in the boot log. */
-        std::snprintf(text, sizeof(text), "GPS/PPS, %s fix but no fresh PPS edge",
-                      fixText(st.fixType));
-    } else {
-        std::snprintf(text, sizeof(text), "GPS/PPS (no fix yet)");
+        return std::format("GPS/PPS, {} fix but no fresh PPS edge", fixText(st.fixType));
     }
-    return text;
+    return "GPS/PPS (no fix yet)";
 }
 
 void GpsTime::logLockChange()

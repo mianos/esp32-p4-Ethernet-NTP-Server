@@ -9,6 +9,7 @@
 #include "lwip/ip_addr.h"
 
 #include "net_state.h"
+#include "text.h"
 
 namespace {
 
@@ -193,8 +194,12 @@ esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
         /* lwIP keeps this pointer (sntp_setservername() does not copy), so it is
          * the buffer that is handed over, not a std::string another task could
          * reallocate. start() only runs after stop(), so the client that read
-         * the previous contents is already gone. */
-        std::snprintf(m_lwipServer, sizeof(m_lwipServer), "%s", server.c_str());
+         * the previous contents is already gone. The array therefore stays; the
+         * copy into it is a sized one, which is the part snprintf was doing. */
+        const std::string_view name = server;
+        const std::size_t      n    = std::min(name.size(), sizeof(m_lwipServer) - 1);
+        name.copy(m_lwipServer, n);
+        m_lwipServer[n] = '\0';
         config.num_of_servers = 1;
         config.servers[0]     = m_lwipServer;
     }

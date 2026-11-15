@@ -17,6 +17,7 @@
 #include "gps_time.h"
 #include "ntp_time.h"
 #include "settings.h"
+#include "text.h"
 
 namespace {
 
@@ -194,23 +195,24 @@ void addressKey(const sockaddr_storage &src, uint8_t out[kAddressKeySize])
 /* "192.0.2.50:123" or "[2001:db8::1]:123", for the log only. */
 std::string sourceText(const sockaddr_storage &src)
 {
-    char text[64] = {};
     if (src.ss_family == AF_INET) {
         const auto    *v4 = reinterpret_cast<const sockaddr_in *>(&src);
         const uint8_t *b  = reinterpret_cast<const uint8_t *>(&v4->sin_addr);
-        std::snprintf(text, sizeof(text), "%u.%u.%u.%u:%u", b[0], b[1], b[2], b[3],
-                      ntohs(v4->sin_port));
+        return std::format("{}.{}.{}.{}:{}", b[0], b[1], b[2], b[3], ntohs(v4->sin_port));
+    }
 #if CONFIG_LWIP_IPV6
-    } else {
+    if (src.ss_family == AF_INET6) {
         const auto *v6 = reinterpret_cast<const sockaddr_in6 *>(&src);
         ip6_addr_t  lwip{};
         std::memcpy(lwip.addr, &v6->sin6_addr, sizeof(lwip.addr));
+        /* ip6addr_ntoa_r is lwIP's own formatter and wants an array, so this one
+         * keeps its buffer; everything around it does not need one. */
         char addr[IP6ADDR_STRLEN_MAX] = {};
         ip6addr_ntoa_r(&lwip, addr, sizeof(addr));
-        std::snprintf(text, sizeof(text), "[%s]:%u", addr, ntohs(v6->sin6_port));
-#endif
+        return std::format("[{}]:{}", addr, ntohs(v6->sin6_port));
     }
-    return text;
+#endif
+    return "?";
 }
 
 class RateLimiter {
@@ -418,8 +420,9 @@ private:
     static bool parseDottedQuad(const std::string &text, uint32_t &out)
     {
         unsigned a = 0, b = 0, c = 0, d = 0;
-        char     tail = 0;
-        if (std::sscanf(text.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4) {
+        /* Exactly four fields: from_chars rejects the trailing character that
+         * sscanf's %c was there to catch, and rejects "1.2.3.4.5" too. */
+        if (!text::getList(text, '.', a, b, c, d)) {
             return false;
         }
         if (a > 255 || b > 255 || c > 255 || d > 255) {

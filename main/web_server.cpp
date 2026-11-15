@@ -20,6 +20,7 @@
 #include "ntp_server.h"
 #include "ntp_time.h"
 #include "settings.h"
+#include "text.h"
 
 namespace {
 
@@ -96,11 +97,9 @@ std::string refIdText(uint32_t refId, uint8_t stratum)
         return text;
     }
 
-    char quad[16];
-    std::snprintf(quad, sizeof(quad), "%u.%u.%u.%u", static_cast<uint8_t>(bytes[0]),
-                  static_cast<uint8_t>(bytes[1]), static_cast<uint8_t>(bytes[2]),
-                  static_cast<uint8_t>(bytes[3]));
-    return quad;
+    return std::format("{}.{}.{}.{}", static_cast<uint8_t>(bytes[0]),
+                       static_cast<uint8_t>(bytes[1]), static_cast<uint8_t>(bytes[2]),
+                       static_cast<uint8_t>(bytes[3]));
 }
 
 }  // namespace
@@ -218,9 +217,10 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
     esp_netif_t        *netif = net_state::netif();
     if (netif != nullptr && esp_netif_get_ip_info(netif, &ip_info) == ESP_OK &&
         ip_info.ip.addr != 0) {
-        char text[16];
-        snprintf(text, sizeof(text), IPSTR, IP2STR(&ip_info.ip));
-        json.AddItem("ip", text);
+        /* IPSTR/IP2STR are lwIP's own printf macro, expanded rather than
+         * reformatted: the three fields are already in the format's order. */
+        const uint8_t *o = reinterpret_cast<const uint8_t *>(&ip_info.ip.addr);
+        json.AddItem("ip", std::format("{}.{}.{}.{}", o[0], o[1], o[2], o[3]));
     }
 
 #if CONFIG_LWIP_IPV6
@@ -555,13 +555,9 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
 
     if (gps.monHwValid) {
         /* Hex strings: these are bit maps, not quantities. */
-        char bits[32];
-        std::snprintf(bits, sizeof(bits), "%08lx", static_cast<unsigned long>(gps.pinSel));
-        doc.AddItem("pin_sel", std::string(bits));
-        std::snprintf(bits, sizeof(bits), "%08lx", static_cast<unsigned long>(gps.pinDir));
-        doc.AddItem("pin_dir", std::string(bits));
-        std::snprintf(bits, sizeof(bits), "%08lx", static_cast<unsigned long>(gps.pinVal));
-        doc.AddItem("pin_val", std::string(bits));
+        doc.AddItem("pin_sel", std::format("{:08x}", gps.pinSel));
+        doc.AddItem("pin_dir", std::format("{:08x}", gps.pinDir));
+        doc.AddItem("pin_val", std::format("{:08x}", gps.pinVal));
         doc.AddItem("mon_hw_age_s", static_cast<double>(gps.monHwAgeUs) / 1e6);
     }
     if (gps.navSatAgeUs >= 0) {
@@ -613,12 +609,11 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
          * 0.66, and the spread across real cables is under 20%). The delay is
          * taken off the pulse, which is the same correction whether the extra
          * metres are in the lead or the antenna is simply further away. */
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(delayNs));
         /* setX() only changes the object; save() is what reaches NVS, and
          * without it the value is back to zero at the next boot and the pulse
          * reverts with it. */
-        Settings::instance().setAntDelayNs(buf);
+        Settings::instance().setAntDelayNs(
+            std::format("{}", static_cast<unsigned>(delayNs)));
         Settings::instance().save();
         GpsTime::instance().requestAntDelay();
         ESP_LOGW(TAG, "POST /gps/ant from %s: cable delay %u ns", callerAddress(req).c_str(),

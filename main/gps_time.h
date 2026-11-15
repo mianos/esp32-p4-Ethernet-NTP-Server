@@ -84,6 +84,7 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
+#include "text.h"
 #include "time_ref.h"
 
 class GpsTime {
@@ -568,8 +569,8 @@ private:
     volatile uint32_t m_bridgeSessions = 0;
     volatile uint32_t m_bridgeRefused  = 0;
     volatile int      m_bridgeClients  = 0;
-    char       m_bridgeEnd[48]     = "none";
-    char       m_bridgeLast[128]   = "";
+    text::Buf<48>  m_bridgeEnd     = {"none"};
+    text::Buf<128> m_bridgeLast    = {""};
     uint8_t    m_cn0Max            = 0;
     uint8_t    m_cn0Mean           = 0;
     uint8_t    m_cn0Used           = 0;
@@ -577,7 +578,7 @@ private:
     bool       m_verLogged         = false;
     bool       m_timTpProbed       = false;
     int64_t    m_timTpProbeAtUs    = 0;
-    char       m_moduleId[160]     = {};
+    text::Buf<160> m_moduleId      = {};
 };
 
 /* The GPS as the responder sees it: stratum 1 and refid "GPS" while the PPS is

@@ -26,6 +26,7 @@
 #include "ntp_time.h"
 #include "settings.h"
 #include "web_server.h"
+#include "text.h"
 
 namespace {
 
@@ -87,10 +88,8 @@ constexpr UBaseType_t kStatusTaskPrio  = 3;
 /* 02:00:5e:00:53:01 -- the form the rest of the documentation uses. */
 std::string macText(const std::array<uint8_t, 6> &mac)
 {
-    char text[18];
-    std::snprintf(text, sizeof text, "%02x:%02x:%02x:%02x:%02x:%02x",
-                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    return text;
+    return std::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", mac[0], mac[1], mac[2], mac[3],
+                       mac[4], mac[5]);
 }
 
 #if CONFIG_LWIP_IPV6

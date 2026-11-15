@@ -53,3 +53,7 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=2
 # longer makes lwIP drop an option and print an LWIP_ERROR at every boot --
 # which is what a 32-character hostname (Settings::kMaxHostnameLen) does.
 CONFIG_LWIP_DHCP_OPTIONS_LEN=128
+
+# std::format in a handler costs several hundred bytes of frame each;
+# 4 KB (the component default) overflows on the JSON builders.
+CONFIG_WEBSERVER_TASK_STACK_SIZE=12288
