@@ -615,7 +615,11 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
          * metres are in the lead or the antenna is simply further away. */
         char buf[16];
         std::snprintf(buf, sizeof(buf), "%u", static_cast<unsigned>(delayNs));
+        /* setX() only changes the object; save() is what reaches NVS, and
+         * without it the value is back to zero at the next boot and the pulse
+         * reverts with it. */
         Settings::instance().setAntDelayNs(buf);
+        Settings::instance().save();
         GpsTime::instance().requestAntDelay();
         ESP_LOGW(TAG, "POST /gps/ant from %s: cable delay %u ns", callerAddress(req).c_str(),
                  static_cast<unsigned>(delayNs));
