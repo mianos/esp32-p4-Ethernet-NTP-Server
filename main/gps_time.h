@@ -198,6 +198,11 @@ public:
         double   svinAccMm  = 0;
         double   svinVarMm2 = 0;
         double   svinObs    = 0;
+        /* What the survey was asked for, beside what it has. Without the pair
+         * there is no way to tell "nearly there" from "asked for six hours and
+         * the limit is unmet", which is the whole decision at the end. */
+        double   svinTargetS = 0;
+        double   svinLimitMm = 0;
         bool     svinValid  = false;
         double   svinAgeS   = -1;
         /* MON-HW's pin map: which module pins the receiver has assigned, their

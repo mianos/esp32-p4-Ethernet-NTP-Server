@@ -2320,6 +2320,8 @@ GpsTime::Status GpsTime::status() const
     st.svinAccMm = static_cast<double>(isqrt(m_svinAcc));
     st.svinVarMm2 = static_cast<double>(m_svinAcc);
     st.svinObs  = static_cast<double>(m_svinObs);
+    st.svinTargetS = static_cast<double>(m_svinDurS);
+    st.svinLimitMm = static_cast<double>(m_svinAccMm);
     st.svinValid = m_svinValid;
     st.svinAgeS = m_svinAtUs != 0 ? static_cast<double>(esp_timer_get_time() - m_svinAtUs) / 1e6
                                   : -1;
