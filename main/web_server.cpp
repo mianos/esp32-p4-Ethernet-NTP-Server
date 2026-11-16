@@ -693,6 +693,8 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
     bool defaults = false;
     const int len = req->content_len;
     if (len > 0 && len < 512) {
+        /* An array rather than a std::string: httpd_req_recv takes memory and
+         * a length, and the reply is parsed from what it says it wrote. */
         char buf[512];
         const int got = httpd_req_recv(req, buf, len);
         if (got > 0) {
@@ -877,6 +879,8 @@ esp_err_t NtpWebServer::firmware_post_handler(httpd_req_t *req)
         return sendJsonError(req, 500, esp_err_to_name(err));
     }
 
+    /* The same shape, and the only place in the image where the size of the
+     * read is a design decision: esp_ota_write takes the chunk as it comes. */
     char buf[kOtaChunkBytes];
     int  remaining = req->content_len;
     int  written   = 0;
