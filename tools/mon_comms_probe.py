@@ -9,6 +9,9 @@ visible as bytes rather than as "u-center does nothing".
 import socket
 import sys
 import time
+from collections import Counter
+
+import ubx
 
 host = sys.argv[1] if len(sys.argv) > 1 else "esp32p4-ntp"
 MON_COMMS = bytes([0xB5, 0x62, 0x0A, 0x36, 0x00, 0x00, 0x40, 0xCA])
@@ -20,8 +23,6 @@ s.sendall(MON_COMMS)
 print("sent MON-COMMS poll")
 
 total = 0
-frames = 0
-classes = {}
 buf = bytearray()
 while time.time() - t0 < 6.0:
     try:
@@ -34,20 +35,13 @@ while time.time() - t0 < 6.0:
         break
     total += len(data)
     buf += data
-    while True:
-        i = buf.find(b"\xb5\x62")
-        if i < 0 or len(buf) - i < 8:
-            break
-        cls, mid = buf[i + 2], buf[i + 3]
-        ln = buf[i + 4] | (buf[i + 5] << 8)
-        if len(buf) - i < 8 + ln:
-            break
-        frames += 1
-        classes[(cls, mid)] = classes.get((cls, mid), 0) + 1
-        del buf[: i + 8 + ln]
 
-print("bytes %d, frames %d" % (total, frames))
-for (c, m), n in sorted(classes.items(), key=lambda kv: -kv[1])[:10]:
+# One pass at the end, over the whole capture: a frame split across reads is
+# still a frame, which is the thing a byte search would have lost.
+dec = ubx.Decoder()
+dec.feed(bytes(buf))
+
+print("bytes %d, frames %d, dropped on checksum %d" % (total, len(dec.frames), len(dec.dropped_checksum)))
+for (c, m), n in sorted(Counter((f.cls, f.id) for f in dec.frames).items(), key=lambda kv: -kv[1])[:10]:
     print("  %02x/%02x x%d" % (c, m, n))
-print("unparsed tail %d bytes: %s" % (len(buf), bytes(buf[:24]).hex(" ")))
 s.close()

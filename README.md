@@ -989,7 +989,9 @@ tcp/3333, straight through to UART1
 ```
 
 `tools/mon_comms_probe.py` and `tools/poll_matrix.py` speak to it the same way
-`u-center` does; `tools/serial_cap.py` captures the console beside them.
+`u-center` does; `tools/serial_cap.py` captures the console beside them. All of
+them frame through `tools/ubx.py`, the host twin of the firmware's decoder, and
+`tools/ubx_test.py` covers it — see `docs/ubx.md`.
 
 **The client is the only writer for the duration.** Polls, configuration, rates,
 the lot are the client's, and they are forwarded byte for byte with nothing
@@ -1562,7 +1564,11 @@ Not in this milestone, on purpose — or only half done:
 | `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for `timeSource=dhcp`/`static`    |
 | `main/ntp_server.[ch]pp`| `NtpServer` + `UpstreamTimeRef` + `SelectedTimeRef`: the UDP/123 responder, reply builder, rate limiter |
 | `main/net_state.[ch]pp` | read-only netif / link / IPv6-address accessors, fed by `eth_link.cpp` |
+| `main/ubx.[ch]pp`       | UBX framing for both readers: byte state machine, checksum gate, definition table with length ranges |
+| `main/text.h`           | `put` / `getList` / `putLe` / `getLe`: formatting and parsing without a format string |
 | `tools/ntp_test.py`     | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
+| `tools/ubx.py`          | host twin of the decoder, used by the tools |
+| `tools/ubx_test.py`     | framing tests: every split offset, corrupt bytes, false sync, length gates |
 
 Written locally; everything else (JSON, NVS, settings machinery, the HTTP
 server) is a mianesp component.

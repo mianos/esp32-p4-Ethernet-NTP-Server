@@ -15,6 +15,8 @@ import sys
 import time
 import urllib.request
 
+import ubx
+
 host = sys.argv[1] if len(sys.argv) > 1 else "esp32p4-ntp"
 seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 90.0
 
@@ -23,7 +25,7 @@ GNSS = {0: "GPS", 1: "SBAS", 2: "Galileo", 3: "BeiDou", 5: "QZSS", 6: "GLONASS"}
 s = socket.create_connection((host, 3333), timeout=5)
 s.setblocking(False)
 
-buf = bytearray()
+dec = ubx.Decoder()
 t0 = time.time()
 nextq = t0
 inview = []
@@ -48,32 +50,23 @@ while time.time() - t0 < seconds:
         continue
     if not data:
         break
-    buf += data
-    while True:
-        i = buf.find(b"\xb5\x62")
-        if i < 0 or len(buf) - i < 8:
-            break
-        cls, mid = buf[i + 2], buf[i + 3]
-        ln = buf[i + 4] | (buf[i + 5] << 8)
-        if len(buf) - i < 8 + ln:
-            break
-        if (cls, mid) == (0x01, 0x35):
-            p = buf[i + 6 : i + 6 + ln]  # payload starts after the 6-byte header
-            num = p[5]
-            inview.append(num)
-            for k in range(num):
-                g = p[8 + 12 * k : 8 + 12 * (k + 1)]
-                if len(g) < 12:
-                    break
-                gnss, _sv, cno, el = g[0], g[1], g[2], g[3] - 256 if g[3] > 127 else g[3]
-                fl = int.from_bytes(g[8:12], "little")
+    dec.feed(data)
+    while dec.frames:
+        f = dec.frames.pop(0)
+        if (f.cls, f.id) == (0x01, 0x35):
+            inview.append(f.u1(5))
+            # The declared satellite count can exceed what the payload holds.
+            for k in range(min(f.u1(5), (f.len - 8) // 12)):
+                el = f.u1(8 + 12 * k + 3)
+                cno = f.u1(8 + 12 * k + 2)
+                gnss = f.u1(8 + 12 * k)
+                fl = f.u4(8 + 12 * k + 8)
                 consts[GNSS.get(gnss, gnss)] = consts.get(GNSS.get(gnss, gnss), 0) + 1
                 if cno:
                     cno_all.append(cno)
-                    elevs.append(el)
+                    elevs.append(el - 256 if el > 127 else el)
                 if fl & (1 << 3) and cno:
                     cno_used.append(cno)
-        del buf[: i + 8 + ln]
 
 s.close()
 

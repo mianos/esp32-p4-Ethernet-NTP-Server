@@ -36,7 +36,7 @@ constexpr gpio_num_t  kPpsPin = GPIO_NUM_14;
  * that has been through u-center once usually is not on 9600 any more, and
  * cycling through four baud rates at boot is cheaper for everyone than asking
  * the user to read a datasheet. */
-constexpr uint32_t kBauds[] = {9600, 38400, 115200, 57600, 19200};
+constexpr uint32_t kBauds[] = {9600, 38400, 115200, 57600, 19200, 4800};
 
 /* UBX-CFG-MSG enabling NAV-TIM-TP on UART1 at 1 Hz. File scope because the
  * probe in task() resends exactly these bytes on their own. */
@@ -44,6 +44,9 @@ constexpr uint8_t kTimTpEnable[8] = {0x01, 0x27, 0, 1, 0, 0, 0, 0};
 
 /* How long one baud rate gets to produce a single valid UBX frame. */
 constexpr int64_t kScanAfterUs = 4000000;
+/* Silence that counts as a dead line rather than a quiet one. The receiver sends
+a message set at 1 Hz, so 5 s is five missed turns of it. */
+constexpr int64_t kFrameSilenceUs = 5000000;
 
 /* An edge younger than this may still be the one the NAV-PVT describes: the
  * receiver emits it a few tens of milliseconds after the second boundary. Older
@@ -118,20 +121,6 @@ constexpr UBaseType_t  kTaskPriority = 4; /* below the responder: it answers pac
 /* NTP refid for this reference, spelled the way RFC 5905 spells it: four ASCII
  * bytes, the last a NUL that the responder's text formatter trims. */
 constexpr uint32_t kRefIdGps = (static_cast<uint32_t>('G') << 24) | ('P' << 16) | ('S' << 8);
-
-/* ---- UBX helpers ------------------------------------------------------- */
-
-uint16_t le16(const uint8_t *p)
-{
-    return static_cast<uint16_t>(p[0] | (p[1] << 8));
-}
-
-int32_t le32(const uint8_t *p)
-{
-    const uint32_t v = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
-                       (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
-    return static_cast<int32_t>(v);
-}
 
 /* Days since 1970-01-01 from a proleptic Gregorian date (Hinnant's
  * days_from_civil). Written out rather than reached for: timegm() is not in this
@@ -231,23 +220,24 @@ void GpsTime::requestAntDelay()
     m_tp5Cmd = true;
 }
 
-void GpsTime::onCfgTmode(const uint8_t *p, uint16_t len)
+void GpsTime::requestBaud(uint32_t baud)
+{
+    m_baudReq = baud;
+}
+
+void GpsTime::onCfgTmode(const ubx::Frame &f)
 {
     /* CFG-TMODE2 has no reason to arrive except in answer to a poll: the ACK
      * acknowledges it separately and carries only class and id. So anything
      * that gets here describes the receiver's actual state, which is the point
      * of asking -- the firmware cannot otherwise tell a fixed position from a
      * moving one across a reboot, and a reset would take one away silently. */
-    if (len < 28) {
-        return;
-    }
-    const uint8_t mode = p[0];
+    const uint8_t mode = f.u8(0);
     int32_t       mean[3];
     for (int i = 0; i < 3; ++i) {
-        mean[i] = text::getLe<int32_t>(p + 4 + 4 * i);
+        mean[i] = f.i4(4 + 4 * i);
     }
-    const uint32_t acc = static_cast<uint32_t>(p[16]) | (static_cast<uint32_t>(p[17]) << 8) |
-                         (static_cast<uint32_t>(p[18]) << 16) | (static_cast<uint32_t>(p[19]) << 24);
+    const uint32_t acc = f.u4(16);
 
     m_tmode = mode > 2 ? 0 : mode;
     if (mode == 2 && (mean[0] != 0 || mean[1] != 0 || mean[2] != 0)) {
@@ -418,6 +408,109 @@ void GpsTime::bridgeTask()
          * not of the line, and a client waiting on it is waiting on us. */
         int     commsClient   = -1;
         int64_t commsDeadline = 0;
+        /* An armed rate change: what was asked for, whether the receiver has
+         * acknowledged it, and when to stop waiting. */
+        uint32_t baudWanted = 0;
+        bool     baudAcked  = false;
+        int64_t  baudAtUs   = 0;
+
+        /* The two directions are decoded separately because they interleave and
+         * must not share parse state: the client's session and the receiver's
+         * message set are different streams that happen to cross one socket. */
+        ubx::Decoder clientDecoder;
+        ubx::Decoder moduleDecoder;
+
+        /* What the bridge wants to notice in the client's traffic: a request to
+         * move the port's rate, and a MON-COMMS poll that will need answering. */
+        struct ClientSniffer : ubx::Listener {
+            uint32_t *wanted;
+            bool     *acked;
+            int64_t  *atUs;
+            int      *commsClient;
+            int64_t  *commsDeadline;
+            int       fd = -1;
+
+            ClientSniffer(uint32_t *w, bool *a, int64_t *at, int *cp, int64_t *cd,
+                          volatile uint32_t *dr)
+                : wanted(w), acked(a), atUs(at), commsClient(cp), commsDeadline(cd), dropped(dr)
+            {
+            }
+
+            volatile uint32_t *dropped;
+
+            void onDrop(ubx::Drop why, const ubx::Frame &) override
+            {
+                if (why == ubx::Drop::Checksum) {
+                    *dropped = *dropped + 1;
+                }
+            }
+
+            void onFrame(const ubx::Frame &f) override
+            {
+                if (f.cls == 0x06 && f.id == 0x00) {
+                    /* CFG-PRT is 20 bytes and the decoder has already enforced
+                     * it. baudRate is a four-byte field at offset 8; reading two
+                     * of those bytes, as this used to, turns 115200 into 49664
+                     * and 460800 into 2048. */
+                    const uint8_t  port = f.u8(0);
+                    const uint32_t baud = f.u4(8);
+                    if (port != 1) {
+                        ESP_LOGI(TAG, "port %u set to %u: not this line", port,
+                                 static_cast<unsigned>(baud));
+                        return;
+                    }
+                    if (baud < 4800 || baud > 921600) {
+                        ESP_LOGW(TAG, "%u baud is outside 4800..921600: not following",
+                                 static_cast<unsigned>(baud));
+                        return;
+                    }
+                    *wanted = baud;
+                    *acked  = false;
+                    *atUs   = esp_timer_get_time() + 250000;
+                } else if (f.cls == 0x0A && f.id == 0x36) {
+                    *commsClient   = fd;
+                    *commsDeadline = esp_timer_get_time() + 400000;
+                }
+            }
+        } clientSniffer(&baudWanted, &baudAcked, &baudAtUs, &commsClient, &commsDeadline,
+                       &m_bridgeDroppedCrc);
+
+        /* ...and in the receiver's: the answer to that request, and a MON-COMMS
+         * reply it bothered to send itself. */
+        struct ModuleSniffer : ubx::Listener {
+            uint32_t       *wanted;
+            bool           *acked;
+            int64_t        *atUs;
+            int            *commsClient;
+            int             fd = -1;
+
+            ModuleSniffer(uint32_t *w, bool *a, int64_t *at, int *cp)
+                : wanted(w), acked(a), atUs(at), commsClient(cp)
+            {
+            }
+
+            void onDrop(ubx::Drop, const ubx::Frame &) override {}
+
+            void onFrame(const ubx::Frame &f) override
+            {
+                if (f.cls == 0x05 && (f.id == 0x00 || f.id == 0x01) && *wanted != 0 &&
+                    f.len >= 2 && f.u8(0) == 0x06 && f.u8(1) == 0x00) {
+                    if (f.id == 0x00) {
+                        *acked = true;
+                        *atUs  = esp_timer_get_time();
+                    } else {
+                        ESP_LOGW(TAG, "receiver refused the %u baud change",
+                                 static_cast<unsigned>(*wanted));
+                        *wanted = 0;
+                    }
+                } else if (f.cls == 0x0A && f.id == 0x36 && *commsClient >= 0) {
+                    *commsClient = -1;
+                }
+            }
+        } moduleSniffer(&baudWanted, &baudAcked, &baudAtUs, &commsClient);
+
+        clientDecoder.listen(&clientSniffer);
+        moduleDecoder.listen(&moduleSniffer);
 
         /* Every way a client ends goes through here, so the detached state --
          * port handed back, own configuration restored -- cannot be forgotten
@@ -492,7 +585,9 @@ void GpsTime::bridgeTask()
                         close(c);
                     } else {
                         fcntl(c, F_SETFL, fcntl(c, F_GETFL, 0) | O_NONBLOCK);
-                        clients[slot] = c;
+                        clients[slot]    = c;
+                        clientSniffer.fd = c;
+                        moduleSniffer.fd = c;
                         text::put(m_bridgeLast, "attach");
                         ESP_LOGW(TAG, "client attached from %s", inet_ntoa(peer.sin_addr));
                         m_bridgeSessions = m_bridgeSessions + 1;
@@ -541,51 +636,38 @@ void GpsTime::bridgeTask()
                 text::put(m_bridgeLast, "{}", hex);
                 ESP_LOGI(TAG, "client -> %d bytes: %s", n, hex.c_str());
 
-                /* A port-rate change has to be applied after the frame is out, or
-                 * the module receives the request at the wrong rate. */
-                uint32_t pending = 0;
-                for (int k = 0; k + 15 < n; ++k) {
-                    if (in[k] == 0xB5 && in[k + 1] == 0x62 && in[k + 2] == 0x06 &&
-                        in[k + 3] == 0x00) {
-                        const uint8_t  port = in[k + 6];
-                        const uint32_t baud = static_cast<uint32_t>(in[k + 14]) |
-                                              (static_cast<uint32_t>(in[k + 15]) << 8);
-                        if (port != 1) {
-                            ESP_LOGI(TAG, "port %u set to %u: not this line", port,
-                                     static_cast<unsigned>(baud));
-                        } else if (baud >= 4800 && baud <= 921600 && baud != m_baud) {
-                            pending = baud;
-                        }
-                    }
-                }
-                /* Remember who asked for MON-COMMS, in case the module will not. */
-                for (int k = 0; k + 5 < n; ++k) {
-                    if (in[k] == 0xB5 && in[k + 1] == 0x62 && in[k + 2] == 0x0A &&
-                        in[k + 3] == 0x36) {
-                        commsClient   = clients[i];
-                        commsDeadline = esp_timer_get_time() + 400000;
-                    }
-                }
+                clientDecoder.feed(std::span(in, static_cast<std::size_t>(n)));
                 uart_write_bytes(kUart, in, n);
-                if (pending != 0) {
-                    uart_set_baudrate(kUart, pending);
-                    m_baud = pending;
-                    ESP_LOGW(TAG, "following client to %u baud", static_cast<unsigned>(pending));
-                }
             }
 
             uint8_t   out[256];
             const int got = uart_read_bytes(kUart, out, sizeof(out), 0);
+            moduleDecoder.feed(std::span(out, static_cast<std::size_t>(got > 0 ? got : 0)));
 
-            /* Did the module answer the MON-COMMS poll itself? */
-            if (got > 0 && commsClient >= 0) {
-                for (int i = 0; i + 3 < got; ++i) {
-                    if (out[i] == 0xB5 && out[i + 1] == 0x62 && out[i + 2] == 0x0A &&
-                        out[i + 3] == 0x36) {
-                        commsClient = -1;
-                        break;
-                    }
+            /* The rate change, if one is armed. The old code switched the baud
+             * the instant it found the request in the client's bytes -- which is
+             * when uart_write_bytes() returns, not when the bytes have gone --
+             * so the tail of the very frame asking for the change could leave at
+             * the new rate while its head left at the old one. It now waits for
+             * the module's ACK, drains the transmitter, and switches. A NAK
+             * cancels; an ACK that never comes does not, because u-blox sends it
+             * on whichever side of the change it likes and a client left at the
+             * wrong rate is worse than a rate change the receiver grumbled at. */
+            if (baudWanted != 0 && esp_timer_get_time() >= baudAtUs) {
+                const uint32_t want = baudWanted;
+                baudWanted          = 0;
+                if (baudAcked) {
+                    ESP_LOGW(TAG, "client asked for %u baud: following", static_cast<unsigned>(want));
+                } else {
+                    ESP_LOGW(TAG, "client asked for %u baud: no ACK, following anyway",
+                             static_cast<unsigned>(want));
                 }
+                uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
+                uart_set_baudrate(kUart, want);
+                m_baud = want;
+                /* The receiver has almost certainly been asked to change too, so
+                 * the next PPS pairing is not comparable with the last. */
+                m_frameSeen = false;
             }
             if (commsClient >= 0 && esp_timer_get_time() > commsDeadline) {
                 /* The receiver ignores MON-COMMS outright -- MON-VER, CFG-PRT and
@@ -621,9 +703,6 @@ void GpsTime::bridgeTask()
             }
 
             if (got > 0) {
-                for (int i = 0; i < got; ++i) {
-                    feed(out[i]);
-                }
                 m_bridgeTx = m_bridgeTx + static_cast<uint32_t>(got);
                 for (int i = 0; i < kMaxClients; ++i) {
                     if (clients[i] < 0) {
@@ -776,6 +855,10 @@ esp_err_t GpsTime::begin()
         ESP_LOGW(TAG, "no bridge task: u-center passthrough unavailable");
     }
 
+    /* The decoder emits into this object; without the listener it counts frames
+     * and dispatches none of them, which reads as a receiver sending nothing
+     * useful. */
+    m_decoder.listen(this);
     m_begun       = true;
     m_baud        = kBauds[0];
     m_nextScanUs  = esp_timer_get_time() + kScanAfterUs;
@@ -825,12 +908,23 @@ void GpsTime::task()
             vTaskDelay(pdMS_TO_TICKS(50));
         } else {
             const int got = uart_read_bytes(kUart, buf, sizeof(buf), pdMS_TO_TICKS(100));
-            for (int i = 0; i < got; ++i) {
-                feed(buf[i]);
-            }
+            m_decoder.feed(std::span(buf, static_cast<std::size_t>(got > 0 ? got : 0)));
         }
 
         const int64_t nowUs = esp_timer_get_time();
+        /* The scan used to run only until the first frame of the boot, so a rate
+         * set from the bridge -- or by anything else that moved the module --
+         * wedged the line until the next power cycle. Silence now re-arms it. A
+         * session on tcp/3333 holds the port and must not have the rate moved
+         * under it, so the bridge suppresses the scan for its duration. */
+        if (!m_bridgeActive && m_frameSeen && m_lastFrameUs != 0 &&
+            nowUs - m_lastFrameUs > kFrameSilenceUs) {
+            m_frameSeen   = false;
+            m_lastFrameUs = 0;
+            ++m_rescans;
+            ESP_LOGW(TAG, "no frames for %lld ms: rescanning the baud rate",
+                     static_cast<long long>(kFrameSilenceUs / 1000));
+        }
         if (!m_frameSeen && nowUs >= m_nextScanUs) {
             advanceBaud();
             m_nextScanUs = nowUs + kScanAfterUs;
@@ -838,6 +932,17 @@ void GpsTime::task()
         if (nowUs >= m_nextCheckUs) {
             logLockChange();
             m_nextCheckUs = nowUs + 1000000;
+        }
+        if (m_baudReq != 0) {
+            const uint32_t want = m_baudReq;
+            m_baudReq           = 0;
+            uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
+            uart_set_baudrate(kUart, want);
+            m_baud      = want;
+            m_frameSeen = false;
+            ++m_rescans;
+            ESP_LOGW(TAG, "host side set to %u baud alone: the scan will find the receiver",
+                     static_cast<unsigned>(want));
         }
         /* A bias change or a restart asked for over HTTP. Serviced here rather
          * than in the handler so exactly one thread owns the UART and the
@@ -1461,9 +1566,7 @@ void GpsTime::pump(int64_t timeoutUs)
             continue;
         }
         const int got = uart_read_bytes(kUart, buf, sizeof(buf), pdMS_TO_TICKS(20));
-        for (int i = 0; i < got; ++i) {
-            feed(buf[i]);
-        }
+        m_decoder.feed(std::span(buf, static_cast<std::size_t>(got > 0 ? got : 0)));
     }
     if (m_awaitResult == -1) {
         m_awaitResult = -2;
@@ -1501,84 +1604,32 @@ void GpsTime::sendUbx(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
     uart_write_bytes(kUart, frame, n);
 }
 
-void GpsTime::feed(uint8_t byte)
+/* The listener half of the decoder: a frame that arrived whole and passed its
+ * checksum and its length range. The length gate is in the decoder, so the
+ * handlers below can read their fields without a guard apiece. */
+
+
+void GpsTime::onDrop(ubx::Drop why, const ubx::Frame &frame)
 {
-    switch (m_parse) {
-    case Parse::Sync1:
-        if (byte == 0xB5) {
-            m_parse = Parse::Sync2;
-        }
-        break;
-
-    case Parse::Sync2:
-        /* Anything but the second sync byte is rubbish, including NMEA text; a
-         * repeated 0xB5 might be the start of a real frame, so it is kept. */
-        if (byte == 0x62) {
-            m_parse = Parse::Class;
-        } else if (byte != 0xB5) {
-            m_parse = Parse::Sync1;
-        }
-        break;
-
-    case Parse::Class:
-        m_cls   = byte;
-        m_ckA   = byte;
-        m_ckB   = byte;
-        m_parse = Parse::Id;
-        break;
-
-    case Parse::Id:
-        m_id = byte;
-        m_ckA = static_cast<uint8_t>(m_ckA + byte);
-        m_ckB = static_cast<uint8_t>(m_ckB + m_ckA);
-        m_parse = Parse::LenLo;
-        break;
-
-    case Parse::LenLo:
-        m_len = byte;
-        m_ckA = static_cast<uint8_t>(m_ckA + byte);
-        m_ckB = static_cast<uint8_t>(m_ckB + m_ckA);
-        m_parse = Parse::LenHi;
-        break;
-
-    case Parse::LenHi:
-        m_len |= static_cast<uint16_t>(byte) << 8;
-        m_ckA = static_cast<uint8_t>(m_ckA + byte);
-        m_ckB = static_cast<uint8_t>(m_ckB + m_ckA);
-        m_got      = 0;
-        m_overflow = m_len > sizeof(m_payload);
-        m_parse    = m_len == 0 ? Parse::CkA : Parse::Payload;
-        break;
-
-    case Parse::Payload:
-        if (!m_overflow) {
-            m_payload[m_got] = byte;
-        }
-        ++m_got;
-        m_ckA = static_cast<uint8_t>(m_ckA + byte);
-        m_ckB = static_cast<uint8_t>(m_ckB + m_ckA);
-        if (m_got >= m_len) {
-            m_parse = Parse::CkA;
-        }
-        break;
-
-    case Parse::CkA:
-        m_parse = byte == m_ckA ? Parse::CkB : Parse::Sync1;
-        break;
-
-    case Parse::CkB:
-        /* A frame whose checksum does not match is dropped, not guessed at: this
-         * is the only place a bad byte could turn into a wrong second. */
-        if (byte == m_ckB && !m_overflow) {
-            onFrame(m_cls, m_id, m_payload, m_len);
-        }
-        m_parse = Parse::Sync1;
-        break;
+    /* Both are counted by the decoder; this is where the first few of each are
+     * said out loud, because a receiver that has started failing its checksums
+     * looks exactly like one that has gone quiet and means something different. */
+    if (why == ubx::Drop::Checksum && m_badChecksumLogged < 5) {
+        ++m_badChecksumLogged;
+        ESP_LOGW(TAG, "frame %02x/%02x len %u: bad checksum", frame.cls, frame.id,
+                 static_cast<unsigned>(frame.len));
+    } else if (why == ubx::Drop::Length && m_badLengthLogged < 5) {
+        ++m_badLengthLogged;
+        ESP_LOGW(TAG, "frame %02x/%02x len %u: outside its definition", frame.cls, frame.id,
+                 static_cast<unsigned>(frame.len));
     }
 }
 
-void GpsTime::onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len)
+void GpsTime::onFrame(const ubx::Frame &frame)
 {
+    const uint8_t cls = frame.cls;
+    const uint8_t id  = frame.id;
+    m_lastFrameUs = esp_timer_get_time();
     if (!m_frameSeen) {
         m_frameSeen = true;
         ESP_LOGI(TAG, "UBX frames arriving at %u baud", static_cast<unsigned>(m_baud));
@@ -1589,15 +1640,14 @@ void GpsTime::onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
      * knowing what the receiver does send is the whole diagnosis. */
     if (m_framesLogged < 12) {
         ++m_framesLogged;
-        ESP_LOGI(TAG, "frame %02x/%02x len %u", cls, id, static_cast<unsigned>(len));
+        ESP_LOGI(TAG, "frame %02x/%02x len %u", cls, id, static_cast<unsigned>(frame.len));
     }
 
     if (cls == 0x05 && (id == 0x00 || id == 0x01)) { /* UBX-ACK-ACK / UBX-ACK-NAK */
         /* Only the message actually outstanding is recorded. Anything else is a
          * late reply to something already timed out, and guessing which would
          * put the answer on the wrong message. */
-        if (len >= 2 && payload[0] == m_awaitCls && payload[1] == m_awaitId &&
-            m_awaitResult == -1) {
+        if (frame.u8(0) == m_awaitCls && frame.u8(1) == m_awaitId && m_awaitResult == -1) {
             m_awaitResult = (id == 0x01) ? 1 : 0;
         }
         if (!m_ackLogged && id == 0x01) {
@@ -1605,25 +1655,25 @@ void GpsTime::onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
             ESP_LOGI(TAG, "module accepted the 1 Hz message set");
         }
     } else if (cls == 0x01 && id == 0x07) { /* UBX-NAV-PVT */
-        onNavPvt(payload, len);
+        onNavPvt(frame);
     } else if (cls == 0x01 && id == 0x26) { /* UBX-NAV-TIMELS */
-        onNavTimels(payload, len);
+        onNavTimels(frame);
     } else if (cls == 0x01 && id == 0x27) { /* UBX-NAV-TIM-TP */
-        onNavTimTp(payload, len);
+        onNavTimTp(frame);
     } else if (cls == 0x06 && id == 0x3D) { /* UBX-CFG-TMODE2 */
-        onCfgTmode(payload, len);
+        onCfgTmode(frame);
     } else if (cls == 0x0A && id == 0x04) { /* UBX-MON-VER */
-        onMonVer(payload, len);
+        onMonVer(frame);
     } else if (cls == 0x0A && id == 0x09) { /* UBX-MON-HW */
-        onMonHw(payload, len);
+        onMonHw(frame);
     } else if (cls == 0x01 && id == 0x35) { /* UBX-NAV-SAT */
-        onNavSat(payload, len);
+        onNavSat(frame);
     } else if (cls == 0x0D && id == 0x04) { /* UBX-TIM-SVIN */
-        onNavSvin(payload, len);
+        onNavSvin(frame);
     }
 }
 
-void GpsTime::onMonVer(const uint8_t *p, uint16_t len)
+void GpsTime::onMonVer(const ubx::Frame &f)
 {
     if (m_verLogged) {
         return;
@@ -1636,9 +1686,9 @@ void GpsTime::onMonVer(const uint8_t *p, uint16_t len)
      * actually read -- the serial console drops bytes in exactly this part of
      * the boot, when the Ethernet task is also talking. */
     std::string text;
-    text.reserve(len);
-    for (uint16_t i = 0; i < len; ++i) {
-        const char c = static_cast<char>(p[i]);
+    text.reserve(f.len);
+    for (const uint8_t byte : f.payload) {
+        const char c = static_cast<char>(byte);
         text += c == '\0' ? ' ' : (c >= 0x20 && c < 0x7F ? c : '.');
     }
 
@@ -1651,7 +1701,7 @@ void GpsTime::onMonVer(const uint8_t *p, uint16_t len)
     ESP_LOGI(TAG, "module: %.48s", text.c_str());
 }
 
-void GpsTime::onMonHw(const uint8_t *p, uint16_t len)
+void GpsTime::onMonHw(const ubx::Frame &f)
 {
     /* UBX-MON-HW is 60 bytes. The fields that matter for an antenna are:
      *   16 noisePerMS (u2, dBm)   18 agcCnt (u2)
@@ -1667,21 +1717,17 @@ void GpsTime::onMonHw(const uint8_t *p, uint16_t len)
      * overloaded: a preamp on a high-gain antenna drives agcCnt down and the
      * jamming state up, which looks like a good signal right up to the point
      * where it is a worse one. */
-    if (len < 60) {
-        return;
-    }
-
-    const uint16_t noise  = le16(p + 16);
-    const uint16_t agc    = le16(p + 18);
-    const uint8_t  status = p[20];
-    const uint8_t  power  = p[21];
-    const uint8_t  jstate = (p[22] >> 2) & 0x03;
-    const uint8_t  jam    = p[45];
+    const uint16_t noise  = f.u2(16);
+    const uint16_t agc    = f.u2(18);
+    const uint8_t  status = f.u8(20);
+    const uint8_t  power  = f.u8(21);
+    const uint8_t  jstate = (f.u8(22) >> 2) & 0x03;
+    const uint8_t  jam    = f.u8(45);
 
     /* The pin map, which is the only place the supervisor's pin numbers appear. */
-    const uint32_t pinSel = static_cast<uint32_t>(le32(p));
-    const uint32_t pinDir = static_cast<uint32_t>(le32(p + 8));
-    const uint32_t pinVal = static_cast<uint32_t>(le32(p + 12));
+    const uint32_t pinSel = f.u4(0);
+    const uint32_t pinDir = f.u4(8);
+    const uint32_t pinVal = f.u4(12);
 
     uint8_t before = 0;
     uint8_t beforePower = 0;
@@ -1740,7 +1786,7 @@ void GpsTime::onMonHw(const uint8_t *p, uint16_t len)
     }
 }
 
-void GpsTime::onNavSat(const uint8_t *p, uint16_t len)
+void GpsTime::onNavSat(const ubx::Frame &f)
 {
     /* UBX-NAV-SAT: 8 bytes of header (iTOW, version, numSvs, reserved) then 12
      * bytes per satellite. Only cno and the svUsed flag are wanted, so the
@@ -1749,25 +1795,21 @@ void GpsTime::onNavSat(const uint8_t *p, uint16_t len)
      * C/N0 is the number to compare antennas with. Satellite count is not: a
      * better antenna adds the marginal ones last, and a worse one can hold the
      * count up on the strongest handful while everything near the horizon goes.
-     * Mean and max over *used* satellites therefore, not tracked ones. */
-    if (len < 8) {
-        return;
-    }
-    const uint8_t num = p[5];
-    if (len < static_cast<uint16_t>(8 + 12 * num)) {
-        return;
-    }
+     * Mean and max over *used* satellites therefore, not tracked ones. The
+     * declared count can exceed what the payload holds -- the decoder gates on
+     * 8 + 12n only up to its buffer -- so the walk stops at whichever is
+     * shorter. */
+    const uint8_t num  = f.u8(5);
+    const uint8_t fits = static_cast<uint8_t>((f.len - 8) / 12);
+    const uint8_t walk = num < fits ? num : fits;
 
     uint16_t sum = 0;
     uint8_t  max = 0;
     uint8_t  used = 0;
-    for (uint8_t i = 0; i < num; ++i) {
-        const uint8_t *sv = p + 8 + 12 * i;
-        const uint8_t  cno = sv[2];
-        const uint32_t fl  = static_cast<uint32_t>(sv[8]) |
-                            (static_cast<uint32_t>(sv[9]) << 8) |
-                            (static_cast<uint32_t>(sv[10]) << 16) |
-                            (static_cast<uint32_t>(sv[11]) << 24);
+    for (uint8_t i = 0; i < walk; ++i) {
+        const std::size_t sv  = 8 + 12 * static_cast<std::size_t>(i);
+        const uint8_t     cno = f.u8(sv + 2);
+        const uint32_t    fl  = f.u4(sv + 8);
         if ((fl & (1u << 3)) == 0 || cno == 0) {
             continue;
         }
@@ -1784,7 +1826,7 @@ void GpsTime::onNavSat(const uint8_t *p, uint16_t len)
     portEXIT_CRITICAL(&m_mux);
 }
 
-void GpsTime::onNavSvin(const uint8_t *p, uint16_t len)
+void GpsTime::onNavSvin(const ubx::Frame &f)
 {
     /* UBX-TIM-SVIN: dur U4, meanX/Y/Z I4, meanV U4, obs U4, valid, active,
      * reserved U2 -- 28 bytes, confirmed against live frames while a survey was
@@ -1799,15 +1841,12 @@ void GpsTime::onNavSvin(const uint8_t *p, uint16_t len)
      * The mean is kept after the survey ends, because locking the position
      * afterwards is the whole point of having run one and the receiver carries
      * it in this message and nowhere else this firmware can reach. */
-    if (len < 28) {
-        return;
-    }
-    const uint32_t dur  = text::getLe<uint32_t>(p);
-    const uint32_t var  = text::getLe<uint32_t>(p + 16);
-    const uint32_t obs  = text::getLe<uint32_t>(p + 20);
+    const uint32_t dur = f.u4(0);
+    const uint32_t var = f.u4(16);
+    const uint32_t obs = f.u4(20);
     int32_t        mean[3];
     for (int i = 0; i < 3; ++i) {
-        mean[i] = text::getLe<int32_t>(p + 4 + 4 * i);
+        mean[i] = f.i4(4 + 4 * i);
     }
 
     portENTER_CRITICAL(&m_mux);
@@ -1817,8 +1856,8 @@ void GpsTime::onNavSvin(const uint8_t *p, uint16_t len)
     m_svinDur    = dur;
     m_svinAcc    = var;
     m_svinObs    = obs;
-    m_svinValid  = p[24] != 0;
-    m_svinActive = p[25] != 0;
+    m_svinValid  = f.u8(24) != 0;
+    m_svinActive = f.u8(25) != 0;
     m_svinAtUs   = esp_timer_get_time();
     if (m_svinActive) {
         /* The receiver is the authority on whether this is still running; a
@@ -1856,24 +1895,21 @@ const char *fixText(uint8_t fix)
 
 }  // namespace
 
-void GpsTime::onNavPvt(const uint8_t *p, uint16_t len)
+void GpsTime::onNavPvt(const ubx::Frame &f)
 {
-    /* NAV-PVT is 92 bytes. The first 24 carry everything used here, but the
-     * frame has to be complete or those offsets mean nothing. */
-    if (len < 92) {
-        return;
-    }
-
-    const uint8_t valid = p[11];
+    /* The first 24 bytes carry everything used here; the decoder has already
+     * held the frame to its full 92. */
+    const uint8_t valid = f.u8(11);
     time_t        stamp = 0;
     /* validDate | validTime. u-blox only sets both once the receiver has an
      * almanac and a position estimate, which is exactly the point at which its
      * UTC can be believed -- before that the fields hold a 1980 default. */
     const bool    haveTime = (valid & 0x03) == 0x03 &&
-                          civilToEpoch(le16(p + 4), p[6], p[7], p[8], p[9], p[10], stamp);
-    const int32_t nano   = le32(p + 16); /* offset into the second, ~0 at 1 Hz */
-    const uint8_t fix    = p[20];
-    const uint8_t sats   = p[23];
+                          civilToEpoch(f.u2(4), f.u8(6), f.u8(7), f.u8(8), f.u8(9), f.u8(10),
+                                       stamp);
+    const int32_t nano   = f.i4(16); /* offset into the second, ~0 at 1 Hz */
+    const uint8_t fix    = f.u8(20);
+    const uint8_t sats   = f.u8(23);
 
     portENTER_CRITICAL(&m_mux);
     m_timeValid  = haveTime;
@@ -1898,21 +1934,17 @@ void GpsTime::onNavPvt(const uint8_t *p, uint16_t len)
     anchor(stamp);
 }
 
-void GpsTime::onNavTimels(const uint8_t *p, uint16_t len)
+void GpsTime::onNavTimels(const ubx::Frame &f)
 {
     /* 24 bytes, version 0, from the u-blox 8 interface description:
      *   8  srcOfCurrLs (u1)   9  currLs (i1)
      *   10 srcOfLsChange (u1) 11 lsChange (i1)
      *   12 timeToLsEvent (i4) 16 dateOfLsGpsWn (u2) 18 dateOfLsGpsDn (u2)
      *   23 valid (u1): bit 0 says currLs is known, bit 1 says the event time is */
-    if (len < 24) {
-        return;
-    }
-
-    const int8_t  current = static_cast<int8_t>(p[9]);
-    const int8_t  change  = static_cast<int8_t>(p[11]);
-    const int32_t inS     = le32(p + 12);
-    const uint8_t valid   = p[23];
+    const int8_t  current = static_cast<int8_t>(f.u8(9));
+    const int8_t  change  = static_cast<int8_t>(f.u8(11));
+    const int32_t inS     = f.i4(12);
+    const uint8_t valid   = f.u8(23);
     const bool    haveOffset  = (valid & 0x01) != 0;
     const bool    haveEventAt = (valid & 0x02) != 0;
 
@@ -1942,7 +1974,7 @@ void GpsTime::onNavTimels(const uint8_t *p, uint16_t len)
     }
 }
 
-void GpsTime::onNavTimTp(const uint8_t *p, uint16_t len)
+void GpsTime::onNavTimTp(const ubx::Frame &f)
 {
     /* NAV-TIM-TP is 16 bytes, from the u-blox 8 interface description:
      *    0 towMS (u4, ms of week)   4 towSubMS (u4, 2^-32 of a ms)
@@ -1964,14 +1996,9 @@ void GpsTime::onNavTimTp(const uint8_t *p, uint16_t len)
      * again (see kIsrLatencyNs); what this adds is the spread, which does not
      * cancel and is what a client needs in order to know how good the number it
      * is handed actually is. */
-    if (len < 16) {
-        return;
-    }
-
-    const int32_t  towMs     = le32(p);
-    const uint32_t towSubMs  = static_cast<uint32_t>(le32(p + 4));
-    const int32_t  qErrPs    = le32(p + 8);
-    const uint8_t  flags     = p[14];
+    const uint32_t towSubMs  = f.u4(4);
+    const int32_t  qErrPs    = f.i4(8);
+    const uint8_t  flags     = f.u8(14);
 
     const bool utcBase     = (flags & 0x01) == 0;
     const bool qErrInvalid = (flags & 0x08) != 0;
@@ -1980,7 +2007,7 @@ void GpsTime::onNavTimTp(const uint8_t *p, uint16_t len)
      * pulse is a hair either side of zero. A reported position just under a
      * second is the same place seen from the other side, so it is made
      * negative rather than being read as 999 ms late. */
-    int32_t msIntoSecond = towMs % 1000;
+    int32_t msIntoSecond = f.i4(0) % 1000;
     if (msIntoSecond < 0) {
         msIntoSecond += 1000;
     }
@@ -2305,6 +2332,11 @@ GpsTime::Status GpsTime::status() const
     st.lastFix     = m_lastFix;
     st.offsetUs    = m_offsetUs;
     st.offsetNs    = m_offsetNs;
+    st.frames          = m_decoder.frames();
+    st.droppedChecksum = m_decoder.droppedChecksum();
+    st.droppedLength   = m_decoder.droppedLength();
+    st.rescans         = m_rescans;
+    st.bridgeDroppedCrc = m_bridgeDroppedCrc;
     st.ratePpb     = m_ratePpb;
     st.rateSamples = m_rateSamples;
     st.leapSeconds = m_leapSeconds;

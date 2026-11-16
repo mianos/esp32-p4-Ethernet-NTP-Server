@@ -86,8 +86,9 @@
 
 #include "text.h"
 #include "time_ref.h"
+#include "ubx.h"
 
-class GpsTime {
+class GpsTime : private ubx::Listener {
 public:
     /* What /healthz reports about the receiver, and what the reference is
      * allowed to claim. Copied out under the same lock the PPS interrupt takes:
@@ -106,6 +107,12 @@ public:
          * that step is the only way to check the correction went the right way
          * without a reference the box does not have. */
         int64_t  offsetNs   = 0;
+        /* Framing counters, straight off the decoder. */
+        uint32_t frames          = 0;
+        uint32_t droppedChecksum = 0;
+        uint32_t droppedLength   = 0;
+        uint32_t rescans         = 0;
+        uint32_t bridgeDroppedCrc = 0;
         bool     locked     = false; /* a stratum-1 reference right now */
 
         /* The servo: esp_timer's rate error against the GPS in parts per
@@ -301,6 +308,10 @@ public:
     /* Re-send the pulse frame with a new antenna cable delay, in nanoseconds.
      * Persisted by the caller: this only queues the frame for the task. */
     void requestAntDelay();
+    /* Set the host side's rate on its own, without telling the receiver. That
+     * is how a line that has been desynchronised by something other than this
+     * firmware -- or deliberately, to watch the scan -- is put back. */
+    void requestBaud(uint32_t baud);
     /* Learn the time mode from the receiver, and put a known position hold back
      * after something has cleared it. */
     void adoptTimeMode();
@@ -374,17 +385,17 @@ private:
 
     /* UBX framing, one byte at a time. NMEA sentences and rubbish are skipped
      * by the same loop: the parser only ever looks for 0xB5 0x62. */
-    enum class Parse { Sync1, Sync2, Class, Id, LenLo, LenHi, Payload, CkA, CkB };
-    void feed(uint8_t byte);
+    void onFrame(const ubx::Frame &frame) override;
+    void onDrop(ubx::Drop why, const ubx::Frame &frame) override;
     void onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len);
-    void onNavPvt(const uint8_t *p, uint16_t len);
-    void onNavTimels(const uint8_t *p, uint16_t len);
-    void onNavTimTp(const uint8_t *p, uint16_t len);
-    void onMonVer(const uint8_t *p, uint16_t len);
-    void onMonHw(const uint8_t *p, uint16_t len);
-    void onNavSat(const uint8_t *p, uint16_t len);
-    void onNavSvin(const uint8_t *p, uint16_t len);
-    void onCfgTmode(const uint8_t *p, uint16_t len);
+    void onNavPvt(const ubx::Frame &f);
+    void onNavTimels(const ubx::Frame &f);
+    void onNavTimTp(const ubx::Frame &f);
+    void onMonVer(const ubx::Frame &f);
+    void onMonHw(const ubx::Frame &f);
+    void onNavSat(const ubx::Frame &f);
+    void onNavSvin(const ubx::Frame &f);
+    void onCfgTmode(const ubx::Frame &f);
     void anchor(time_t second);
 
     /* The servo. Each anchor is one sample of esp_timer against the GPS; the
@@ -441,15 +452,11 @@ private:
     int64_t      m_fitUs           = 0;
 
     /* The GPS task's own state; no other task reads it. */
-    Parse    m_parse        = Parse::Sync1;
-    uint8_t  m_cls          = 0;
-    uint8_t  m_id           = 0;
-    uint16_t m_len          = 0;
-    uint16_t m_got          = 0;
-    uint8_t  m_ckA          = 0;
-    uint8_t  m_ckB          = 0;
-    bool     m_overflow     = false;
-    uint8_t  m_payload[512] = {}; /* NAV-SAT with 32 satellites is 392 bytes */
+    ubx::Decoder m_decoder;
+    int64_t      m_lastFrameUs = 0;
+    uint32_t     m_rescans    = 0;
+    uint32_t     m_badChecksumLogged = 0;
+    uint32_t     m_badLengthLogged   = 0;
     uint32_t m_pairedCount  = 0; /* the PPS edge the current anchor came from */
     uint32_t m_framesLogged = 0;
     bool     m_stepped      = false;
@@ -522,6 +529,7 @@ private:
      * from NAV-SVIN, kept here so "lock it" does not have to invent one. */
     volatile uint8_t m_svinCmd     = 0;
     volatile bool    m_tp5Cmd      = false;
+    volatile uint32_t m_baudReq    = 0;
     volatile uint32_t m_svinDurS   = 86400;
     volatile uint32_t m_svinAccMm  = 3000;
     uint8_t          m_tmode        = 0; /* 0 disabled, 1 surveying, 2 fixed */
@@ -568,6 +576,7 @@ private:
     volatile uint32_t m_bridgeTx   = 0;
     volatile uint32_t m_bridgeSessions = 0;
     volatile uint32_t m_bridgeRefused  = 0;
+    volatile uint32_t m_bridgeDroppedCrc = 0;
     volatile int      m_bridgeClients  = 0;
     text::Buf<48>  m_bridgeEnd     = {"none"};
     text::Buf<128> m_bridgeLast    = {""};

@@ -152,6 +152,7 @@ void NtpWebServer::register_routes()
         {"/gps/survey",   HTTP_POST, gps_survey_post_handler},
         {"/gps/info",     HTTP_GET,  gps_info_get_handler},
         {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
+        {"/gps/baud",     HTTP_POST, gps_baud_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
         {"/firmware",     HTTP_POST, firmware_post_handler},
     };
@@ -255,6 +256,14 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         if (gps.ppsAgeUs >= 0) {
             json.AddItem("gps_pps_age_ms", static_cast<double>(gps.ppsAgeUs / 1000));
         }
+        /* Framing health. The answer and the receiver going quiet look the same
+         * from every other field here, and these three tell them apart: good
+         * frames, frames the checksum or the length table threw away, and how
+         * often the line has been re-scanned for the baud. */
+        json.AddItem("gps_frames", static_cast<double>(gps.frames));
+        json.AddItem("gps_dropped_crc", static_cast<double>(gps.droppedChecksum));
+        json.AddItem("gps_dropped_len", static_cast<double>(gps.droppedLength));
+        json.AddItem("gps_rescans", static_cast<double>(gps.rescans));
         /* Only what answers "is it working": time, lock and satellites. Every
          * number behind those -- the servo, the signal, the antenna, the pulse
          * -- is at /gps/info, where a caller who is tuning something can get it
@@ -491,6 +500,7 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("bridge_clients", static_cast<double>(gps.bridgeClients));
     doc.AddItem("bridge_sessions", static_cast<double>(gps.bridgeSessions));
     doc.AddItem("bridge_refused", static_cast<double>(gps.bridgeRefused));
+    doc.AddItem("bridge_dropped_crc", static_cast<double>(gps.bridgeDroppedCrc));
     doc.AddItem("bridge_rx", static_cast<double>(gps.bridgeRx));
     doc.AddItem("bridge_tx", static_cast<double>(gps.bridgeTx));
     doc.AddItem("bridge_end", gps.bridgeEnd);
@@ -677,6 +687,32 @@ esp_err_t NtpWebServer::gps_gnss_post_handler(httpd_req_t *req)
     resp.AddItem("read_back_after_s", 20.0);
     resp.AddItem("note", "gps_gnss and gps_gnss_cfg at /gps/info report what was set and "
                          "what the receiver said; a mask it refuses leaves the old set");
+    return sendJson(req, resp, 200);
+}
+
+esp_err_t NtpWebServer::gps_baud_post_handler(httpd_req_t *req)
+{
+    /* The host side alone, deliberately out of step with the receiver. The scan
+     * puts the two back together within a few seconds, which is both the test
+     * for that path and the way out of a line that has been desynchronised by
+     * something that was not this firmware. */
+    JsonWrapper doc;
+    if (!readJsonBody(req, doc)) {
+        return ESP_FAIL;
+    }
+    double baud = 0;
+    if (!doc.GetField("baud", baud) || baud < 4800 || baud > 921600) {
+        return sendJsonError(req, 400, "baud must be 4800..921600");
+    }
+
+    GpsTime::instance().requestBaud(static_cast<uint32_t>(baud));
+    ESP_LOGW(TAG, "POST /gps/baud from %s: %u", callerAddress(req).c_str(),
+             static_cast<unsigned>(baud));
+
+    JsonWrapper resp;
+    resp.AddItem("host_baud", baud);
+    resp.AddItem("note", "the receiver is untouched; gps_rescans at /healthz counts the "
+                         "scan that puts the two back together");
     return sendJson(req, resp, 200);
 }
 
