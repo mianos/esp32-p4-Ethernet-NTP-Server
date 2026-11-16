@@ -21,6 +21,7 @@
 #include "freertos/task.h"
 
 #include "eth_link.h"
+#include "net_log.h"
 #include "net_state.h"
 #include "ntp_server.h"
 #include "ntp_time.h"
@@ -415,6 +416,7 @@ void EthernetLink::onGotIp(const ip_event_got_ip_t &event)
         const esp_err_t err = NtpWebServer::instance().begin();
         if (err == ESP_OK) {
             m_webStarted = true;
+            net_log::start();
             ESP_LOGI(TAG, "http: http://" IPSTR "/healthz  http://" IPSTR "/config",
                      IP2STR(&ip_info.ip), IP2STR(&ip_info.ip));
             /* Reachable is the condition for keeping an OTA'd image; the slot

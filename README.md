@@ -167,6 +167,23 @@ nothing else — and `app_main()` is just boot order: NVS, settings, netif, cloc
 link. The Ethernet link, which is the longest of those, is `eth_link.cpp`; the
 boot sequence reads as five calls because of it.
 
+## Watching it over the network
+
+There is no radio, so a serial cable is the only way to see the console on the
+bench -- but once the box is somewhere awkward the LAN is what is left. Setting
+`logHost` (a dotted quad, not a name) and `logPort` duplicates `ESP_LOG` to UDP
+and a phone on the WiFi can follow it:
+
+```
+curl -X POST -d '{"logHost":"192.0.2.20"}' http://<box>/config
+nc -ukl 5514
+```
+
+The console is unchanged and still gets every byte. The hook only formats and
+pushes at a ring; a task drains it and sends, so a busy netif cannot stall the
+GPS task and a full ring drops lines rather than the log call waiting. Off by
+default, and `""` clears it.
+
 ## Expected log (captured from this board)
 
 ```

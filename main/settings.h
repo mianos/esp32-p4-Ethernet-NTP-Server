@@ -104,6 +104,11 @@ public:
     /* Power cuts are a normal event here -- street works, storms -- so the count
      * of boots is worth carrying: a survey that vanished is otherwise
      * indistinguishable from one that was never started. */
+    /* Where to duplicate the console to, as a dotted quad and a port. Empty
+     * host means no sink; the two are kept as strings for the same reason the
+     * rest of this config is. */
+    const std::string &logHost() const { return m_logHost; }
+    const std::string &logPort() const { return m_logPort; }
     const std::string &boots() const { return m_boots; }
     void setBoots(const std::string &v) { m_boots = v; }
     void setGpsTimeMode(const std::string &v) { m_gpsTimeMode = v; }
@@ -135,6 +140,8 @@ private:
     std::string m_gpsFixedPos;
     std::string m_gpsSurvey;
     std::string m_antDelayNs = "0";
+    std::string m_logHost;
+    std::string m_logPort    = "5514";
     std::string m_boots      = "0";
 
     /* "off", "dhcp", "static", "gps": anything else is Off. Used to seed

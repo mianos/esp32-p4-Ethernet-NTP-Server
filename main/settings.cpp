@@ -1,3 +1,4 @@
+#include "net_log.h"
 #include "settings.h"
 
 #include <cstdlib>
@@ -16,7 +17,8 @@ constexpr const char *kNvsKey       = "config";
 
 /* The keys POST /config accepts. Anything else in the body is ignored, as it
  * always was. */
-constexpr const char *kKeys[] = {"hostname", "tz", "timeSource", "ntpServer", "serveNtp"};
+constexpr const char *kKeys[] = {"hostname", "tz", "timeSource", "ntpServer", "serveNtp",
+                                 "logHost", "logPort"};
 
 }  // namespace
 
@@ -39,12 +41,18 @@ Settings::Settings(NvsStorageManager &nvs)
     field("gpsFixedPos", m_gpsFixedPos);
     field("gpsSurvey", m_gpsSurvey);
     field("antDelayNs", m_antDelayNs);
+    field("logHost", m_logHost);
+    field("logPort", m_logPort);
     field("boots", m_boots);
 
     /* A new TZ string takes effect immediately, including after POST
      * /config/reset. Safe to attach here: it only touches this object and the C
      * library. */
     onChange("tz", [this] { applyTimezone(); });
+    /* The log sink is deliberately *not* started from onChange: settings load
+     * happens before lwIP exists, and socket() with no tcpip thread asserts
+     * "Invalid mbox" on every boot. The POST handler starts it instead, and the
+     * lease starts it again at boot. */
     onChange("timeSource", [this] {
         m_timeSourceEnum.store(parseTimeSource(m_timeSource), std::memory_order_relaxed);
     });

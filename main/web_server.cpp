@@ -17,6 +17,7 @@
 
 #include "gps_time.h"
 #include "net_state.h"
+#include "net_log.h"
 #include "ntp_server.h"
 #include "ntp_time.h"
 #include "settings.h"
@@ -353,6 +354,12 @@ esp_err_t NtpWebServer::config_post_handler(httpd_req_t *req)
     /* NVS is flash: only pay for a write when the config actually changed. */
     const std::string before = settings.toJson().ToString();
     settings.applyJson(doc);
+
+    /* Started here rather than from an onChange hook: applyJson also runs at
+     * boot during load, before lwIP is up. */
+    if (doc.ContainsField("logHost") || doc.ContainsField("logPort")) {
+        net_log::start();
+    }
     if (settings.toJson().ToString() != before) {
         settings.save();
     }
