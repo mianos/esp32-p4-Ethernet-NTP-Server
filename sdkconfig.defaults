@@ -57,3 +57,10 @@ CONFIG_LWIP_DHCP_OPTIONS_LEN=128
 # std::format in a handler costs several hundred bytes of frame each;
 # 4 KB (the component default) overflows on the JSON builders.
 CONFIG_WEBSERVER_TASK_STACK_SIZE=12288
+
+# The system event task runs the netif event handlers, and those log with
+# std::string and start the servers. At the 2304 default a Status copy on that
+# task overflowed its canary and panicked the board on every boot, which only
+# showed as a 10-second DHCP loop. 4 KB leaves room for the handlers and the
+# float parsing they do.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096

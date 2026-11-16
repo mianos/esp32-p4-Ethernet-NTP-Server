@@ -936,6 +936,39 @@ are there because a reading is only worth anything next to when it was taken.
 [Antennas](#antennas-and-what-the-front-end-says-about-one) for which number to
 compare on and which to diagnose with.
 
+### GET /gps/sats, for the sky view
+
+Per-satellite C/N0 with elevation and azimuth, for a polar plot. Separate from
+`/gps/info` because it is the one response whose size follows the sky.
+
+```console
+$ curl -s http://192.0.2.20/gps/sats
+{"used":14,"mean":29,"max":43,"age_ms":210,
+ "sats":[{"gnss":0,"sv":6,"cno":31,"elev":41,"azim":212,"flags":2327}, ...]}
+```
+
+`used`, `mean` and `max` are the same figures `/gps/info` reports, repeated so a
+poller needs one request. `age_ms` is how old the sample is, and is `null` before
+the first `NAV-SAT` arrives.
+
+The point of the rows is that an aggregate cannot separate the two ways a
+satellite goes bad. One reflected off a roof or a wall arrives **loud** — high
+C/N0 — but late and on a low or fixed elevation; one near the horizon is simply
+weak. Both land in the same `cn0_mean`. Plotting C/N0 against elevation is what
+tells them apart, and that is the difference between a bad site and a bad
+antenna; a survey that will not converge is the usual reason to look.
+
+`flags` is the receiver's own word, passed through unmasked rather than
+reinterpreted: `qualityInd` is bits 0-2, `svUsed` bit 3, `health` bit 4,
+`ephAvail` bit 8. A loud satellite with `health` set and `svUsed` clear is the
+multipath signature, so the plot should colour on those bits rather than on C/N0
+alone. Rows are not deduplicated by `sv`: a multiband receiver lists one
+satellite once per band, and they are genuinely separate measurements.
+
+`elev` is `-91` and `azim` `0` on a receiver with no fix yet: the geometry comes
+from the broadcast ephemeris, so it is only meaningful once satellites are being
+used. Everything is capped at 32 rows.
+
 Two hooks exist for a bench session:
 
 ```console

@@ -152,6 +152,7 @@ void NtpWebServer::register_routes()
         {"/gps/gnss",     HTTP_POST, gps_gnss_post_handler},
         {"/gps/survey",   HTTP_POST, gps_survey_post_handler},
         {"/gps/info",     HTTP_GET,  gps_info_get_handler},
+        {"/gps/sats",     HTTP_GET,  gps_sats_get_handler},
         {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
         {"/gps/baud",     HTTP_POST, gps_baud_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
@@ -581,6 +582,67 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         doc.AddItem("cn0_age_s", static_cast<double>(gps.navSatAgeUs) / 1e6);
     }
     return sendJson(req, doc, 200);
+}
+
+esp_err_t NtpWebServer::gps_sats_get_handler(httpd_req_t *req)
+{
+    /* Per-satellite C/N0 with elevation and azimuth, for a polar sky view.
+     * Separate from /gps/info because this is the one response whose size
+     * follows the sky: 32 satellites is a couple of kilobytes, and folding it
+     * into the info dump would make every poller pay for it.
+     *
+     * A plot is worth the space because the aggregate cannot separate the two
+     * ways a satellite can be bad. One reflected off a roof arrives loud and
+     * late; one low in the sky is simply weak. Both land in the same cn0Mean,
+     * and only elevation against C/N0 -- with the healthy and svUsed flags
+     * beside them -- tells which is which. That difference is what decides
+     * whether the site or the antenna is at fault, which is the question a
+     * survey that will not converge asks.
+     *
+     * flags is passed through as the receiver's own word rather than being
+     * unpacked here: qualityInd is bits 0-2, svUsed 3, health 4, ephAvail 8,
+     * and a viewer that wants them can mask. ephAvail is unscaled because a
+     * satellite being tracked without ephemeris is a different fault from one
+     * being tracked badly. */
+    const GpsTime::Status gps = GpsTime::instance().status();
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == nullptr) {
+        return sendJsonError(req, 500, "out of memory");
+    }
+    cJSON_AddNumberToObject(root, "used", gps.cn0Used);
+    cJSON_AddNumberToObject(root, "mean", gps.cn0Mean);
+    cJSON_AddNumberToObject(root, "max", gps.cn0Max);
+    if (gps.navSatAgeUs >= 0) {
+        cJSON_AddNumberToObject(root, "age_ms", static_cast<double>(gps.navSatAgeUs) / 1000.0);
+    } else {
+        cJSON_AddNullToObject(root, "age_ms");
+    }
+
+    /* The rows live here, on the httpd task's 12 kB stack, rather than inside
+     * the Status that every /healthz also copies. */
+    GpsTime::Sat sats[GpsTime::kMaxSats];
+    const uint8_t have = GpsTime::instance().copySats(sats, GpsTime::kMaxSats);
+
+    cJSON *list = cJSON_AddArrayToObject(root, "sats");
+    if (list != nullptr) {
+        for (uint8_t i = 0; i < have; ++i) {
+            const GpsTime::Sat &s = sats[i];
+            cJSON *row = cJSON_CreateObject();
+            if (row == nullptr) {
+                break;
+            }
+            cJSON_AddNumberToObject(row, "gnss", s.gnss);
+            cJSON_AddNumberToObject(row, "sv", s.sv);
+            cJSON_AddNumberToObject(row, "cno", s.cno);
+            cJSON_AddNumberToObject(row, "elev", s.elev);
+            cJSON_AddNumberToObject(row, "azim", s.azim);
+            cJSON_AddNumberToObject(row, "flags", static_cast<double>(s.flags));
+            cJSON_AddItemToArray(list, row);
+        }
+    }
+
+    return sendJson(req, JsonWrapper(root), 200);
 }
 
 esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)

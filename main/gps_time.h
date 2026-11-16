@@ -90,6 +90,26 @@
 
 class GpsTime : private ubx::Listener {
 public:
+    /* One satellite out of UBX-NAV-SAT, for the sky view. Field names follow
+     * the message: gnssId and svId identify it, cno/elev/azim are what a
+     * polar plot needs, and flags carry quality, svUsed, health and ephAvail
+     * in the receiver's own bit order so nothing has to be inferred twice.
+     *
+     * 32 is a ceiling, not an expectation: the payload holds 42 at 12 bytes
+     * each, but a sky that big means everything marginal is included and the
+     * extra rows tell a plot nothing. Multiband receivers put one satellite in
+     * here several times, once per band, which is why this is not deduplicated
+     * by svId. */
+    static constexpr uint8_t kMaxSats = 32;
+    struct Sat {
+        uint8_t  gnss  = 0;
+        uint8_t  sv    = 0;
+        uint8_t  cno   = 0;
+        int8_t   elev  = 0;
+        int16_t  azim  = 0;
+        uint32_t flags = 0;
+    };
+
     /* What /healthz reports about the receiver, and what the reference is
      * allowed to claim. Copied out under the same lock the PPS interrupt takes:
      * the HTTP task reads these while the GPS task writes them. */
@@ -258,6 +278,17 @@ public:
     esp_err_t begin();
 
     Status status() const;
+
+    /* The per-satellite sample behind status().cn0Mean, copied into a caller
+     * buffer, returning the count copied.
+     *
+     * Deliberately NOT a member of Status: the array is 256 bytes and Status is
+     * returned by value from every status() call, which happens on the NTP
+     * responder and on every /healthz. Folding it in grew each of those frames
+     * by the whole array and overflowed the 2304-byte sys_evt task, which
+     * panicked the board on boot. Here the caller decides where the bytes live
+     * and pays for them only on the one endpoint that wants them. */
+    uint8_t copySats(Sat *out, uint8_t max) const;
 
     /* The anchor plus elapsed monotonic time. False when no edge has been
      * paired with a NAV-PVT yet, which is what the reference turns into
@@ -583,6 +614,8 @@ private:
     uint8_t    m_cn0Max            = 0;
     uint8_t    m_cn0Mean           = 0;
     uint8_t    m_cn0Used           = 0;
+    uint8_t    m_satCount          = 0;
+    Sat        m_sats[kMaxSats]    = {};
     int64_t    m_navSatAtUs        = 0;
     bool       m_verLogged         = false;
     bool       m_timTpProbed       = false;

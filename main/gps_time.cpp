@@ -115,7 +115,11 @@ constexpr int64_t kMinEdgeSpacingUs = 500000;
  * during which the served clock is knowingly wrong. */
 constexpr int64_t kStepThresholdNs = 250000000; /* 250 ms */
 
-constexpr int          kTaskStack    = 4096;
+/* 6 kB, raised from 4096 when the sky view landed. The decoder, the servo fit
+ * and the NAV-SAT walk all run here, and a frame walk that keeps a row per
+ * satellite is what pushed the old figure over: it overflowed into a panic
+ * loop that only showed as the box re-DHCPing every ten seconds. */
+constexpr int          kTaskStack    = 6144;
 constexpr UBaseType_t  kTaskPriority = 4; /* below the responder: it answers packets */
 
 /* NTP refid for this reference, spelled the way RFC 5905 spells it: four ASCII
@@ -1789,8 +1793,9 @@ void GpsTime::onMonHw(const ubx::Frame &f)
 void GpsTime::onNavSat(const ubx::Frame &f)
 {
     /* UBX-NAV-SAT: 8 bytes of header (iTOW, version, numSvs, reserved) then 12
-     * bytes per satellite. Only cno and the svUsed flag are wanted, so the
-     * groups are walked rather than the message being kept.
+     * bytes per satellite. The groups are walked rather than the message being
+     * kept, but every group is now retained for the sky view, not just the two
+     * fields the means need.
      *
      * C/N0 is the number to compare antennas with. Satellite count is not: a
      * better antenna adds the marginal ones last, and a worse one can hold the
@@ -1798,7 +1803,12 @@ void GpsTime::onNavSat(const ubx::Frame &f)
      * Mean and max over *used* satellites therefore, not tracked ones. The
      * declared count can exceed what the payload holds -- the decoder gates on
      * 8 + 12n only up to its buffer -- so the walk stops at whichever is
-     * shorter. */
+     * shorter.
+     *
+     * Every walked group is stored, used or not, because the point of the plot
+     * is to show what was rejected as well as what was kept; a satellite that
+     * is loud but unhealthy is exactly the multipath signature worth seeing.
+     * The means still count only used ones. */
     const uint8_t num  = f.u8(5);
     const uint8_t fits = static_cast<uint8_t>((f.len - 8) / 12);
     const uint8_t walk = num < fits ? num : fits;
@@ -1806,10 +1816,29 @@ void GpsTime::onNavSat(const ubx::Frame &f)
     uint16_t sum = 0;
     uint8_t  max = 0;
     uint8_t  used = 0;
+    uint8_t  kept = 0;
+
+    /* Written straight into m_sats rather than a local, because this runs on the
+     * GPS task and 32 entries is 256 bytes of its stack. The critical section
+     * wraps the whole walk for the same reason: the row is filled where it is
+     * read, so no staging buffer exists to fall off the stack. A walk of 32
+     * groups is a few hundred nanoseconds with interrupts off, and status() is
+     * the only other reader. */
+    portENTER_CRITICAL(&m_mux);
     for (uint8_t i = 0; i < walk; ++i) {
         const std::size_t sv  = 8 + 12 * static_cast<std::size_t>(i);
         const uint8_t     cno = f.u8(sv + 2);
         const uint32_t    fl  = f.u4(sv + 8);
+
+        if (kept < kMaxSats) {
+            Sat &s = m_sats[kept++];
+            s.gnss  = f.u8(sv + 0);
+            s.sv    = f.u8(sv + 1);
+            s.cno   = cno;
+            s.elev  = static_cast<int8_t>(f.u8(sv + 3));
+            s.azim  = static_cast<int16_t>(f.u2(sv + 4));
+            s.flags = fl;
+        }
         if ((fl & (1u << 3)) == 0 || cno == 0) {
             continue;
         }
@@ -1818,10 +1847,10 @@ void GpsTime::onNavSat(const ubx::Frame &f)
         ++used;
     }
 
-    portENTER_CRITICAL(&m_mux);
-    m_cn0Max   = max;
-    m_cn0Mean  = used != 0 ? static_cast<uint8_t>(sum / used) : 0;
-    m_cn0Used  = used;
+    m_cn0Max     = max;
+    m_cn0Mean    = used != 0 ? static_cast<uint8_t>(sum / used) : 0;
+    m_cn0Used    = used;
+    m_satCount   = kept;
     m_navSatAtUs = esp_timer_get_time();
     portEXIT_CRITICAL(&m_mux);
 }
@@ -2313,6 +2342,20 @@ void GpsTime::steer()
     if (adjtime(&delta, nullptr) != 0) {
         ESP_LOGW(TAG, "adjtime: errno %d", errno);
     }
+}
+
+uint8_t GpsTime::copySats(Sat *out, uint8_t max) const
+{
+    /* One short critical section around the whole copy: the rows are written by
+     * the GPS task on a 2 s message, so a torn read here would mix two samples
+     * into one plot. Callers pass their own buffer; /gps/sats is the only one. */
+    portENTER_CRITICAL(&m_mux);
+    const uint8_t n = m_satCount < max ? m_satCount : max;
+    for (uint8_t i = 0; i < n; ++i) {
+        out[i] = m_sats[i];
+    }
+    portEXIT_CRITICAL(&m_mux);
+    return n;
 }
 
 GpsTime::Status GpsTime::status() const
