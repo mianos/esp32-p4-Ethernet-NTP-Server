@@ -1570,6 +1570,8 @@ Not in this milestone, on purpose — or only half done:
 | `tools/ubx.py`          | host twin of the decoder, used by the tools |
 | `tools/ubx_test.py`     | framing tests: every split offset, corrupt bytes, false sync, length gates |
 
+`docs/code-review.md` is the review template for changes here.
+
 Written locally; everything else (JSON, NVS, settings machinery, the HTTP
 server) is a mianesp component.
 
