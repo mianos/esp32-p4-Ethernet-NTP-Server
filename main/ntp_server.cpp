@@ -9,6 +9,7 @@
 #include <string>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "lwip/inet.h"
 #include "lwip/ip6_addr.h"
 #include "lwip/sockets.h"
@@ -637,6 +638,21 @@ TimeReference NtpServer::reference() const
     return m_ref ? m_ref->reference() : TimeReference{};
 }
 
+NtpServer::Counters NtpServer::counters() const
+{
+    Counters c;
+    c.answered  = m_answered.load(std::memory_order_relaxed);
+    c.kod       = m_kod.load(std::memory_order_relaxed);
+    c.dropped   = m_dropped.load(std::memory_order_relaxed);
+    c.perMinute = static_cast<double>(m_ratePerMin.load(std::memory_order_relaxed));
+    const int64_t lastServed = m_lastServedUs.load(std::memory_order_relaxed);
+    if (lastServed >= 0) {
+        c.lastServedS = static_cast<double>(esp_timer_get_time() - lastServed) / 1e6;
+    }
+    c.clients = m_clients.load(std::memory_order_relaxed);
+    return c;
+}
+
 NtpServer::RootFigures NtpServer::wireRootFigures() const
 {
     const RootUncertainty uncertainty = rootUncertainty(reference(), std::time(nullptr));
@@ -654,6 +670,45 @@ void NtpServer::serveLoop()
     uint32_t    winAnswered = 0, winKod = 0, winDropped = 0; /* since report */
     uint32_t    reportAt    = pdTICKS_TO_MS(xTaskGetTickCount()) + kReportEveryMs;
     bool        firstSeen   = false;
+
+    /* Distinct sources, over the last kRecentSources answered requests. The
+     * address only: a client's port changes with every query, so including it
+     * would count one poller as many. This answers "is anything else using
+     * this", which is otherwise invisible. */
+    const auto recordSource = [this](const sockaddr_storage &addr) {
+        uint32_t    h = 2166136261u; /* FNV-1a */
+        const auto  mix = [&h](const uint8_t *p, std::size_t n) {
+            for (std::size_t i = 0; i < n; ++i) {
+                h ^= p[i];
+                h *= 16777619u;
+            }
+        };
+        if (addr.ss_family == AF_INET) {
+            const auto *in = reinterpret_cast<const sockaddr_in *>(&addr);
+            mix(reinterpret_cast<const uint8_t *>(&in->sin_addr), sizeof(in->sin_addr));
+        } else if (addr.ss_family == AF_INET6) {
+            const auto *in6 = reinterpret_cast<const sockaddr_in6 *>(&addr);
+            mix(in6->sin6_addr.s6_addr, 16);
+        } else {
+            return;
+        }
+        m_recent[m_recentAt++ % kRecentSources] = h;
+
+        uint8_t distinct = 0;
+        for (uint8_t i = 0; i < kRecentSources; ++i) {
+            if (m_recent[i] == 0) {
+                continue;
+            }
+            bool seen = false;
+            for (uint8_t j = 0; j < i && !seen; ++j) {
+                seen = m_recent[j] == m_recent[i];
+            }
+            if (!seen) {
+                ++distinct;
+            }
+        }
+        m_clients.store(distinct, std::memory_order_relaxed);
+    };
 
     while (m_running.load(std::memory_order_relaxed)) {
         sockaddr_storage from    = {};
@@ -683,11 +738,13 @@ void NtpServer::serveLoop()
             if (!parseRequest(packet, len, req)) {
                 ++dropped;
                 ++winDropped;
+                m_dropped.store(dropped, std::memory_order_relaxed);
             } else {
                 const Action action = limiter.check(from, nowMs);
                 if (action == Action::Drop) {
                     ++dropped;
                     ++winDropped;
+                    m_dropped.store(dropped, std::memory_order_relaxed);
                 } else {
                     const bool kod = action == Action::Kod;
 
@@ -706,9 +763,13 @@ void NtpServer::serveLoop()
                     } else if (kod) {
                         ++kodSent;
                         ++winKod;
+                        m_kod.store(kodSent, std::memory_order_relaxed);
                     } else {
                         ++answered;
                         ++winAnswered;
+                        m_answered.store(answered, std::memory_order_relaxed);
+                        m_lastServedUs.store(esp_timer_get_time(), std::memory_order_relaxed);
+                        recordSource(from);
                         if (!firstSeen) {
                             firstSeen = true;
                             ESP_LOGI(TAG, "first request from %s: stratum %u%s",
@@ -723,6 +784,10 @@ void NtpServer::serveLoop()
         }
 
         if (static_cast<int32_t>(nowMs - reportAt) >= 0) {
+            /* The rate is published before the window is cleared, so a reader
+             * sampling at any point sees the last completed window rather than
+             * a count that silently restarts underneath it. */
+            m_ratePerMin.store((winAnswered * 60000u) / kReportEveryMs, std::memory_order_relaxed);
             if (winAnswered != 0 || winKod != 0 || winDropped != 0) {
                 /* One line a minute at most: the serial console is the only
                  * local debug there is, and a LAN polling at minpoll would

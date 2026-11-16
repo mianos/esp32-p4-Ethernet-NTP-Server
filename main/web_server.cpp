@@ -255,6 +255,14 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         }
         json.AddItem("gps_fix", static_cast<double>(gps.fixType));
         json.AddItem("gps_sats", static_cast<double>(gps.satellites));
+        /* Time validity, edge count and whether an edge has ever been paired
+         * with a date. A 3D fix with invalid time is the state that quietly
+         * serves rubbish, and `locked` alone hides it by folding all three
+         * together; with ppsCount the difference between "the edges stopped"
+         * and "the edges never started" also stops reading the same. */
+        json.AddItem("gps_time_valid", gps.timeValid);
+        json.AddItem("gps_pps_count", static_cast<double>(gps.ppsCount));
+        json.AddItem("gps_anchored", gps.anchored);
         if (gps.ppsAgeUs >= 0) {
             json.AddItem("gps_pps_age_ms", static_cast<double>(gps.ppsAgeUs / 1000));
         }
@@ -330,6 +338,19 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("ntp_root_delay_us", root.delayUs);
         json.AddItem("ntp_root_dispersion_us", root.dispersionUs);
         json.AddItem("ntp_requests", static_cast<double>(server.requests()));
+        /* How the requests were treated, not just how many there were. A client
+         * being rate-limited and a client that stopped asking both leave
+         * `ntp_requests` flat; the minute rate and the two rejection counters
+         * separate them, and lastServed says how long the flat has lasted. */
+        const NtpServer::Counters counters = server.counters();
+        json.AddItem("ntp_answered", static_cast<double>(counters.answered));
+        json.AddItem("ntp_kod", static_cast<double>(counters.kod));
+        json.AddItem("ntp_dropped", static_cast<double>(counters.dropped));
+        json.AddItem("ntp_rate_per_min", counters.perMinute);
+        json.AddItem("ntp_clients", static_cast<double>(counters.clients));
+        if (counters.lastServedS >= 0) {
+            json.AddItem("ntp_last_served_s", counters.lastServedS);
+        }
     }
 }
 
@@ -530,13 +551,64 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         doc.AddItem("dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);
         doc.AddItem("lock_window_s", static_cast<double>(gps.lockWindowUs) / 1000000);
     }
-    /* The pulse's own quality, once TIM-TP says anything. */
+    /* The pulse's own quality. The jitter is OURS -- the spread of our own
+     * stamping from the rate fit -- and was gated behind timTpCount with the two
+     * TIM-TP figures, which hid it forever on a module that refuses the message
+     * (this one does). qErr and onSecond genuinely need TIM-TP; the jitter does
+     * not, so it stands alone. */
+    doc.AddItem("tp_jitter_ns", static_cast<double>(gps.jitterNs));
     if (gps.timTpCount != 0) {
         if (gps.qErrValid) {
             doc.AddItem("tp_qerr_ns", static_cast<double>(gps.qErrNs));
         }
-        doc.AddItem("tp_jitter_ns", static_cast<double>(gps.jitterNs));
         doc.AddItem("tp_on_second", gps.pulseOnSecond);
+    }
+
+    /* The servo's work counters, and the measurement-path half of the error
+     * budget. A mean offset cannot tell a settled servo from one that is
+     * fighting: steps and clamps are how often it has had to act, and spikes
+     * are edges that arrived where nothing predicted. */
+    doc.AddItem("root_delay_ns", static_cast<double>(gps.rootDelayNs));
+    doc.AddItem("servo_steps", static_cast<double>(gps.servoSteps));
+    doc.AddItem("servo_clamps", static_cast<double>(gps.servoClamps));
+    doc.AddItem("edge_spikes", static_cast<double>(gps.edgeSpikes));
+
+    /* Geometry and clock quality. Each carries its own age so a message that
+     * stops is visible as a growing number rather than a stale one that still
+     * reads current. */
+    if (gps.dopAgeUs >= 0) {
+        doc.AddItem("gdop", static_cast<double>(gps.gDop));
+        doc.AddItem("pdop", static_cast<double>(gps.pDop));
+        doc.AddItem("hdop", static_cast<double>(gps.hDop));
+        doc.AddItem("vdop", static_cast<double>(gps.vDop));
+        doc.AddItem("dop_age_s", static_cast<double>(gps.dopAgeUs) / 1e6);
+    }
+    if (gps.clockAgeUs >= 0) {
+        doc.AddItem("clk_bias_ns", static_cast<double>(gps.clkBiasNs));
+        doc.AddItem("clk_drift_ns_s", static_cast<double>(gps.clkDriftNsPerS));
+        doc.AddItem("t_acc_ns", static_cast<double>(gps.tAccNs));
+        doc.AddItem("f_acc_ps_s", static_cast<double>(gps.fAccPsPerS));
+        doc.AddItem("clock_age_s", static_cast<double>(gps.clockAgeUs) / 1e6);
+    }
+    if (gps.navStatusAgeUs >= 0) {
+        doc.AddItem("nav_status_flags", static_cast<double>(gps.navStatusFlags));
+        doc.AddItem("nav_status_flags2", static_cast<double>(gps.navStatusFlags2));
+        doc.AddItem("ttff_ms", static_cast<double>(gps.ttffMs));
+        doc.AddItem("nav_status_age_s", static_cast<double>(gps.navStatusAgeUs) / 1e6);
+    }
+    /* MON-RF's fate is always reported, even when it is carrying nothing: a
+     * missing field and a refused message look identical otherwise, and this
+     * module's protocol predates the message. */
+    {
+        static constexpr const char *kRfCfg[] = {"silent", "accepted", "rejected"};
+        doc.AddItem("rf_cfg", gps.rfCfg <= 2 ? kRfCfg[gps.rfCfg] : "silent");
+    }
+    if (gps.rfSeen && gps.rfAgeUs >= 0) {
+        doc.AddItem("rf_bands", static_cast<double>(gps.rfBands));
+        doc.AddItem("rf_jam_worst", static_cast<double>(gps.rfJamWorst));
+        doc.AddItem("rf_ant_worst", static_cast<double>(gps.rfAntWorst));
+        doc.AddItem("rf_agc_min", static_cast<double>(gps.rfAgcMin));
+        doc.AddItem("rf_age_s", static_cast<double>(gps.rfAgeUs) / 1e6);
     }
     /* The signal and the front end behind it: C/N0 is the antenna metric, and
      * agc/noise/jam are the overload tell-tales. */
@@ -638,6 +710,12 @@ esp_err_t NtpWebServer::gps_sats_get_handler(httpd_req_t *req)
             cJSON_AddNumberToObject(row, "elev", s.elev);
             cJSON_AddNumberToObject(row, "azim", s.azim);
             cJSON_AddNumberToObject(row, "flags", static_cast<double>(s.flags));
+            /* Omitted rather than zeroed when the receiver has no residual: 0 cm
+             * is a perfectly good residual, so the absence has to be its own
+             * thing or every satellite looks like a perfect measurement. */
+            if (s.prResValid) {
+                cJSON_AddNumberToObject(row, "prres_cm", static_cast<double>(s.prRes));
+            }
             cJSON_AddItemToArray(list, row);
         }
     }

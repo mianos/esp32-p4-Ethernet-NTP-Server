@@ -59,8 +59,23 @@ public:
     bool running() const { return m_running.load(std::memory_order_relaxed); }
 
     /* Counters for /healthz. Read from the HTTP task while the responder task
-     * writes them, hence the atomic. */
+     * writes them, hence the atomics. */
     uint32_t requests() const { return m_requests.load(std::memory_order_relaxed); }
+
+    /* What the responder has done with requests, beyond counting the answered
+     * ones. `answered` alone cannot tell a client that is being rate-limited
+     * from one that has stopped asking, and cumulative numbers cannot tell a
+     * busy minute from a busy week -- hence the minute rate and the two
+     * rejection counters, all of which move on their own. */
+    struct Counters {
+        uint32_t answered    = 0; /* cumulative */
+        uint32_t kod         = 0; /* cumulative KoD replies */
+        uint32_t dropped     = 0; /* cumulative: malformed, or rate-limited */
+        double   perMinute   = 0; /* answered per minute, last window */
+        double   lastServedS = -1; /* since the last answered request */
+        uint8_t  clients     = 0; /* distinct sources in the recent window */
+    };
+    Counters counters() const;
 
     /* What a reply would claim right now (also what /healthz reports). */
     TimeReference reference() const;
@@ -88,6 +103,19 @@ private:
     std::unique_ptr<TimeRef>   m_ref;
     std::atomic<bool>          m_running{false};
     std::atomic<uint32_t>      m_requests{0};
+    std::atomic<uint32_t>      m_answered{0};
+    std::atomic<uint32_t>      m_kod{0};
+    std::atomic<uint32_t>      m_dropped{0};
+    std::atomic<uint32_t>      m_winAnswered{0};
+    std::atomic<uint32_t>      m_winDropped{0};
+    std::atomic<uint32_t>      m_ratePerMin{0};
+    std::atomic<int64_t>       m_lastServedUs{-1};
+    std::atomic<uint8_t>       m_clients{0};
+    /* Recent source hashes, so "how many clients" is a fact rather than a guess
+     * from the packet count. Fixed storage: the responder task owns it. */
+    static constexpr uint8_t kRecentSources = 16;
+    uint32_t                   m_recent[kRecentSources] = {};
+    uint8_t                    m_recentAt = 0;
     TaskHandle_t               m_task = nullptr;
     int                        m_sock = -1;
 };

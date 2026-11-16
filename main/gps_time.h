@@ -108,6 +108,13 @@ public:
         int8_t   elev  = 0;
         int16_t  azim  = 0;
         uint32_t flags = 0;
+        /* UBX-NAV-SAT pseudorange residual, centimetres. The receiver's own
+         * statement of how far this satellite's measurement sits from a
+         * consistent solution, which is what multipath actually looks like --
+         * C/N0 only proxies it, and a strong reflection is loud and wrong.
+         * 0x8000 is the message's "not available". */
+        int16_t  prRes      = 0;
+        bool     prResValid = false;
     };
 
     /* What /healthz reports about the receiver, and what the reference is
@@ -209,6 +216,50 @@ public:
         int64_t  navSatAgeUs  = -1;
         int64_t  monHwAgeUs   = -1;
         int64_t  fitUs        = 0; /* how long the last rate fit took */
+
+        /* Geometry and clock quality: UBX-NAV-DOP, UBX-NAV-CLOCK and
+         * UBX-NAV-STATUS. DOP is the one that separates "the sky is blocked"
+         * from "the visible constellation is strung out in a bad line" -- with
+         * C/N0 alone those look identical, and only one of them is fixed by
+         * moving the antenna. tAcc is the receiver's own statement of how well
+         * it can place the pulse, which no derived figure here can replace.
+         * ttff and the status flags tell a cold start from a loss of lock. */
+        float    gDop         = 0;
+        float    pDop         = 0;
+        float    hDop         = 0;
+        float    vDop         = 0;
+        int64_t  clkBiasNs    = 0;
+        int32_t  clkDriftNsPerS = 0;
+        uint32_t tAccNs       = 0;
+        uint32_t fAccPsPerS   = 0;
+        uint8_t  navStatusFlags  = 0;
+        uint8_t  navStatusFlags2 = 0;
+        uint32_t ttffMs       = 0;
+        bool     qualitySeen  = false; /* any of the three ever arrived */
+        int64_t  dopAgeUs     = -1;
+        int64_t  clockAgeUs   = -1;
+        int64_t  navStatusAgeUs = -1;
+
+        /* UBX-MON-RF: the same front-end story as MON-HW but per band, so the
+         * L1 and L2 halves can disagree. Kept as the worst case over the bands
+         * rather than an array, since the status struct is copied by value. */
+        uint8_t  rfBands      = 0;
+        uint8_t  rfJamWorst   = 0;
+        uint8_t  rfAntWorst   = 0;
+        uint16_t rfAgcMin     = 0;
+        bool     rfSeen       = false;
+        int64_t  rfAgeUs      = -1;
+        uint8_t  rfCfg        = 0; /* 0 unanswered, 1 accepted, 2 rejected */
+
+        /* The servo's own work counters. A mean offset hides a servo fighting
+         * the oscillator: these three show it happening. Steps are corrections
+         * past the slew threshold, clamps are fits that hit the rate limit (a
+         * bad fit, not a bad crystal), and edgeSpikes counts edges that landed
+         * more than 1 ms from where the last one predicted -- the signature of
+         * a pulse that is being corrupted rather than merely late. */
+        uint32_t servoSteps   = 0;
+        uint32_t servoClamps  = 0;
+        uint32_t edgeSpikes   = 0;
         uint32_t bridgeSessions = 0;
         uint32_t bridgeRefused  = 0;
         /* Whether a client holds the port right now, and how many. The point of
@@ -426,6 +477,10 @@ private:
     void onMonHw(const ubx::Frame &f);
     void onNavSat(const ubx::Frame &f);
     void onNavSvin(const ubx::Frame &f);
+    void onNavDop(const ubx::Frame &f);
+    void onNavClock(const ubx::Frame &f);
+    void onNavStatus(const ubx::Frame &f);
+    void onMonRf(const ubx::Frame &f);
     void onCfgTmode(const ubx::Frame &f);
     void anchor(time_t second);
 
@@ -527,6 +582,11 @@ private:
     bool       m_tp5Naked          = false;
     bool       m_timTpNaked        = false;
     bool       m_timTpAcked        = false;
+    /* MON-RF's fate, in the same three states the other optional messages use.
+     * It is a newer message than this module's protocol, so "rejected" and
+     * "accepted then silent" are both real answers and only this tells them
+     * apart -- otherwise the absent fields look like a firmware bug. */
+    int8_t     m_rfCfg             = 0; /* 0 unanswered, 1 accepted, 2 rejected */
     bool       m_antCfgAcked       = false;
     bool       m_antCfgNaked       = false;
     bool       m_antLogged         = false;
@@ -542,6 +602,34 @@ private:
     uint32_t   m_pinsLogged        = 0;
     bool       m_monHwValid        = false;
     int64_t    m_nextHwUs          = 0;
+    /* Geometry, clock quality and per-band front end, from NAV-DOP, NAV-CLOCK,
+     * NAV-STATUS and MON-RF. Ages are stamped from esp_timer so a message that
+     * stops is visible as a growing age rather than as a stale number that
+     * still looks current. */
+    float      m_gDop              = 0;
+    float      m_pDop              = 0;
+    float      m_hDop              = 0;
+    float      m_vDop              = 0;
+    int64_t    m_clkBiasNs         = 0;
+    int32_t    m_clkDriftNsPerS    = 0;
+    uint32_t   m_tAccNs            = 0;
+    uint32_t   m_fAccPsPerS        = 0;
+    uint8_t    m_navStatusFlags    = 0;
+    uint8_t    m_navStatusFlags2   = 0;
+    uint32_t   m_ttffMs            = 0;
+    bool       m_qualitySeen       = false;
+    int64_t    m_dopAtUs           = -1;
+    int64_t    m_clockAtUs         = -1;
+    int64_t    m_navStatusAtUs     = -1;
+    uint8_t    m_rfBands           = 0;
+    uint8_t    m_rfJamWorst        = 0;
+    uint8_t    m_rfAntWorst        = 0;
+    uint16_t   m_rfAgcMin          = 0;
+    bool       m_rfSeen            = false;
+    int64_t    m_rfAtUs            = -1;
+    uint32_t   m_servoSteps        = 0;
+    uint32_t   m_servoClamps       = 0;
+    uint32_t   m_edgeSpikes        = 0;
     int64_t    m_warmRetryAtUs     = 0;
     uint8_t    m_warmRetries       = 0;
     /* Requests from the HTTP task, serviced by the GPS task on its next pass so

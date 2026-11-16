@@ -115,6 +115,11 @@ constexpr int64_t kMinEdgeSpacingUs = 500000;
  * during which the served clock is knowingly wrong. */
 constexpr int64_t kStepThresholdNs = 250000000; /* 250 ms */
 
+/* An edge landing further than this from where the last one put it is a
+ * corrupted pulse rather than a slow crystal: the crystal's own worst case is
+ * tens of microseconds a second, and the loop only ever sees the remainder. */
+constexpr int64_t kEdgeSpikeNs = 1000000; /* 1 ms */
+
 /* 6 kB, raised from 4096 when the sky view landed. The decoder, the servo fit
  * and the NAV-SAT walk all run here, and a frame walk that keeps a row per
  * satellite is what pushed the old figure over: it overflowed into a panic
@@ -1493,6 +1498,37 @@ void GpsTime::configureModule()
         }
     }
 
+    /* Geometry and clock quality. DOP and STATUS are small and move in minutes,
+     * so they go at half rate; CLOCK is the one worth every second because tAcc
+     * is what the reference could quote if it ever needed a stated accuracy.
+     * MON-RF is a front-end trend and once per five seconds is enough to see a
+     * jammer arrive. All four are diagnostics: none of them feeds the clock. */
+    {
+        struct Extra {
+            const char   *name;
+            uint8_t       cls;
+            uint8_t       id;
+            uint8_t       div;
+        };
+        const Extra kExtras[] = {
+            {"NAV-DOP", 0x01, 0x04, 2},
+            {"NAV-CLOCK", 0x01, 0x22, 1},
+            {"NAV-STATUS", 0x01, 0x03, 2},
+            {"MON-RF", 0x0A, 0x38, 5},
+        };
+        for (const Extra &extra : kExtras) {
+            const uint8_t enable[8] = {extra.cls, extra.id, 0, extra.div, 0, 0, 0, 0};
+            const int8_t  res       = sendAndWait(0x06, 0x01, enable, sizeof(enable));
+            if (extra.id == 0x38) {
+                m_rfCfg = res == 1 ? 1 : res == 0 ? 2 : 0;
+            }
+            if (res != 1) {
+                ESP_LOGW(TAG, "%s enable %s: absent from /gps/info", extra.name,
+                         res == 0 ? "rejected" : "unanswered");
+            }
+        }
+    }
+
     /* UBX-TIM-SVIN (0x0D 0x04), once every ten seconds. It is the survey's own
      * report -- duration, running mean position, mean variance, observations --
      * and ten seconds is fresh enough: a survey runs for hours and its numbers
@@ -1674,7 +1710,110 @@ void GpsTime::onFrame(const ubx::Frame &frame)
         onNavSat(frame);
     } else if (cls == 0x0D && id == 0x04) { /* UBX-TIM-SVIN */
         onNavSvin(frame);
+    } else if (cls == 0x01 && id == 0x04) { /* UBX-NAV-DOP */
+        onNavDop(frame);
+    } else if (cls == 0x01 && id == 0x22) { /* UBX-NAV-CLOCK */
+        onNavClock(frame);
+    } else if (cls == 0x01 && id == 0x03) { /* UBX-NAV-STATUS */
+        onNavStatus(frame);
+    } else if (cls == 0x0A && id == 0x38) { /* UBX-MON-RF */
+        onMonRf(frame);
     }
+}
+
+/* NAV-DOP: 18 bytes, iTOW then seven u2 DOPs in hundredths. Only the four that
+ * describe the geometry are kept; the northing/easting split is a rotated view
+ * of the same thing. */
+void GpsTime::onNavDop(const ubx::Frame &f)
+{
+    if (f.len < 18) {
+        return;
+    }
+    /* 0xFFFF is the message's "not known" and would read as 655.35. */
+    const auto dop = [&f](std::size_t at) {
+        const uint16_t raw = f.u2(at);
+        return raw == 0xFFFF ? 0.0F : static_cast<float>(raw) / 100.0F;
+    };
+    const int64_t nowUs = esp_timer_get_time();
+    portENTER_CRITICAL(&m_mux);
+    m_gDop        = dop(4);
+    m_pDop        = dop(6);
+    m_vDop        = dop(10);
+    m_hDop        = dop(12);
+    m_dopAtUs     = nowUs;
+    m_qualitySeen = true;
+    portEXIT_CRITICAL(&m_mux);
+}
+
+/* NAV-CLOCK: iTOW, clkBias (ns, i4), clkDrift (ns/s, i4), tAcc (ns, u4),
+ * fAcc (ps/s, u4). tAcc is the receiver's own accuracy estimate and the reason
+ * this message is here: the pulse's placeable precision, stated by the thing
+ * that places it. */
+void GpsTime::onNavClock(const ubx::Frame &f)
+{
+    if (f.len < 20) {
+        return;
+    }
+    const int64_t nowUs = esp_timer_get_time();
+    portENTER_CRITICAL(&m_mux);
+    m_clkBiasNs      = static_cast<int32_t>(f.u4(4));
+    m_clkDriftNsPerS = static_cast<int32_t>(f.u4(8));
+    m_tAccNs         = f.u4(12);
+    m_fAccPsPerS     = f.u4(16);
+    m_clockAtUs      = nowUs;
+    m_qualitySeen    = true;
+    portEXIT_CRITICAL(&m_mux);
+}
+
+/* NAV-STATUS: iTOW, gpsFix, flags, fixStat, flags2, ttff (ms), msss. The fix
+ * type duplicates NAV-PVT; what is new here is ttff -- how long from reset to
+ * first fix -- which is how a cold start is told from a loss of lock. */
+void GpsTime::onNavStatus(const ubx::Frame &f)
+{
+    if (f.len < 16) {
+        return;
+    }
+    const int64_t nowUs = esp_timer_get_time();
+    portENTER_CRITICAL(&m_mux);
+    m_navStatusFlags  = f.u8(5);
+    m_navStatusFlags2 = f.u8(7);
+    m_ttffMs          = f.u4(8);
+    m_navStatusAtUs   = nowUs;
+    m_qualitySeen     = true;
+    portEXIT_CRITICAL(&m_mux);
+}
+
+/* MON-RF: version, nBlocks, 2 reserved, then 24 bytes per band. Only the worst
+ * case over the bands is kept, because that is the one that describes the
+ * receiver: a clean L1 next to a jammed L2 is still a jammed receiver. */
+void GpsTime::onMonRf(const ubx::Frame &f)
+{
+    const uint8_t declared = f.u8(1);
+    const uint8_t fits     = static_cast<uint8_t>((f.len - 4) / 24);
+    const uint8_t walk     = declared < fits ? declared : fits;
+
+    uint8_t  worstJam = 0;
+    uint8_t  worstAnt = 0;
+    uint16_t minAgc   = 0xFFFF;
+    for (uint8_t i = 0; i < walk; ++i) {
+        const std::size_t base = 4 + 24 * static_cast<std::size_t>(i);
+        const uint8_t     jam  = f.u8(base + 12);
+        const uint8_t     ant  = f.u8(base + 2);
+        const uint16_t    agc  = f.u2(base + 10);
+        worstJam = jam > worstJam ? jam : worstJam;
+        worstAnt = ant > worstAnt ? ant : worstAnt;
+        minAgc   = agc < minAgc ? agc : minAgc;
+    }
+
+    const int64_t nowUs = esp_timer_get_time();
+    portENTER_CRITICAL(&m_mux);
+    m_rfBands    = walk;
+    m_rfJamWorst = worstJam;
+    m_rfAntWorst = worstAnt;
+    m_rfAgcMin   = minAgc == 0xFFFF ? 0 : minAgc;
+    m_rfSeen     = true;
+    m_rfAtUs     = nowUs;
+    portEXIT_CRITICAL(&m_mux);
 }
 
 void GpsTime::onMonVer(const ubx::Frame &f)
@@ -1838,6 +1977,13 @@ void GpsTime::onNavSat(const ubx::Frame &f)
             s.elev  = static_cast<int8_t>(f.u8(sv + 3));
             s.azim  = static_cast<int16_t>(f.u2(sv + 4));
             s.flags = fl;
+            /* prRes, centimetres, 0x8000 for "not available". Kept signed: a
+             * negative residual means the measurement sits short of the
+             * solution, and folding that away would hide half of what a
+             * reflector does. */
+            const int16_t pr = static_cast<int16_t>(f.u2(sv + 6));
+            s.prRes         = (pr == INT16_MIN) ? 0 : pr;
+            s.prResValid    = pr != INT16_MIN;
         }
         if ((fl & (1u << 3)) == 0 || cno == 0) {
             continue;
@@ -2234,13 +2380,19 @@ void GpsTime::fitRate()
      * 1e9 - slope * 1e6. */
     const double  slope = sxy / sxx;
     int64_t       ppb   = static_cast<int64_t>(std::llround(1e9 - slope * 1e6));
+    bool          clamped = false;
     if (ppb > kRateLimitPpb) {
-        ppb = kRateLimitPpb;
+        ppb     = kRateLimitPpb;
+        clamped = true;
     } else if (ppb < -kRateLimitPpb) {
-        ppb = -kRateLimitPpb;
+        ppb     = -kRateLimitPpb;
+        clamped = true;
     }
 
     portENTER_CRITICAL(&m_mux);
+    if (clamped) {
+        ++m_servoClamps;
+    }
     m_ratePpb     = static_cast<int32_t>(ppb);
     m_rateSamples = static_cast<uint16_t>(m_rateCount);
     portEXIT_CRITICAL(&m_mux);
@@ -2304,6 +2456,12 @@ void GpsTime::steer()
         portENTER_CRITICAL(&m_mux);
         m_offsetUs = offsetNs / 1000;
         m_offsetNs = offsetNs;
+        /* An edge this far from the last is not the edge being late, it is the
+         * pulse being corrupted. Counted rather than logged: they arrive in
+         * bursts and a log line each would bury the servo's own record. */
+        if (offsetNs > kEdgeSpikeNs || offsetNs < -kEdgeSpikeNs) {
+            ++m_edgeSpikes;
+        }
         portEXIT_CRITICAL(&m_mux);
     }
 
@@ -2324,6 +2482,9 @@ void GpsTime::steer()
                      static_cast<long long>(offsetNs / 1000000));
         }
         m_stepped = true;
+        portENTER_CRITICAL(&m_mux);
+        ++m_servoSteps;
+        portEXIT_CRITICAL(&m_mux);
         return;
     }
 
@@ -2365,6 +2526,10 @@ GpsTime::Status GpsTime::status() const
     int64_t  suppressUntil = 0;
     int64_t  navSatAtUs    = 0;
     int64_t  monHwAtUs     = 0;
+    int64_t  dopAtUs       = 0;
+    int64_t  clockAtUs     = 0;
+    int64_t  navStatusAtUs = 0;
+    int64_t  rfAtUs        = 0;
 
     portENTER_CRITICAL(&m_mux);
     st.ppsCount    = m_ppsCount;
@@ -2410,6 +2575,31 @@ GpsTime::Status GpsTime::status() const
     st.jamState          = m_jamState;
     st.monHwValid        = m_monHwValid;
     st.fitUs             = m_fitUs;
+    st.gDop              = m_gDop;
+    st.pDop              = m_pDop;
+    st.hDop              = m_hDop;
+    st.vDop              = m_vDop;
+    st.clkBiasNs         = m_clkBiasNs;
+    st.clkDriftNsPerS    = m_clkDriftNsPerS;
+    st.tAccNs            = m_tAccNs;
+    st.fAccPsPerS        = m_fAccPsPerS;
+    st.navStatusFlags    = m_navStatusFlags;
+    st.navStatusFlags2   = m_navStatusFlags2;
+    st.ttffMs            = m_ttffMs;
+    st.qualitySeen       = m_qualitySeen;
+    st.rfBands           = m_rfBands;
+    st.rfJamWorst        = m_rfJamWorst;
+    st.rfAntWorst        = m_rfAntWorst;
+    st.rfAgcMin          = m_rfAgcMin;
+    st.rfSeen            = m_rfSeen;
+    st.rfCfg             = static_cast<uint8_t>(m_rfCfg);
+    st.servoSteps        = m_servoSteps;
+    st.servoClamps       = m_servoClamps;
+    st.edgeSpikes        = m_edgeSpikes;
+    dopAtUs              = m_dopAtUs;
+    clockAtUs            = m_clockAtUs;
+    navStatusAtUs        = m_navStatusAtUs;
+    rfAtUs               = m_rfAtUs;
     st.bridgeSessions    = m_bridgeSessions;
     st.bridgeRefused     = m_bridgeRefused;
     st.bridgeActive      = m_bridgeActive;
@@ -2470,6 +2660,18 @@ GpsTime::Status GpsTime::status() const
     }
     if (monHwAtUs != 0) {
         st.monHwAgeUs = nowUs - monHwAtUs;
+    }
+    if (dopAtUs != 0) {
+        st.dopAgeUs = nowUs - dopAtUs;
+    }
+    if (clockAtUs != 0) {
+        st.clockAgeUs = nowUs - clockAtUs;
+    }
+    if (navStatusAtUs != 0) {
+        st.navStatusAgeUs = nowUs - navStatusAtUs;
+    }
+    if (rfAtUs != 0) {
+        st.rfAgeUs = nowUs - rfAtUs;
     }
 
     st.rateKnown = st.rateSamples >= kRateMinSamples;
