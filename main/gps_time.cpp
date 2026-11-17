@@ -46,9 +46,14 @@ constexpr gpio_num_t  kPpsPin = GPIO_NUM_14;
  * which is why the list exists at all rather than a single rate. */
 constexpr uint32_t kBauds[] = {38400, 9600, 115200, 57600, 19200, 4800};
 
-/* UBX-CFG-MSG enabling NAV-TIM-TP on UART1 at 1 Hz. File scope because the
- * probe in task() resends exactly these bytes on their own. */
-constexpr uint8_t kTimTpEnable[8] = {0x01, 0x27, 0, 1, 0, 0, 0, 0};
+/* UBX-CFG-MSG enabling TIM-TP on UART1 at 1 Hz. File scope because the probe in
+ * task() resends exactly these bytes on their own.
+ *
+ * Class 0x0D, not 0x01: this is a TIM firmware, and the TIM dialect is the one
+ * it speaks -- it answers TIM-SVIN (0x0D 0x04) and refuses NAV-TIM-TP outright,
+ * which is the same pair the survey already uses. The two messages are the same
+ * 16 bytes; only the class differs, and only this one is answered here. */
+constexpr uint8_t kTimTpEnable[8] = {0x0D, 0x01, 0, 1, 0, 0, 0, 0};
 
 /* How long one baud rate gets to produce a single valid UBX frame. */
 constexpr int64_t kScanAfterUs = 4000000;
@@ -1885,7 +1890,9 @@ void GpsTime::onFrame(const ubx::Frame &frame)
         onNavPvt(frame);
     } else if (cls == 0x01 && id == 0x26) { /* UBX-NAV-TIMELS */
         onNavTimels(frame);
-    } else if (cls == 0x01 && id == 0x27) { /* UBX-NAV-TIM-TP */
+    } else if ((cls == 0x0D && id == 0x01) || (cls == 0x01 && id == 0x27)) {
+        /* TIM-TP, and the NAV spelling of it, in case another module answers
+         * only that one. Same payload and same handler either way. */
         onNavTimTp(frame);
     } else if (cls == 0x06 && id == 0x3D) { /* UBX-CFG-TMODE2 */
         onCfgTmode(frame);
@@ -2504,11 +2511,17 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
         qErrNs = kMaxQErrNs;
     }
 
+    /* The position itself, not just whether it is inside the window: this is
+     * the receiver stating where its own pulse sits against the second it
+     * labels, which is the only sub-millisecond statement of that available
+     * (TIM-TP carries it; NAV-TIM-TP did not get as far as being answered). A
+     * constant here shifts every anchor and nothing downstream can see it. */
     portENTER_CRITICAL(&m_mux);
     ++m_timTpCount;
     m_qErrNs        = qErrNs;
     m_qErrValid     = !qErrInvalid;
     m_pulseOnSecond = onSecond;
+    m_pulseOffsetNs = offsetNs;
     portEXIT_CRITICAL(&m_mux);
 
     /* Once, so the log says which regime this board is in: a measured
@@ -2946,6 +2959,7 @@ GpsTime::Status GpsTime::status() const
     st.qErrValid         = m_qErrValid;
     st.jitterNs          = m_jitterNs;
     st.pulseOnSecond     = m_pulseOnSecond;
+    st.pulseOffsetNs     = m_pulseOffsetNs;
     st.tp5Rejected       = m_tp5Naked;
     st.timTpRejected     = m_timTpNaked;
     st.timTpAcked        = m_timTpAcked;

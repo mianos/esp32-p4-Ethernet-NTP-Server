@@ -562,6 +562,10 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
             doc.AddItem("tp_qerr_ns", static_cast<double>(gps.qErrNs));
         }
         doc.AddItem("tp_on_second", gps.pulseOnSecond);
+        /* The pulse's own position in the second, as the receiver states it.
+         * Constant here means every anchor, and so the served time, is shifted
+         * by it; nothing downstream can see a constant. */
+        doc.AddItem("tp_offset_ns", static_cast<double>(gps.pulseOffsetNs));
     }
 
     /* The servo's work counters, and the measurement-path half of the error
