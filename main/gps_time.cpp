@@ -1914,6 +1914,22 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     }
 }
 
+/* Hex into a fixed buffer. A nibble table rather than std::format: 120 bytes is
+ * 120 formats, each allocating, on a message that arrives every few seconds.
+ * Returns the length written. */
+static std::size_t hexInto(text::Buf<241> &dst, const ubx::Frame &f)
+{
+    static constexpr char kDigits[] = "0123456789abcdef";
+    const std::size_t bytes = f.len * 2 < dst.size() - 1 ? f.len : (dst.size() - 1) / 2;
+    for (std::size_t i = 0; i < bytes; ++i) {
+        const uint8_t byte = f.u8(i);
+        dst[i * 2]         = kDigits[byte >> 4];
+        dst[i * 2 + 1]     = kDigits[byte & 0x0F];
+    }
+    dst[bytes * 2] = '\0';
+    return bytes * 2;
+}
+
 /* MON-IO: 20 bytes per port, in the receiver's fixed port order. UART1 is block
  * 1 -- the only port wired here -- and its counts are what say whether the line
  * is coping. Parity and framing errors are the wire's own verdict, separate
@@ -1927,13 +1943,10 @@ void GpsTime::onMonIo(const ubx::Frame &f)
     }
     const std::size_t at  = kBlock * kPort;
     const int64_t     now = esp_timer_get_time();
-    std::string hex;
-    hex.reserve(f.len * 2);
-    for (std::size_t i = 0; i < f.len; ++i) {
-        hex += std::format("{:02x}", f.u8(i));
-    }
+    text::Buf<241> hex = {};
+    hexInto(hex, f);
     portENTER_CRITICAL(&m_mux);
-    m_ioHex = std::move(hex);
+    std::memcpy(m_ioHex.data(), hex.data(), sizeof(m_ioHex));
     m_ioRxBytes = f.u4(at);
     m_ioTxBytes = f.u4(at + 4);
     m_ioParity  = f.u2(at + 8);
@@ -1992,15 +2005,12 @@ void GpsTime::onMonMsgpp(const ubx::Frame &f)
         return;
     }
     constexpr std::size_t kPort1 = 16; /* msg2 */
-    std::string hex;
-    hex.reserve(f.len * 2);
-    for (std::size_t i = 0; i < f.len; ++i) {
-        hex += std::format("{:02x}", f.u8(i));
-    }
+    text::Buf<241> hex = {};
+    hexInto(hex, f);
     portENTER_CRITICAL(&m_mux);
     m_msgUbx     = f.u2(kPort1);
     m_msgSkipped = f.u4(96 + 4 * 1);
-    m_msgppHex   = std::move(hex);
+    std::memcpy(m_msgppHex.data(), hex.data(), sizeof(m_msgppHex));
     portEXIT_CRITICAL(&m_mux);
 }
 
@@ -2922,10 +2932,10 @@ GpsTime::Status GpsTime::status() const
     st.tbufPeak          = m_tbufPeak;
     st.tbufErrors        = m_tbufErrors;
     st.msgUbx            = m_msgUbx;
-    msgppLen = m_msgppHex.size() < sizeof(localMsgpp) - 1 ? m_msgppHex.size() : sizeof(localMsgpp) - 1;
+    msgppLen = ::strnlen(m_msgppHex.data(), sizeof(m_msgppHex) - 1);
     std::memcpy(localMsgpp, m_msgppHex.data(), msgppLen);
     recentAt             = m_recentAt;
-    ioLen = m_ioHex.size() < sizeof(localIo) - 1 ? m_ioHex.size() : sizeof(localIo) - 1;
+    ioLen = ::strnlen(m_ioHex.data(), sizeof(m_ioHex) - 1);
     std::memcpy(localIo, m_ioHex.data(), ioLen);
     st.msgSkipped        = m_msgSkipped;
     st.ioSeen            = m_ioSeen;
