@@ -17,6 +17,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -127,10 +128,45 @@ void applyPinMap(const RmiiPins &pins, eth_esp32_emac_config_t &config)
 }
 /* An image that arrived over POST /firmware boots in ESP_OTA_IMG_PENDING_VERIFY:
  * the bootloader goes back to the previous slot unless the app confirms this
- * one. The bar here is a DHCP lease plus a listening HTTP server -- an image
- * that gets that far is reachable and can be replaced again, which is the
- * property that matters on a box whose only interface is the RJ45.
+ * one.
+ *
+ * Confirming on the lease alone was not enough. A lease arrives about seven
+ * seconds in, so an image that gets an address and then panics -- which is
+ * exactly what a sky-view sized Status did, every ten seconds for nine hours --
+ * confirms itself and the rollback never fires. Reachable for a moment is not
+ * the same as working.
+ *
+ * So confirmation waits out a hold-off first. If the image dies inside it, it
+ * stays unverified and the bootloader rolls back on the next reset, which is the
+ * only recovery path on a box whose interface is the RJ45. The timer is a
+ * one-shot and the state is re-read when it fires, so an image that a USB flash
+ * put here (nothing pending) confirms nothing.
  */
+constexpr int64_t kConfirmHoldoffUs = 120 * 1000000;
+
+esp_timer_handle_t s_confirmTimer = nullptr;
+
+void confirmTimerBody(void *)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t   state   = ESP_OTA_IMG_UNDEFINED;
+
+    if (running == nullptr || esp_ota_get_state_partition(running, &state) != ESP_OK) {
+        return;
+    }
+    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+        return;
+    }
+
+    const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "OTA image confirmed after %lld s: rollback cancelled",
+                 static_cast<long long>(kConfirmHoldoffUs / 1000000));
+    } else {
+        ESP_LOGW(TAG, "could not confirm the OTA image: %s", esp_err_to_name(err));
+    }
+}
+
 void confirmRunningImage()
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -142,13 +178,22 @@ void confirmRunningImage()
     if (state != ESP_OTA_IMG_PENDING_VERIFY) {
         return; /* first boot after a USB flash: nothing to confirm */
     }
-
-    const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "OTA image confirmed: rollback to the previous slot cancelled");
-    } else {
-        ESP_LOGW(TAG, "could not confirm the OTA image: %s", esp_err_to_name(err));
+    if (s_confirmTimer != nullptr) {
+        return; /* armed already; the lease can be re-acquired */
     }
+
+    esp_timer_create_args_t args = {};
+    args.callback = confirmTimerBody;
+    args.name     = "ota_confirm";
+    if (esp_timer_create(&args, &s_confirmTimer) != ESP_OK) {
+        /* No timer: fall back to confirming now rather than risk a good image
+         * being rolled back for want of a timer. */
+        confirmTimerBody(nullptr);
+        return;
+    }
+    esp_timer_start_once(s_confirmTimer, kConfirmHoldoffUs);
+    ESP_LOGI(TAG, "OTA image pending: confirming in %lld s unless it dies first",
+             static_cast<long long>(kConfirmHoldoffUs / 1000000));
 }
 
 }  // namespace
