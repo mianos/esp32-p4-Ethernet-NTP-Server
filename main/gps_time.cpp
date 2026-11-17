@@ -32,11 +32,16 @@ constexpr int         kTxPin  = 15; /* esp TX -> module RX */
 constexpr int         kRxPin  = 16; /* esp RX <- module TX */
 constexpr gpio_num_t  kPpsPin = GPIO_NUM_14;
 
-/* The module's factory default is first. The rest are there because a receiver
- * that has been through u-center once usually is not on 9600 any more, and
- * cycling through four baud rates at boot is cheaper for everyone than asking
- * the user to read a datasheet. */
-constexpr uint32_t kBauds[] = {9600, 38400, 115200, 57600, 19200, 4800};
+/* Order matters, and it is the order the scan walks. 38400 leads because it is
+ * what this module is now saved at: the line ran at 43% of 9600 with the
+ * diagnostics loaded, and at 10% once it was moved, so the saved rate is the
+ * expected one and leading with it saves the twenty-five seconds of scanning
+ * that a 9600-first list costs every boot. Every other rate stays reachable, so
+ * a receiver reset to its factory default (9600) is still found -- just later.
+ *
+ * A module that has been through u-center once usually is not on 9600 any more,
+ * which is why the list exists at all rather than a single rate. */
+constexpr uint32_t kBauds[] = {38400, 9600, 115200, 57600, 19200, 4800};
 
 /* UBX-CFG-MSG enabling NAV-TIM-TP on UART1 at 1 Hz. File scope because the
  * probe in task() resends exactly these bytes on their own. */
@@ -245,7 +250,27 @@ void GpsTime::requestBaud(uint32_t baud, bool moduleToo)
  * receives it; the caller switches the host afterwards. 8N1, UBX in and out,
  * NMEA off -- the same shape the boot configuration leaves behind. RAM only, so
  * a module power cycle still returns to its own default and the scan finds it. */
-void GpsTime::sendCfgPrt(uint32_t baud)
+/* CFG-CFG, saving only the IO section (bit 0 of the save mask).
+ *
+ * The port configuration has to outlive a power cut or a baud change cannot
+ * survive one: CFG-PRT alone is RAM, and this module stops scheduling output
+ * after it until it is power-cycled -- so the change needs a power cycle to
+ * become usable, and a power cycle throws away anything not saved.
+ *
+ * Only IO is saved, not the whole configuration. Saving everything would pin
+ * the message rates and the GNSS mask to whatever the firmware happened to send
+ * that boot, and the firmware deliberately leaves the module's own flash alone
+ * so a later u-center session is not fighting a stale snapshot. */
+int8_t GpsTime::saveCfgIo()
+{
+    uint8_t cfg[12] = {};
+    text::putLe(cfg + 0, 0u);        /* clearMask: nothing */
+    text::putLe(cfg + 4, 0x00000001u); /* saveMask: IO */
+    text::putLe(cfg + 8, 0u);        /* loadMask: nothing */
+    return sendAndWait(0x06, 0x09, cfg, sizeof(cfg));
+}
+
+int8_t GpsTime::sendCfgPrt(uint32_t baud)
 {
     uint8_t cfg[20] = {};
     cfg[0] = 1;                                          /* portID: UART1 */
@@ -259,7 +284,7 @@ void GpsTime::sendCfgPrt(uint32_t baud)
      * module someone has been at with u-center may still be emitting it. */
     text::putLe(cfg + 12, 0x0003u);                      /* in: UBX | NMEA */
     text::putLe(cfg + 14, 0x0001u);                      /* out: UBX */
-    sendUbx(0x06, 0x00, cfg, sizeof(cfg));
+    return sendAndWait(0x06, 0x00, cfg, sizeof(cfg));
 }
 
 void GpsTime::onCfgTmode(const ubx::Frame &f)
@@ -1011,7 +1036,27 @@ void GpsTime::task()
                 m_baudRevertAtUs      = esp_timer_get_time() + 2 * kFrameSilenceUs;
                 m_baudRevertPending   = true;
                 uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
-                sendCfgPrt(want);
+                /* Acknowledged, not fire-and-forget: saving while the port
+                 * change is still in flight captures the OLD rate, and the save
+                 * itself reloads the port, so the change silently undoes. */
+                /* This module does not ACK CFG-PRT -- it goes unanswered even
+                 * when the change takes -- so silence has to mean "carry on".
+                 * An explicit NAK is the only thing that stops the move, and
+                 * the revert covers a change that simply does not work. */
+                const int8_t prt = sendCfgPrt(want);
+                if (prt == 0) {
+                    ESP_LOGW(TAG, "CFG-PRT rejected: rate unchanged");
+                } else {
+                    /* Saved so the next power cycle comes back at the new rate
+                     * rather than at 9600, which would undo the whole move. The
+                     * pause lets the port change land before it is captured. */
+                    uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
+                    esp_rom_delay_us(200000);
+                    const int8_t saved = saveCfgIo();
+                    ESP_LOGW(TAG, "port set to %u and %s", static_cast<unsigned>(want),
+                             saved == 1 ? "saved"
+                                        : saved == 0 ? "save REJECTED" : "save unanswered");
+                }
                 uart_wait_tx_done(kUart, pdMS_TO_TICKS(100));
             }
             uart_set_baudrate(kUart, want);

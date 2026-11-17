@@ -426,7 +426,8 @@ public:
      * is how a line that has been desynchronised by something other than this
      * firmware -- or deliberately, to watch the scan -- is put back. */
     void requestBaud(uint32_t baud, bool moduleToo);
-    void sendCfgPrt(uint32_t baud);
+    int8_t sendCfgPrt(uint32_t baud);
+    int8_t saveCfgIo();
     /* Learn the time mode from the receiver, and put a known position hold back
      * after something has cleared it. */
     void adoptTimeMode();
