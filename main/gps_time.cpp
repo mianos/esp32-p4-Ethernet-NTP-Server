@@ -2829,6 +2829,19 @@ GpsTime::Status GpsTime::status() const
     int64_t  ioAtUs        = 0;
     uint8_t  recentAt      = 0;
 
+    /* String-ish state captured as raw bytes and mask bits. Nothing below
+     * allocates: a copy into a local array is a memcpy, and building the
+     * std::string happens after the lock is dropped. */
+    char        localMsgpp[241]  = {};
+    char        localIo[241]     = {};
+    char        localModule[160]    = {};
+    char        localBridgeEnd[48]  = {};
+    char        localBridgeLast[128] = {};
+    size_t      msgppLen = 0, ioLen = 0, moduleLen = 0, endLen = 0, lastLen = 0;
+    uint8_t     gnssMask = 0;
+    bool        gnssNaked = false, gnssAcked = false;
+    uint8_t     tmode = 0;
+
     portENTER_CRITICAL(&m_mux);
     st.ppsCount    = m_ppsCount;
     st.timeValid   = m_timeValid;
@@ -2909,9 +2922,11 @@ GpsTime::Status GpsTime::status() const
     st.tbufPeak          = m_tbufPeak;
     st.tbufErrors        = m_tbufErrors;
     st.msgUbx            = m_msgUbx;
-    st.msgppHex          = m_msgppHex;
+    msgppLen = m_msgppHex.size() < sizeof(localMsgpp) - 1 ? m_msgppHex.size() : sizeof(localMsgpp) - 1;
+    std::memcpy(localMsgpp, m_msgppHex.data(), msgppLen);
     recentAt             = m_recentAt;
-    st.ioHex             = m_ioHex;
+    ioLen = m_ioHex.size() < sizeof(localIo) - 1 ? m_ioHex.size() : sizeof(localIo) - 1;
+    std::memcpy(localIo, m_ioHex.data(), ioLen);
     st.msgSkipped        = m_msgSkipped;
     st.ioSeen            = m_ioSeen;
     st.baud              = m_baud;
@@ -2929,26 +2944,17 @@ GpsTime::Status GpsTime::status() const
     st.bridgeClients     = m_bridgeClients;
     st.bridgeRx          = m_bridgeRx;
     st.bridgeTx          = m_bridgeTx;
-    st.bridgeEnd.assign(m_bridgeEnd.data());
-    st.bridgeLast.assign(m_bridgeLast.data());
+    endLen = ::strnlen(m_bridgeEnd.data(), sizeof(m_bridgeEnd) - 1);
+    std::memcpy(localBridgeEnd, m_bridgeEnd.data(), endLen);
+    lastLen = ::strnlen(m_bridgeLast.data(), sizeof(m_bridgeLast) - 1);
+    std::memcpy(localBridgeLast, m_bridgeLast.data(), lastLen);
     /* Named rather than numeric: the interesting thing is which constellations
      * are being solved, and a reader should not have to hold the gnssId table
      * in their head to find out. */
-    {
-        static constexpr const char *kNames[] = {"GPS", "SBAS", "Galileo", "BeiDou",
-                                                 "IMES", "QZSS", "GLONASS"};
-        st.gnss.clear();
-        for (int i = 0; i < 7; ++i) {
-            if ((m_gnssMask >> i) & 1u) {
-                if (!st.gnss.empty()) {
-                    st.gnss += ',';
-                }
-                st.gnss += kNames[i];
-            }
-        }
-        st.gnssCfg = m_gnssNaked ? "rejected" : m_gnssAcked ? "accepted" : "silent";
-    }
-    st.timeMode = m_tmode == 1 ? "survey" : m_tmode == 2 ? "fixed" : "moving";
+    gnssMask   = m_gnssMask;
+    gnssNaked  = m_gnssNaked;
+    gnssAcked  = m_gnssAcked;
+    tmode      = m_tmode;
     st.svinDurS = static_cast<double>(m_svinDur);
     st.svinAccMm = static_cast<double>(isqrt(m_svinAcc));
     st.svinVarMm2 = static_cast<double>(m_svinAcc);
@@ -2966,16 +2972,38 @@ GpsTime::Status GpsTime::status() const
     st.cn0Used           = m_cn0Used;
     navSatAtUs           = m_navSatAtUs;
     monHwAtUs            = m_monHwAtUs;
-    st.moduleId          = m_moduleId.data();
+    moduleLen = ::strnlen(m_moduleId.data(), sizeof(m_moduleId) - 1);
+    std::memcpy(localModule, m_moduleId.data(), moduleLen);
     ppsMonoUs      = m_ppsMonoUs;
     suppressUntil  = m_ppsSuppressUntilUs;
     portEXIT_CRITICAL(&m_mux);
 
-    /* Built out here, not under the lock: sixteen std::format calls are sixteen
-     * heap operations, and holding the mux for them delays the PPS edge. The
-     * array is read without the lock, so a list taken while a frame lands can
-     * mix two samples -- acceptable for a diagnostic, where the alternative cost
-     * the edge about a microsecond every time /gps/info was polled. */
+    /* Everything string-shaped happens now, with the lock gone: the copies
+     * above were raw bytes into stack arrays, so no allocation and no
+     * formatting ever ran with interrupts masked. */
+    st.msgppHex.assign(localMsgpp, msgppLen);
+    st.ioHex.assign(localIo, ioLen);
+    st.moduleId.assign(localModule, moduleLen);
+    st.bridgeEnd.assign(localBridgeEnd, endLen);
+    st.bridgeLast.assign(localBridgeLast, lastLen);
+    {
+        static constexpr const char *kNames[] = {"GPS", "SBAS", "Galileo", "BeiDou",
+                                                 "IMES", "QZSS", "GLONASS"};
+        for (int i = 0; i < 7; ++i) {
+            if ((gnssMask >> i) & 1u) {
+                if (!st.gnss.empty()) {
+                    st.gnss += ',';
+                }
+                st.gnss += kNames[i];
+            }
+        }
+    }
+    st.gnssCfg  = gnssNaked ? "rejected" : gnssAcked ? "accepted" : "silent";
+    st.timeMode = tmode == 1 ? "survey" : tmode == 2 ? "fixed" : "moving";
+
+    /* Built out here too: sixteen std::format calls are sixteen heap operations.
+     * The ring is read without the lock, so a list taken while a frame lands can
+     * mix two samples -- acceptable for a diagnostic. */
     st.recentFrames.clear();
     for (uint8_t i = 0; i < 16; ++i) {
         const uint8_t at = static_cast<uint8_t>((recentAt + 15 - i) % 16);
