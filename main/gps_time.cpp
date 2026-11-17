@@ -2750,12 +2750,22 @@ void GpsTime::fitRate()
      * differences at 64 s and the estimate is worthless, while overlapping
      * leaves 86. The bias that buys is small compared with the scatter it
      * removes, and the octaves are read as a trend by eye, not as absolutes. */
+    /* The oldest live slot: when the ring is full this is the one about to be
+     * overwritten, and while it is filling the sequence has not wrapped. */
+    const int oldest = (m_rateNext + kRateWindow - m_rateCount) % kRateWindow;
     for (int i = 0; i < m_rateCount; ++i) {
+        /* Oldest first. The fit above does not care about order -- its sums are
+         * over the same pairs either way -- but a second difference does, and
+         * once the ring wraps m_rate[i] is a rotated sequence. Read flat, the
+         * one seam joins the newest sample to the oldest 300 s away and the
+         * deviation comes out as the seam (509 000 ppb on the board, 503 967
+         * reproduced on the host), not the clock. */
+        const RateSample &s = m_rate[(oldest + i) % kRateWindow];
         /* Time error: the reference's offset from the counter, not the offset
          * itself. The counter's own rate comes out in the difference, which is
          * what an Allan deviation is defined on. */
         m_adevPhase[i] =
-            static_cast<double>((m_rate[i].utcNs - base.utcNs) - (m_rate[i].monoNs - base.monoNs));
+            static_cast<double>((s.utcNs - base.utcNs) - (s.monoNs - base.monoNs));
     }
     int      octaves = 0;
     for (int k = 0; k < Status::kAdevOctaves; ++k) {
