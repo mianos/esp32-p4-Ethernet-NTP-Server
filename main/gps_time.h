@@ -250,6 +250,8 @@ public:
         bool     rfSeen       = false;
         int64_t  rfAgeUs      = -1;
         uint8_t  rfCfg        = 0;
+        uint32_t ticksPerUs   = 0; /* systimer ticks in a microsecond, as IDF converts it */
+        int64_t  tickUsDelta  = 0; /* ticks-derived microseconds minus esp_timer's */
         uint32_t cycPhase     = 0; /* phase at boot */
         uint32_t cycPhaseNow  = 0; /* phase, re-measured */ /* 0 unanswered, 1 accepted, 2 rejected */
 

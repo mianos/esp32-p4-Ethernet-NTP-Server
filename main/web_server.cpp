@@ -604,6 +604,8 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
      * all, so they must not sit behind a message that the trouble may have
      * stopped. */
     doc.AddItem("baud", static_cast<double>(gps.baud));
+    doc.AddItem("ticks_per_us", static_cast<double>(gps.ticksPerUs));
+    doc.AddItem("tick_us_delta", static_cast<double>(gps.tickUsDelta));
     doc.AddItem("recent_frames", gps.recentFrames);
     {
         doc.AddItem("baud_dup", static_cast<double>(gps.baud));

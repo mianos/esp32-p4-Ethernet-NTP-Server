@@ -16,6 +16,9 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_private/systimer.h"
+#include "hal/systimer_ll.h"
+#include "soc/systimer_struct.h"
 #include "esp_timer.h"
 
 #include "ntp_time.h"
@@ -809,11 +812,20 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
      * lets this handler be an IRAM interrupt: an OTA write disables the flash
      * cache for milliseconds at a time, and an edge landing in that window must
      * not be a crash. */
-    /* The edge is stamped with esp_timer, which counts whole microseconds. The
-     * rate fit keeps the nanosecond field, so a finer source can fill the
-     * fraction later without touching the fit; today that field is the
-     * microsecond multiplied out, and the residual stays at the quantisation
-     * floor (+/-0.5 us, 289 ns RMS). */
+    /* The edge is stamped with esp_timer, whole microseconds.
+     *
+     * A finer stamp was tried twice and both drift: the CPU cycle counter is not
+     * locked to esp_timer's timebase, and neither is the systimer's raw count --
+     * measured, systimer-derived microseconds disagree with
+     * esp_timer_get_time() by tens of milliseconds and the difference keeps
+     * moving (tick_us_delta), so a raw count has no fixed relationship to where
+     * esp_timer's microsecond starts. The remainder inside a microsecond is
+     * therefore a ramp, not a fraction, and it makes the residual worse than the
+     * quantisation it was meant to beat.
+     *
+     * So the stamp stays whole microseconds and the rate fit keeps its
+     * nanosecond field, waiting for a source that shares esp_timer's phase.
+     * ticks_per_us and tick_us_delta are reported for whoever picks it up. */
     const int64_t nowUs = esp_timer_get_time();
 
     portENTER_CRITICAL_ISR(&self->m_mux);
@@ -2815,6 +2827,7 @@ GpsTime::Status GpsTime::status() const
     int64_t  navStatusAtUs = 0;
     int64_t  rfAtUs        = 0;
     int64_t  ioAtUs        = 0;
+    uint8_t  recentAt      = 0;
 
     portENTER_CRITICAL(&m_mux);
     st.ppsCount    = m_ppsCount;
@@ -2878,6 +2891,13 @@ GpsTime::Status GpsTime::status() const
     st.rfAgcMin          = m_rfAgcMin;
     st.rfSeen            = m_rfSeen;
     st.rfCfg             = static_cast<uint8_t>(m_rfCfg);
+    {
+        const uint32_t lo = systimer_ll_get_counter_value_low(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);
+        const uint32_t hi = systimer_ll_get_counter_value_high(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);
+        st.ticksPerUs    = static_cast<uint32_t>(systimer_us_to_ticks(1));
+        st.tickUsDelta   = static_cast<int64_t>(systimer_ticks_to_us((static_cast<uint64_t>(hi) << 32) | lo)) -
+                           esp_timer_get_time();
+    }
     st.ioRxBytes         = m_ioRxBytes;
     st.ioTxBytes         = m_ioTxBytes;
     st.ioParity          = m_ioParity;
@@ -2890,18 +2910,7 @@ GpsTime::Status GpsTime::status() const
     st.tbufErrors        = m_tbufErrors;
     st.msgUbx            = m_msgUbx;
     st.msgppHex          = m_msgppHex;
-    {
-        /* Newest first, so the reader sees what is happening now. */
-        st.recentFrames.clear();
-        for (uint8_t i = 0; i < 16; ++i) {
-            const uint8_t at = static_cast<uint8_t>((m_recentAt + 15 - i) % 16);
-            if (m_recentFrames[at] == 0) {
-                continue;
-            }
-            st.recentFrames += std::format("{:02x}:{:02x} ", m_recentFrames[at] >> 8,
-                                           m_recentFrames[at] & 0xFF);
-        }
-    }
+    recentAt             = m_recentAt;
     st.ioHex             = m_ioHex;
     st.msgSkipped        = m_msgSkipped;
     st.ioSeen            = m_ioSeen;
@@ -2961,6 +2970,21 @@ GpsTime::Status GpsTime::status() const
     ppsMonoUs      = m_ppsMonoUs;
     suppressUntil  = m_ppsSuppressUntilUs;
     portEXIT_CRITICAL(&m_mux);
+
+    /* Built out here, not under the lock: sixteen std::format calls are sixteen
+     * heap operations, and holding the mux for them delays the PPS edge. The
+     * array is read without the lock, so a list taken while a frame lands can
+     * mix two samples -- acceptable for a diagnostic, where the alternative cost
+     * the edge about a microsecond every time /gps/info was polled. */
+    st.recentFrames.clear();
+    for (uint8_t i = 0; i < 16; ++i) {
+        const uint8_t at = static_cast<uint8_t>((recentAt + 15 - i) % 16);
+        if (m_recentFrames[at] == 0) {
+            continue;
+        }
+        st.recentFrames += std::format("{:02x}:{:02x} ", m_recentFrames[at] >> 8,
+                                       m_recentFrames[at] & 0xFF);
+    }
 
     const int64_t nowUs = esp_timer_get_time();
     if (st.ppsCount != 0) {
