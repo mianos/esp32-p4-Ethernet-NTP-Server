@@ -809,6 +809,11 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
      * lets this handler be an IRAM interrupt: an OTA write disables the flash
      * cache for milliseconds at a time, and an edge landing in that window must
      * not be a crash. */
+    /* The edge is stamped with esp_timer, which counts whole microseconds. The
+     * rate fit keeps the nanosecond field, so a finer source can fill the
+     * fraction later without touching the fit; today that field is the
+     * microsecond multiplied out, and the residual stays at the quantisation
+     * floor (+/-0.5 us, 289 ns RMS). */
     const int64_t nowUs = esp_timer_get_time();
 
     portENTER_CRITICAL_ISR(&self->m_mux);
@@ -819,6 +824,10 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
     if (nowUs >= self->m_ppsSuppressUntilUs &&
         (self->m_ppsCount == 0 || nowUs - self->m_ppsMonoUs >= kMinEdgeSpacingUs)) {
         self->m_ppsMonoUs = nowUs;
+        /* The stamp the rate fit sees. Phase is only meaningful once it has
+         * been calibrated; until then this stays the plain microsecond and the
+         * residual degrades to what it was. */
+        self->m_ppsMonoNs = nowUs * 1000;
         ++self->m_ppsCount;
     }
     portEXIT_CRITICAL_ISR(&self->m_mux);
@@ -888,8 +897,7 @@ esp_err_t GpsTime::begin()
         err = ESP_OK;
     }
     if (err == ESP_OK) {
-        err = gpio_isr_handler_add(kPpsPin, &GpsTime::ppsIsr, this);
-    }
+        err = gpio_isr_handler_add(kPpsPin, &GpsTime::ppsIsr, this);    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "PPS interrupt on GPIO%d: %s", static_cast<int>(kPpsPin), esp_err_to_name(err));
         return err;
@@ -2511,10 +2519,12 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
 void GpsTime::anchor(time_t second)
 {
     int64_t  ppsMonoUs = 0;
+    int64_t  ppsMonoNs = 0;
     uint32_t ppsCount  = 0;
 
     portENTER_CRITICAL(&m_mux);
     ppsMonoUs = m_ppsMonoUs;
+    ppsMonoNs = m_ppsMonoNs;
     ppsCount  = m_ppsCount;
     portEXIT_CRITICAL(&m_mux);
 
@@ -2575,14 +2585,15 @@ void GpsTime::anchor(time_t second)
     /* The same pair is one sample of the crystal against the GPS: the anchor
      * says where the second started, this says how fast our own counter got
      * here. */
-    pushRateSample(ppsMonoUs, static_cast<int64_t>(second) * 1000000000);
+    pushRateSample(ppsMonoNs != 0 ? ppsMonoNs : ppsMonoUs * 1000,
+                   static_cast<int64_t>(second) * 1000000000);
 
     steer();
 }
 
-void GpsTime::pushRateSample(int64_t monoUs, int64_t utcNs)
+void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
 {
-    const int64_t offsetNs = utcNs - monoUs * 1000;
+    const int64_t offsetNs = utcNs - monoNs;
 
     if (m_lastRateOffsetSet &&
         (offsetNs - m_lastRateOffsetNs > kRateResetNs || m_lastRateOffsetNs - offsetNs > kRateResetNs)) {
@@ -2599,7 +2610,7 @@ void GpsTime::pushRateSample(int64_t monoUs, int64_t utcNs)
     m_lastRateOffsetNs  = offsetNs;
     m_lastRateOffsetSet = true;
 
-    m_rate[m_rateNext] = RateSample{monoUs, utcNs};
+    m_rate[m_rateNext] = RateSample{monoNs, utcNs};
     m_rateNext         = (m_rateNext + 1) % kRateWindow;
     if (m_rateCount < kRateWindow) {
         ++m_rateCount;
@@ -2615,7 +2626,8 @@ void GpsTime::fitRate()
     }
     const int64_t t0 = esp_timer_get_time();
 
-    /* Least squares of UTC nanoseconds against esp_timer microseconds, both
+    /* Least squares of UTC nanoseconds against the edge stamp in nanoseconds,
+     * both
      * taken relative to the newest sample first: UTC nanoseconds are 1.8e18 at
      * the moment, which is past the point where a double holds every integer,
      * and what is wanted here is a slope of 1e-8. Relative, the numbers are
@@ -2629,7 +2641,7 @@ void GpsTime::fitRate()
     int64_t sumX = 0;
     int64_t sumY = 0;
     for (int i = 0; i < m_rateCount; ++i) {
-        sumX += m_rate[i].monoUs - base.monoUs;
+        sumX += m_rate[i].monoNs - base.monoNs;
         sumY += m_rate[i].utcNs - base.utcNs;
     }
     const double meanX = static_cast<double>(sumX) / m_rateCount;
@@ -2638,7 +2650,7 @@ void GpsTime::fitRate()
     double sxy = 0.0;
     double sxx = 0.0;
     for (int i = 0; i < m_rateCount; ++i) {
-        const double dx = static_cast<double>(m_rate[i].monoUs - base.monoUs) - meanX;
+        const double dx = static_cast<double>(m_rate[i].monoNs - base.monoNs) - meanX;
         double       dy = static_cast<double>(m_rate[i].utcNs - base.utcNs) - meanY;
         sxy += dx * dy;
         sxx += dx * dx;
@@ -2647,12 +2659,11 @@ void GpsTime::fitRate()
         return;
     }
 
-    /* A perfect esp_timer gives exactly 1000 ns per microsecond. A counter that
-     * runs fast by p gives 1000 * (1 - p), because it covers each GPS second in
-     * slightly fewer of its own microseconds -- so p, in parts per billion, is
-     * 1e9 - slope * 1e6. */
+    /* Both axes are nanoseconds now, so a perfect counter gives a slope of
+     * exactly 1 and the rate error is how far from 1 it sits, in parts per
+     * billion. */
     const double  slope = sxy / sxx;
-    int64_t       ppb   = static_cast<int64_t>(std::llround(1e9 - slope * 1e6));
+    int64_t       ppb   = static_cast<int64_t>(std::llround((1.0 - slope) * 1e9));
     bool          clamped = false;
     if (ppb > kRateLimitPpb) {
         ppb     = kRateLimitPpb;
@@ -2678,7 +2689,7 @@ void GpsTime::fitRate()
      * directly, and this receiver refuses TIM-TP, so the residuals carry it. */
     double sse = 0.0;
     for (int i = 0; i < m_rateCount; ++i) {
-        const double dx = static_cast<double>(m_rate[i].monoUs - base.monoUs) - meanX;
+        const double dx = static_cast<double>(m_rate[i].monoNs - base.monoNs) - meanX;
         const double dy = static_cast<double>(m_rate[i].utcNs - base.utcNs) - meanY -
                           slope * dx;
         sse += dy * dy;

@@ -249,7 +249,9 @@ public:
         uint16_t rfAgcMin     = 0;
         bool     rfSeen       = false;
         int64_t  rfAgeUs      = -1;
-        uint8_t  rfCfg        = 0; /* 0 unanswered, 1 accepted, 2 rejected */
+        uint8_t  rfCfg        = 0;
+        uint32_t cycPhase     = 0; /* phase at boot */
+        uint32_t cycPhaseNow  = 0; /* phase, re-measured */ /* 0 unanswered, 1 accepted, 2 rejected */
 
         /* Link health, which was the one thing with no observation at all. At
          * 9600 baud the wire is the scarcest resource here, and until now a
@@ -526,10 +528,26 @@ private:
      * slope of the last five minutes of them is the crystal's rate error, and
      * that is what lets a holdover last minutes instead of seconds. */
     struct RateSample {
-        int64_t monoUs = 0; /* the PPS edge, as esp_timer saw it */
+        /* The PPS edge in nanoseconds: esp_timer's microseconds plus the
+         * sub-microsecond part from the CPU cycle counter. Nanoseconds because
+         * the fit's residual is the jitter being measured, and esp_timer alone
+         * quantises each stamp to +/-0.5 us -- 289 ns RMS, which is larger than
+         * the jitter itself. */
+        int64_t monoNs = 0;
         int64_t utcNs  = 0; /* the UTC second that edge began */
     };
-    void pushRateSample(int64_t monoUs, int64_t utcNs);
+    void pushRateSample(int64_t monoNs, int64_t utcNs);
+    /* The cycle count at which esp_timer's microsecond ticks, so a count can be
+     * turned into an offset inside the current microsecond. Calibrated once at
+     * boot; zero until then, which means "fall back to whole microseconds". */
+    void calibrateCyclePhase();
+    uint32_t   m_cycPhase          = 0;
+    bool       m_cycPhaseValid     = false;
+    /* Re-measured periodically and reported, to show whether the two clocks
+     * hold a fixed phase. If this wanders, the fraction is noise. */
+    volatile uint32_t m_cycPhaseNow = 0;
+    int64_t    m_nextPhaseUs       = 0;
+    void measureCyclePhase();
     void fitRate();
 
     /* Slew the system clock towards the anchor, but only while this source is
@@ -542,6 +560,10 @@ private:
      * because status() and now() are const and still have to take it. */
     mutable portMUX_TYPE m_mux          = portMUX_INITIALIZER_UNLOCKED;
     int64_t      m_ppsMonoUs    = 0;
+    /* The same edge with the sub-microsecond part resolved from the cycle
+     * counter. Only the rate fit reads it; everything that sets the clock or
+     * measures age keeps the microsecond field. */
+    int64_t      m_ppsMonoNs    = 0;
     uint32_t     m_ppsCount     = 0;
     int64_t      m_anchorUtcNs  = 0;
     int64_t      m_anchorMonoUs = 0;
