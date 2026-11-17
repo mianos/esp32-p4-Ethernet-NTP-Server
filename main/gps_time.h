@@ -251,6 +251,38 @@ public:
         int64_t  rfAgeUs      = -1;
         uint8_t  rfCfg        = 0; /* 0 unanswered, 1 accepted, 2 rejected */
 
+        /* Link health, which was the one thing with no observation at all. At
+         * 9600 baud the wire is the scarcest resource here, and until now a
+         * saturated or mistimed line showed up only as CRC and length drops
+         * with nothing behind them. MON-IO is the port counters (parity,
+         * framing, overrun, bytes), the buffer messages are the module's own
+         * queue depths, and MSGPP is how many of each class it actually sent --
+         * which is also how a silently-ignored enable becomes visible. */
+        uint32_t ioRxBytes    = 0;
+        uint32_t ioTxBytes    = 0;
+        uint16_t ioParity     = 0;
+        uint16_t ioFraming    = 0;
+        uint16_t ioOverrun    = 0;
+        uint16_t rbufPending  = 0;
+        uint8_t  rbufPeak     = 0;
+        uint16_t tbufPending  = 0;
+        uint8_t  tbufPeak     = 0;
+        uint8_t  tbufErrors   = 0;
+        uint16_t msgUbx       = 0;
+        uint32_t msgSkipped   = 0;
+        bool     ioSeen       = false;
+        int64_t  ioAgeUs      = -1;
+        /* The last MSGPP payload as hex. The layout is subtle enough -- port
+         * outer, protocol inner -- that being able to see the bytes is worth 240
+         * characters of payload. */
+        std::string msgppHex;
+        /* The last frames by class:id, so "what is it actually sending" is
+         * answerable from the API rather than only from the serial console. */
+        std::string recentFrames;
+        std::string ioHex;
+        /* The host's current rate, so utilisation can be computed against it. */
+        uint32_t baud         = 0;
+
         /* The servo's own work counters. A mean offset hides a servo fighting
          * the oscillator: these three show it happening. Steps are corrections
          * past the slew threshold, clamps are fits that hit the rate limit (a
@@ -393,7 +425,8 @@ public:
     /* Set the host side's rate on its own, without telling the receiver. That
      * is how a line that has been desynchronised by something other than this
      * firmware -- or deliberately, to watch the scan -- is put back. */
-    void requestBaud(uint32_t baud);
+    void requestBaud(uint32_t baud, bool moduleToo);
+    void sendCfgPrt(uint32_t baud);
     /* Learn the time mode from the receiver, and put a known position hold back
      * after something has cleared it. */
     void adoptTimeMode();
@@ -481,6 +514,10 @@ private:
     void onNavClock(const ubx::Frame &f);
     void onNavStatus(const ubx::Frame &f);
     void onMonRf(const ubx::Frame &f);
+    void onMonIo(const ubx::Frame &f);
+    void onMonRxbuf(const ubx::Frame &f);
+    void onMonTxbuf(const ubx::Frame &f);
+    void onMonMsgpp(const ubx::Frame &f);
     void onCfgTmode(const ubx::Frame &f);
     void anchor(time_t second);
 
@@ -587,6 +624,24 @@ private:
      * "accepted then silent" are both real answers and only this tells them
      * apart -- otherwise the absent fields look like a firmware bug. */
     int8_t     m_rfCfg             = 0; /* 0 unanswered, 1 accepted, 2 rejected */
+    uint32_t   m_ioRxBytes         = 0;
+    uint32_t   m_ioTxBytes         = 0;
+    uint16_t   m_ioParity          = 0;
+    uint16_t   m_ioFraming         = 0;
+    uint16_t   m_ioOverrun         = 0;
+    uint16_t   m_rbufPending       = 0;
+    uint8_t    m_rbufPeak          = 0;
+    uint16_t   m_tbufPending       = 0;
+    uint8_t    m_tbufPeak          = 0;
+    uint8_t    m_tbufErrors        = 0;
+    uint16_t   m_msgUbx            = 0;
+    uint32_t   m_msgSkipped        = 0;
+    bool       m_ioSeen            = false;
+    int64_t    m_ioAtUs            = -1;
+    std::string m_msgppHex;
+    uint16_t    m_recentFrames[16] = {};
+    uint8_t     m_recentAt         = 0;
+    std::string m_ioHex;
     bool       m_antCfgAcked       = false;
     bool       m_antCfgNaked       = false;
     bool       m_antLogged         = false;
@@ -630,6 +685,13 @@ private:
     uint32_t   m_servoSteps        = 0;
     uint32_t   m_servoClamps       = 0;
     uint32_t   m_edgeSpikes        = 0;
+    uint32_t   m_secFrames         = 0; /* frames in the current second */
+    int64_t    m_secStartUs        = 0;
+    uint8_t    m_poorSecs          = 0; /* consecutive seconds under the floor */
+    /* configureModule() takes about three seconds and its own traffic is the
+     * only thing on the wire while it runs. Testing the rate underneath it
+     * cancels the configuration that would have raised the rate. */
+    bool       m_configuring       = false;
     int64_t    m_warmRetryAtUs     = 0;
     uint8_t    m_warmRetries       = 0;
     /* Requests from the HTTP task, serviced by the GPS task on its next pass so
@@ -649,6 +711,15 @@ private:
     volatile uint8_t m_svinCmd     = 0;
     volatile bool    m_tp5Cmd      = false;
     volatile uint32_t m_baudReq    = 0;
+    /* Set when the request also writes CFG-PRT to the receiver. The revert is
+     * the safety net: a rate the module does not take leaves it talking into a
+     * host listening at the wrong speed, and nothing but the scan would bring
+     * it back. The old rate is held until frames resume, then written back. */
+    volatile bool     m_baudReqModule = false;
+    uint32_t          m_baudPrev   = 0;
+    uint32_t          m_baudRevertTo = 0; /* non-zero: write this back when frames resume */
+    int64_t           m_baudRevertAtUs = 0;
+    bool              m_baudRevertPending = false;
     volatile uint32_t m_svinDurS   = 86400;
     volatile uint32_t m_svinAccMm  = 3000;
     uint8_t          m_tmode        = 0; /* 0 disabled, 1 surveying, 2 fixed */

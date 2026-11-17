@@ -110,6 +110,12 @@ constexpr int32_t kRateLimitPpb = 200000;
  * after it by a whole second. */
 constexpr int64_t kMinEdgeSpacingUs = 500000;
 
+/* The silence test never fires while a wrong rate still parses the odd frame.
+ * But the floor has to sit below what a *correct* rate can look like while the
+ * receiver re-acquires -- roughly two frames a second here, mostly ACKs -- or
+ * the scan walks off a rate that was working. A wrong rate gives far less. */
+constexpr uint32_t kMinFramesPerSec = 1;
+
 /* A correction larger than this is a step, not a slew. IDF implements adjtime()
  * at ~1.5% of elapsed time, so a second of error would take a minute to clear --
  * during which the served clock is knowingly wrong. */
@@ -229,9 +235,31 @@ void GpsTime::requestAntDelay()
     m_tp5Cmd = true;
 }
 
-void GpsTime::requestBaud(uint32_t baud)
+void GpsTime::requestBaud(uint32_t baud, bool moduleToo)
 {
-    m_baudReq = baud;
+    m_baudReq       = baud;
+    m_baudReqModule = moduleToo;
+}
+
+/* CFG-PRT for UART1. Sent at whatever rate is currently working, so the module
+ * receives it; the caller switches the host afterwards. 8N1, UBX in and out,
+ * NMEA off -- the same shape the boot configuration leaves behind. RAM only, so
+ * a module power cycle still returns to its own default and the scan finds it. */
+void GpsTime::sendCfgPrt(uint32_t baud)
+{
+    uint8_t cfg[20] = {};
+    cfg[0] = 1;                                          /* portID: UART1 */
+    text::putLe(cfg + 4, 0x000008D0u);                   /* 8 data bits, no parity, 1 stop */
+    text::putLe(cfg + 8, baud);
+    /* The masks are BITFIELDS: bit 0 UBX, bit 1 NMEA, bit 2 RTCM, bit 5 RTCM3.
+     * Outgoing has to keep bit 0 or the receiver stops sending UBX altogether
+     * and the only frames left are the ACKs to these very messages -- which read
+     * as a live-but-idle link and strand the scan, because a trickle keeps it
+     * from ever advancing. Incoming keeps NMEA too, harmlessly, because a
+     * module someone has been at with u-center may still be emitting it. */
+    text::putLe(cfg + 12, 0x0003u);                      /* in: UBX | NMEA */
+    text::putLe(cfg + 14, 0x0001u);                      /* out: UBX */
+    sendUbx(0x06, 0x00, cfg, sizeof(cfg));
 }
 
 void GpsTime::onCfgTmode(const ubx::Frame &f)
@@ -934,6 +962,32 @@ void GpsTime::task()
             ESP_LOGW(TAG, "no frames for %lld ms: rescanning the baud rate",
                      static_cast<long long>(kFrameSilenceUs / 1000));
         }
+        /* Frame rate, evaluated once a second. Three poor seconds in a row is
+         * treated as the same condition the silence test uses, so the scan
+         * advances. Without it a mismatched rate that still parses the odd
+         * frame sits there indefinitely. */
+        if (m_secStartUs == 0) {
+            m_secStartUs = nowUs;
+        } else if (nowUs - m_secStartUs >= 1000000) {
+            if (m_configuring) {
+                m_poorSecs = 0;
+            } else if (m_secFrames < kMinFramesPerSec) {
+                if (m_poorSecs < 255) {
+                    ++m_poorSecs;
+                }
+                if (m_poorSecs >= 6) {
+                    m_frameSeen = false;
+                    m_poorSecs  = 0;
+                    ESP_LOGW(TAG, "only %u frames in 6 s at %u baud: rescanning",
+                             static_cast<unsigned>(m_secFrames * 6), static_cast<unsigned>(m_baud));
+                }
+            } else {
+                m_poorSecs = 0;
+            }
+            m_secFrames  = 0;
+            m_secStartUs = nowUs;
+        }
+
         if (!m_frameSeen && nowUs >= m_nextScanUs) {
             advanceBaud();
             m_nextScanUs = nowUs + kScanAfterUs;
@@ -943,15 +997,55 @@ void GpsTime::task()
             m_nextCheckUs = nowUs + 1000000;
         }
         if (m_baudReq != 0) {
-            const uint32_t want = m_baudReq;
-            m_baudReq           = 0;
-            uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
+            const uint32_t want   = m_baudReq;
+            const bool     module = m_baudReqModule;
+            m_baudReq             = 0;
+            m_baudReqModule       = false;
+            if (module) {
+                /* Tell the receiver first, while the host is still listening at
+                 * a rate the receiver knows. Then hold the old rate: if frames
+                 * stop, this is written back as soon as anything is heard
+                 * again, on whatever rate that turns out to be. */
+                m_baudPrev            = m_baud;
+                m_baudRevertTo        = m_baud;
+                m_baudRevertAtUs      = esp_timer_get_time() + 2 * kFrameSilenceUs;
+                m_baudRevertPending   = true;
+                uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
+                sendCfgPrt(want);
+                uart_wait_tx_done(kUart, pdMS_TO_TICKS(100));
+            }
             uart_set_baudrate(kUart, want);
             m_baud      = want;
             m_frameSeen = false;
             ++m_rescans;
-            ESP_LOGW(TAG, "host side set to %u baud alone: the scan will find the receiver",
-                     static_cast<unsigned>(want));
+            if (module) {
+                ESP_LOGW(TAG, "receiver and host set to %u baud; reverting to %u if frames do not "
+                              "resume", static_cast<unsigned>(want), static_cast<unsigned>(m_baudPrev));
+            } else {
+                ESP_LOGW(TAG, "host side set to %u baud alone: the scan will find the receiver",
+                         static_cast<unsigned>(want));
+            }
+        }
+
+        /* The revert. Either frames came back and the old rate is written to the
+         * receiver again, or the wait expires and the next rate the scan lands
+         * on is treated as the one to write it at. */
+        if (m_baudRevertPending && nowUs >= m_baudRevertAtUs) {
+            m_baudRevertPending = false;
+            m_baudRevertTo      = m_baudPrev;
+            ESP_LOGW(TAG, "no frames at %u baud: reverting to %u",
+                     static_cast<unsigned>(m_baud), static_cast<unsigned>(m_baudPrev));
+        }
+        if (m_baudRevertTo != 0 && m_frameSeen) {
+            const uint32_t back = m_baudRevertTo;
+            m_baudRevertTo      = 0;
+            uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
+            sendCfgPrt(back);
+            uart_wait_tx_done(kUart, pdMS_TO_TICKS(100));
+            uart_set_baudrate(kUart, back);
+            m_baud                = back;
+            m_baudRevertPending   = false;
+            ESP_LOGW(TAG, "reverted to %u baud", static_cast<unsigned>(back));
         }
         /* A bias change or a restart asked for over HTTP. Serviced here rather
          * than in the handler so exactly one thread owns the UART and the
@@ -1281,7 +1375,11 @@ void GpsTime::advanceBaud()
         ESP_LOGW(TAG, "uart_set_baudrate(%u): %s", static_cast<unsigned>(m_baud),
                  esp_err_to_name(err));
     }
+    m_configuring = true;
+    m_poorSecs    = 0;
+    m_secFrames   = 0;
     configureModule();
+    m_configuring = false;
 }
 
 /* The pulse frame on its own, so the delay can be changed without re-running the
@@ -1515,6 +1613,12 @@ void GpsTime::configureModule()
             {"NAV-CLOCK", 0x01, 0x22, 1},
             {"NAV-STATUS", 0x01, 0x03, 2},
             {"MON-RF", 0x0A, 0x38, 5},
+            /* Link health. Slow on purpose: these measure the line, so they
+             * must not be a meaningful part of what loads it. */
+            {"MON-IO", 0x0A, 0x02, 10},
+            {"MON-RXBUF", 0x0A, 0x07, 5},
+            {"MON-TXBUF", 0x0A, 0x08, 5},
+            {"MON-MSGPP", 0x0A, 0x06, 10},
         };
         for (const Extra &extra : kExtras) {
             const uint8_t enable[8] = {extra.cls, extra.id, 0, extra.div, 0, 0, 0, 0};
@@ -1670,6 +1774,8 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     const uint8_t cls = frame.cls;
     const uint8_t id  = frame.id;
     m_lastFrameUs = esp_timer_get_time();
+    ++m_secFrames;
+    m_recentFrames[m_recentAt++ % 16] = static_cast<uint16_t>((cls << 8) | id);
     if (!m_frameSeen) {
         m_frameSeen = true;
         ESP_LOGI(TAG, "UBX frames arriving at %u baud", static_cast<unsigned>(m_baud));
@@ -1718,7 +1824,105 @@ void GpsTime::onFrame(const ubx::Frame &frame)
         onNavStatus(frame);
     } else if (cls == 0x0A && id == 0x38) { /* UBX-MON-RF */
         onMonRf(frame);
+    } else if (cls == 0x0A && id == 0x02) { /* UBX-MON-IO */
+        onMonIo(frame);
+    } else if (cls == 0x0A && id == 0x07) { /* UBX-MON-RXBUF */
+        onMonRxbuf(frame);
+    } else if (cls == 0x0A && id == 0x08) { /* UBX-MON-TXBUF */
+        onMonTxbuf(frame);
+    } else if (cls == 0x0A && id == 0x06) { /* UBX-MON-MSGPP */
+        onMonMsgpp(frame);
     }
+}
+
+/* MON-IO: 20 bytes per port, in the receiver's fixed port order. UART1 is block
+ * 1 -- the only port wired here -- and its counts are what say whether the line
+ * is coping. Parity and framing errors are the wire's own verdict, separate
+ * from anything the decoder later throws away. */
+void GpsTime::onMonIo(const ubx::Frame &f)
+{
+    constexpr std::size_t kBlock = 20;
+    constexpr std::size_t kPort  = 1;
+    if (f.len < kBlock * (kPort + 1)) {
+        return;
+    }
+    const std::size_t at  = kBlock * kPort;
+    const int64_t     now = esp_timer_get_time();
+    std::string hex;
+    hex.reserve(f.len * 2);
+    for (std::size_t i = 0; i < f.len; ++i) {
+        hex += std::format("{:02x}", f.u8(i));
+    }
+    portENTER_CRITICAL(&m_mux);
+    m_ioHex = std::move(hex);
+    m_ioRxBytes = f.u4(at);
+    m_ioTxBytes = f.u4(at + 4);
+    m_ioParity  = f.u2(at + 8);
+    m_ioFraming = f.u2(at + 10);
+    m_ioOverrun = f.u2(at + 12);
+    m_ioSeen    = true;
+    m_ioAtUs    = now;
+    portEXIT_CRITICAL(&m_mux);
+}
+
+/* MON-RXBUF: pending[6] u2, usage[6], peakUsage[6]. Pending is bytes queued on
+ * the module for that port: sustained non-zero means the decoder or the host
+ * cannot keep up, and it climbs to a peak the receiver remembers. */
+void GpsTime::onMonRxbuf(const ubx::Frame &f)
+{
+    constexpr std::size_t kPort = 1;
+    if (f.len < 12 + 2 * kPort + 2) {
+        return;
+    }
+    portENTER_CRITICAL(&m_mux);
+    m_rbufPending = f.u2(2 * kPort);
+    m_rbufPeak    = f.u8(12 + kPort);
+    portEXIT_CRITICAL(&m_mux);
+}
+
+/* MON-TXBUF: the same shape plus a trailing usage and an error bitfield
+ * (bit 0 limit reached, bit 1 allocation failure) that applies to all ports. */
+void GpsTime::onMonTxbuf(const ubx::Frame &f)
+{
+    constexpr std::size_t kPort = 1;
+    if (f.len < 12 + 2 * kPort + 3) {
+        return;
+    }
+    portENTER_CRITICAL(&m_mux);
+    m_tbufPending = f.u2(2 * kPort);
+    m_tbufPeak    = f.u8(12 + kPort);
+    m_tbufErrors  = f.u8(26);
+    portEXIT_CRITICAL(&m_mux);
+}
+
+/* MON-MSGPP: 120 bytes of U2[8] per port, then skipped[6] U4.
+ *
+ * Two things here are easy to get wrong, and were. The eight entries inside a
+ * port's array are PROTOCOLS, not message classes -- index 0 is UBX, which is
+ * all this firmware sends -- and the surrounding array is indexed by PORT, with
+ * msg2 being port 1, UART1. Reading it as class-indexed finds the CFG traffic
+ * at the wrong offset and reports a flat zero.
+ *
+ * What is kept is the UBX count (the traffic we generate) and the bytes UART1
+ * threw away as unframed, which is the receiver's own view of the line rather
+ * than ours.
+ */
+void GpsTime::onMonMsgpp(const ubx::Frame &f)
+{
+    if (f.len < 120) {
+        return;
+    }
+    constexpr std::size_t kPort1 = 16; /* msg2 */
+    std::string hex;
+    hex.reserve(f.len * 2);
+    for (std::size_t i = 0; i < f.len; ++i) {
+        hex += std::format("{:02x}", f.u8(i));
+    }
+    portENTER_CRITICAL(&m_mux);
+    m_msgUbx     = f.u2(kPort1);
+    m_msgSkipped = f.u4(96 + 4 * 1);
+    m_msgppHex   = std::move(hex);
+    portEXIT_CRITICAL(&m_mux);
 }
 
 /* NAV-DOP: 18 bytes, iTOW then seven u2 DOPs in hundredths. Only the four that
@@ -2530,6 +2734,7 @@ GpsTime::Status GpsTime::status() const
     int64_t  clockAtUs     = 0;
     int64_t  navStatusAtUs = 0;
     int64_t  rfAtUs        = 0;
+    int64_t  ioAtUs        = 0;
 
     portENTER_CRITICAL(&m_mux);
     st.ppsCount    = m_ppsCount;
@@ -2593,6 +2798,35 @@ GpsTime::Status GpsTime::status() const
     st.rfAgcMin          = m_rfAgcMin;
     st.rfSeen            = m_rfSeen;
     st.rfCfg             = static_cast<uint8_t>(m_rfCfg);
+    st.ioRxBytes         = m_ioRxBytes;
+    st.ioTxBytes         = m_ioTxBytes;
+    st.ioParity          = m_ioParity;
+    st.ioFraming         = m_ioFraming;
+    st.ioOverrun         = m_ioOverrun;
+    st.rbufPending       = m_rbufPending;
+    st.rbufPeak          = m_rbufPeak;
+    st.tbufPending       = m_tbufPending;
+    st.tbufPeak          = m_tbufPeak;
+    st.tbufErrors        = m_tbufErrors;
+    st.msgUbx            = m_msgUbx;
+    st.msgppHex          = m_msgppHex;
+    {
+        /* Newest first, so the reader sees what is happening now. */
+        st.recentFrames.clear();
+        for (uint8_t i = 0; i < 16; ++i) {
+            const uint8_t at = static_cast<uint8_t>((m_recentAt + 15 - i) % 16);
+            if (m_recentFrames[at] == 0) {
+                continue;
+            }
+            st.recentFrames += std::format("{:02x}:{:02x} ", m_recentFrames[at] >> 8,
+                                           m_recentFrames[at] & 0xFF);
+        }
+    }
+    st.ioHex             = m_ioHex;
+    st.msgSkipped        = m_msgSkipped;
+    st.ioSeen            = m_ioSeen;
+    st.baud              = m_baud;
+    ioAtUs               = m_ioAtUs;
     st.servoSteps        = m_servoSteps;
     st.servoClamps       = m_servoClamps;
     st.edgeSpikes        = m_edgeSpikes;
@@ -2672,6 +2906,9 @@ GpsTime::Status GpsTime::status() const
     }
     if (rfAtUs != 0) {
         st.rfAgeUs = nowUs - rfAtUs;
+    }
+    if (ioAtUs != 0) {
+        st.ioAgeUs = nowUs - ioAtUs;
     }
 
     st.rateKnown = st.rateSamples >= kRateMinSamples;

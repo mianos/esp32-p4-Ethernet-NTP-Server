@@ -596,6 +596,36 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         doc.AddItem("ttff_ms", static_cast<double>(gps.ttffMs));
         doc.AddItem("nav_status_age_s", static_cast<double>(gps.navStatusAgeUs) / 1e6);
     }
+    /* The link the diagnostics cross, and whether it is coping. All byte
+     * counters are cumulative, so a rate needs two samples; the parity,
+     * framing and overrun figures are the wire's own verdict and are worth
+     * reading next to the decoder's CRC drops, which they precede. */
+    /* Ungated on purpose: these are what say whether the link is working at
+     * all, so they must not sit behind a message that the trouble may have
+     * stopped. */
+    doc.AddItem("baud", static_cast<double>(gps.baud));
+    doc.AddItem("recent_frames", gps.recentFrames);
+    {
+        doc.AddItem("baud_dup", static_cast<double>(gps.baud));
+        if (gps.ioSeen && gps.ioAgeUs >= 0) {
+            doc.AddItem("io_rx_bytes", static_cast<double>(gps.ioRxBytes));
+            doc.AddItem("io_tx_bytes", static_cast<double>(gps.ioTxBytes));
+            doc.AddItem("io_parity", static_cast<double>(gps.ioParity));
+            doc.AddItem("io_framing", static_cast<double>(gps.ioFraming));
+            doc.AddItem("io_overrun", static_cast<double>(gps.ioOverrun));
+            doc.AddItem("rbuf_pending", static_cast<double>(gps.rbufPending));
+            doc.AddItem("rbuf_peak", static_cast<double>(gps.rbufPeak));
+            doc.AddItem("tbuf_pending", static_cast<double>(gps.tbufPending));
+            doc.AddItem("tbuf_peak", static_cast<double>(gps.tbufPeak));
+            doc.AddItem("tbuf_errors", static_cast<double>(gps.tbufErrors));
+            doc.AddItem("msg_ubx", static_cast<double>(gps.msgUbx));
+            doc.AddItem("msg_skipped", static_cast<double>(gps.msgSkipped));
+            doc.AddItem("msgpp_hex", gps.msgppHex);
+            doc.AddItem("io_age_s", static_cast<double>(gps.ioAgeUs) / 1e6);
+            doc.AddItem("io_hex", gps.ioHex);
+        }
+    }
+
     /* MON-RF's fate is always reported, even when it is carrying nothing: a
      * missing field and a refused message look identical otherwise, and this
      * module's protocol predates the message. */
@@ -852,14 +882,26 @@ esp_err_t NtpWebServer::gps_baud_post_handler(httpd_req_t *req)
         return sendJsonError(req, 400, "baud must be 4800..921600");
     }
 
-    GpsTime::instance().requestBaud(static_cast<uint32_t>(baud));
-    ESP_LOGW(TAG, "POST /gps/baud from %s: %u", callerAddress(req).c_str(),
-             static_cast<unsigned>(baud));
+    /* "module" moves the receiver too. Without it only the host moves and the
+     * scan has to walk back, which is the safe way to recover from a line that
+     * something else desynchronised. With it the receiver is written first and
+     * the old rate is kept as a revert: if frames do not resume within two
+     * silence windows they are restored, because otherwise the pair sits at
+     * different rates until the scan happens to land on the right one. */
+    bool moduleToo = false;
+    doc.GetField("module", moduleToo);
+
+    GpsTime::instance().requestBaud(static_cast<uint32_t>(baud), moduleToo);
+    ESP_LOGW(TAG, "POST /gps/baud from %s: %u (module %s)", callerAddress(req).c_str(),
+             static_cast<unsigned>(baud), moduleToo ? "yes" : "no");
 
     JsonWrapper resp;
     resp.AddItem("host_baud", baud);
-    resp.AddItem("note", "the receiver is untouched; gps_rescans at /healthz counts the "
-                         "scan that puts the two back together");
+    resp.AddItem("module", moduleToo);
+    resp.AddItem("note", moduleToo
+                             ? "receiver written too; reverts if frames do not resume in 10 s"
+                             : "the receiver is untouched; gps_rescans at /healthz counts the "
+                               "scan that puts the two back together");
     return sendJson(req, resp, 200);
 }
 
