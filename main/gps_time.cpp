@@ -945,7 +945,7 @@ void GpsTime::task()
     uint8_t buf[64];
 
     /* Ask before listening: a receiver still in its factory NMEA mode is using
-     * most of a 9600-baud line, and switching that off is the fastest way to
+     * most of the line, and switching that off is the fastest way to
      * make room for the messages this reference actually reads. Harmless noise
      * if there is nothing on the other end. */
     configureModule();
@@ -1085,7 +1085,15 @@ void GpsTime::task()
             const uint32_t back = m_baudRevertTo;
             m_baudRevertTo      = 0;
             uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
-            sendCfgPrt(back);
+            /* Saved as well, and for the same reason as the forward path: the
+             * forward change already saved ITS rate, so reverting only in RAM
+             * would leave the rate that failed in flash -- and the next power
+             * cycle would come straight back to it. */
+            if (sendCfgPrt(back) != 0) {
+                uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
+                esp_rom_delay_us(200000);
+                saveCfgIo();
+            }
             uart_wait_tx_done(kUart, pdMS_TO_TICKS(100));
             uart_set_baudrate(kUart, back);
             m_baud                = back;
@@ -1473,9 +1481,9 @@ void GpsTime::configureModule()
      * what is read here and nothing else.
      *
      * NAV-TIMELS is the leap-second notice: the current GPS-UTC offset, whether
-     * a leap is pending, and how many seconds until it. It is 24 bytes a second
-     * on a line that carries 1 Hz at 9600 baud with room to spare, and it is the
-     * only source for the leap indicator a reply puts in its first byte.
+     * a leap is pending, and how many seconds until it. At 24 bytes a second it
+     * is noise on a 38400 line, and it is the only source for the leap indicator
+     * a reply puts in its first byte.
      *
      * NAV-TIM-TP is the same trade for the pulse itself: 16 bytes a second
      * carrying where the pulse nominally is and the receiver's own quantisation
@@ -1629,9 +1637,9 @@ void GpsTime::configureModule()
     }
 
     /* UBX-NAV-SAT at half rate. Twelve bytes per satellite with a 16-satellite
-     * sky is 200 bytes, so once a second would spend a fifth of a 9600-baud line
-     * on diagnostics; once every two seconds is plenty to compare two antennas
-     * and leaves the line to the messages the clock actually needs. */
+     * sky is 200 bytes, so once a second would spend a fifth of even the
+     * current line on diagnostics; once every two seconds is plenty to compare
+     * two antennas and leaves the wire to the messages the clock needs. */
     {
         constexpr uint8_t kNavSat[8] = {0x01, 0x35, 0, 2, 0, 0, 0, 0};
         r = sendAndWait(0x06, 0x01, kNavSat, sizeof(kNavSat));
