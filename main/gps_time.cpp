@@ -876,7 +876,13 @@ esp_err_t GpsTime::begin()
     /* IRAM flag: see ppsIsr(). The service is process-wide, so a second install
      * is not an error -- it means something else got here first, and the only
      * consequence is where this handler ends up. */
-    err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    /* Level 3, above the UART's level 1 and the Ethernet's, so the edge nests
+     * over a serial or MAC handler already running instead of waiting for it.
+     * ESP_INTR_FLAG_IRAM keeps it runnable with the flash cache off, which an
+     * OTA write does for milliseconds at a time. Neither comes free: at level 3
+     * the handler may only use what is safe there, which is why it is a timer
+     * read and two stores and nothing else. */
+    err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3);
     if (err == ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "GPIO ISR service already installed: the PPS handler may not be in IRAM");
         err = ESP_OK;
@@ -2214,19 +2220,26 @@ void GpsTime::onNavSat(const ubx::Frame &f)
     uint8_t  used = 0;
     uint8_t  kept = 0;
 
-    /* Written straight into m_sats rather than a local, because this runs on the
-     * GPS task and 32 entries is 256 bytes of its stack. The critical section
-     * wraps the whole walk for the same reason: the row is filled where it is
-     * read, so no staging buffer exists to fall off the stack. A walk of 32
-     * groups is a few hundred nanoseconds with interrupts off, and status() is
-     * the only other reader. */
-    portENTER_CRITICAL(&m_mux);
+    /* One short critical section per row, rather than one around the walk.
+     *
+     * The whole walk held with interrupts masked delays the PPS edge, and on
+     * this port a critical section masks every priority -- so a long one costs
+     * the edge stamp no matter what level the PPS interrupt is at. Thirty-two
+     * rows is not a "few hundred nanoseconds" once the loop, the offset maths
+     * and the sum accumulation are counted; each row now costs a handful of
+     * instructions and the sums accumulate outside the lock entirely.
+     *
+     * The rows are still written straight into m_sats rather than staged on the
+     * stack, because this runs on the GPS task and 32 entries is 256 bytes of
+     * it. What changed is only how long the lock is held, not where the data
+     * lives. */
     for (uint8_t i = 0; i < walk; ++i) {
         const std::size_t sv  = 8 + 12 * static_cast<std::size_t>(i);
         const uint8_t     cno = f.u8(sv + 2);
         const uint32_t    fl  = f.u4(sv + 8);
 
         if (kept < kMaxSats) {
+            portENTER_CRITICAL(&m_mux);
             Sat &s = m_sats[kept++];
             s.gnss  = f.u8(sv + 0);
             s.sv    = f.u8(sv + 1);
@@ -2241,6 +2254,7 @@ void GpsTime::onNavSat(const ubx::Frame &f)
             const int16_t pr = static_cast<int16_t>(f.u2(sv + 6));
             s.prRes         = (pr == INT16_MIN) ? 0 : pr;
             s.prResValid    = pr != INT16_MIN;
+            portEXIT_CRITICAL(&m_mux);
         }
         if ((fl & (1u << 3)) == 0 || cno == 0) {
             continue;
@@ -2250,6 +2264,8 @@ void GpsTime::onNavSat(const ubx::Frame &f)
         ++used;
     }
 
+    /* The scalars again need the lock, and again only for the stores. */
+    portENTER_CRITICAL(&m_mux);
     m_cn0Max     = max;
     m_cn0Mean    = used != 0 ? static_cast<uint8_t>(sum / used) : 0;
     m_cn0Used    = used;
