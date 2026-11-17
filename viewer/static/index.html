@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>esp32p4-ntp — sky view</title>
+<style>
+  :root {
+    --bg: #0c1014;
+    --panel: #141b21;
+    --panel2: #1a232b;
+    --line: #26333d;
+    --ink: #dfe8ee;
+    --dim: #7b8b98;
+    --faint: #4d5d69;
+    --good: #3ddc84;
+    --warn: #f5b83d;
+    --bad: #ff5d5d;
+    --accent: #57c7ff;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 16px; max-width: 1280px; margin-inline: auto;
+  }
+  h1 { font-size: 16px; margin: 0; font-weight: 650; }
+  h1 .sub { color: var(--dim); font-weight: 400; font-family: var(--mono); font-size: 12px; }
+  h2 { font-size: 10px; text-transform: uppercase; letter-spacing: 1.1px; color: var(--dim);
+       margin: 0 0 8px; font-weight: 600; }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .grow { flex: 1; }
+  .pill {
+    font: 600 12px/1 var(--mono); letter-spacing: .6px; text-transform: uppercase;
+    padding: 6px 10px; border-radius: 999px; border: 1px solid var(--line);
+    background: var(--panel2); color: var(--dim); white-space: nowrap;
+  }
+  .pill.good { color: #06280f; background: var(--good); border-color: var(--good); }
+  .pill.warn { color: #2a1c00; background: var(--warn); border-color: var(--warn); }
+  .pill.bad  { color: #2a0000; background: var(--bad);  border-color: var(--bad); }
+  .btn { font: 500 12px/1 inherit; color: var(--ink); background: var(--panel2);
+         border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; cursor: pointer; }
+  .btn:hover { border-color: var(--faint); }
+  .btn.on { color: var(--accent); border-color: var(--accent); }
+  .grid { display: grid; grid-template-columns: 430px minmax(0, 1fr); gap: 12px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .panel + .panel { margin-top: 12px; }
+  .plotwrap { position: relative; }
+  svg#sky { width: 100%; height: auto; display: block; }
+  .ring { fill: none; stroke: var(--line); stroke-width: 1; }
+  .spoke { stroke: var(--line); stroke-width: 1; }
+  .cardinal { fill: var(--faint); font: 600 12px var(--mono); text-anchor: middle; dominant-baseline: middle; }
+  .ringlabel { fill: var(--faint); font: 10px var(--mono); }
+  .sat { transition: cx .35s ease, cy .35s ease, r .2s ease; }
+  .overlay { position: absolute; inset: 0; display: none; place-items: center; text-align: center;
+             background: color-mix(in srgb, var(--bg) 78%, transparent); border-radius: 8px; padding: 20px; }
+  .overlay.show { display: grid; }
+  .dim .panel { opacity: .58; }
+  .dim .panel:hover { opacity: .95; }
+  .overlay strong { display: block; font-size: 14px; margin-bottom: 5px; }
+  .overlay span { color: var(--dim); font-size: 12px; }
+  .legend { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: 10px; color: var(--dim); }
+  .ramp { height: 7px; flex: 1; border-radius: 4px;
+          background: linear-gradient(90deg, #5a6b78, #ff5d5d, #f5b83d, #9ae83d, #3ddc84); }
+
+  /* Dense cells: one line each, no cards. */
+  .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(108px, 1fr));
+           gap: 1px; background: var(--line); border-radius: 7px; overflow: hidden; }
+  .cell { background: var(--panel2); padding: 5px 8px 6px; min-width: 0; }
+  .cell .k { font-size: 9px; text-transform: uppercase; letter-spacing: .7px; color: var(--dim);
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cell .v { font: 600 13px/1.3 var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cell .u { font-size: 10px; color: var(--faint); font-weight: 400; }
+  .cell.bad .v { color: var(--bad); }
+  .cell.warn .v { color: var(--warn); }
+  .cell.good .v { color: var(--good); }
+
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  th { text-align: left; color: var(--dim); font-weight: 500; text-transform: uppercase;
+       font-size: 9px; letter-spacing: .7px; border-bottom: 1px solid var(--line); padding: 0 4px 6px; }
+  td { padding: 4px; border-bottom: 1px solid #1d262d; white-space: nowrap; }
+  tr.used td { background: #16241c; }
+  .sv { color: var(--ink); font-weight: 600; }
+  .muted { color: var(--faint); }
+  .bar { height: 5px; background: #232e37; border-radius: 3px; overflow: hidden; min-width: 30px; }
+  .bar > i { display: block; height: 100%; border-radius: 3px; }
+  .notes { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+  .note { font-size: 11px; font-family: var(--mono); padding: 3px 8px; border-radius: 5px;
+          background: #2a2110; color: var(--warn); border: 1px solid #4a3a13; }
+  .adev { width: 100%; height: auto; display: block; }
+  .adev .grid { stroke: var(--line); stroke-width: 1; }
+  .adev .axis { fill: var(--dim); font: 9px/1 ui-monospace, monospace; }
+  .adev .adevline { fill: none; stroke: #8fd694; stroke-width: 1.6; }
+  .adev .adevdot { fill: #8fd694; }
+  .sparks { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+  .spark .k { font-size: 9px; text-transform: uppercase; letter-spacing: .7px; color: var(--dim); }
+  .spark .v { font: 600 12px var(--mono); }
+  .spark svg { width: 100%; height: 32px; display: block; }
+  .spark polyline { fill: none; stroke-width: 1.5; stroke-linejoin: round; }
+  .foot { color: var(--faint); font-size: 11px; margin-top: 12px; font-family: var(--mono); }
+  .surveyline { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 12px; }
+  .surveyline .state { font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: .7px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div><h1>Sky view <span class="sub" id="boxname">—</span></h1></div>
+  <div class="grow"></div>
+  <span class="pill" id="verdict">starting</span>
+  <span class="pill" id="age">—</span>
+  <button class="btn on" id="live">Live</button>
+</header>
+
+<div class="notes" id="notes"></div>
+
+<div class="grid">
+  <div>
+    <div class="panel">
+      <h2>Azimuth / elevation</h2>
+      <div class="plotwrap">
+        <svg id="sky" viewBox="0 0 400 400" role="img" aria-label="Satellite sky plot">
+          <g id="rings"></g>
+          <g id="sats"></g>
+        </svg>
+        <div class="overlay" id="overlay">
+          <div>
+            <strong id="ovtitle">No geometry</strong>
+            <span id="ovbody">The receiver reports no elevations before it has a fix.</span>
+          </div>
+        </div>
+      </div>
+      <div class="legend"><span>weak</span><div class="ramp"></div><span>strong</span></div>
+      <div class="legend"><span>◯ ringed = in use</span><span>·</span><span>dashed = unhealthy</span><span>·</span><span>radius = C/N0</span></div>
+      <div class="legend">
+        <span>colour</span>
+        <button class="btn on" id="mode-cno" style="padding:4px 8px">C/N0</button>
+        <button class="btn" id="mode-res" style="padding:4px 8px">residual</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Survey</h2>
+      <div class="surveyline">
+        <span class="state" id="svinstate">—</span>
+        <span id="svintext">—</span>
+      </div>
+      <div class="bar" style="margin-top:7px;height:8px;"><i id="svinbar" style="width:0%;background:var(--accent)"></i></div>
+      <div class="foot" id="svinfoot" style="margin-top:6px">—</div>
+    </div>
+
+    <div class="panel">
+      <h2>Satellites <span class="muted" id="satcount"></span></h2>
+      <div style="max-height:min(46vh,430px);overflow:auto">
+        <table>
+          <thead>
+            <tr><th>Const</th><th>SV</th><th>C/N0</th><th></th><th>El</th><th>Az</th><th>Res</th><th>Use</th><th>Hlth</th></tr>
+          </thead>
+          <tbody id="sattable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>Stability <span class="muted" id="adevnote"></span></h2>
+      <div class="strip" id="tiestrip"></div>
+      <div id="adevchart" style="margin-top:10px"></div>
+      <div class="foot" style="margin-top:6px">overlapping Allan deviation over the
+        300 s rate window: ppb against averaging time, log-log. Down and to the
+        right is better; a rising tail is drift, and points short of the window
+        are withheld.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Health</h2>
+      <div class="strip" id="healthstrip"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Signal and antenna</h2>
+      <div class="strip" id="sigstrip"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Responder</h2>
+      <div class="strip" id="ntpstrip"></div>
+    </div>
+
+    <div class="panel">
+      <h2>Link</h2>
+      <div class="strip" id="linkstrip"></div>
+      <div class="foot" id="framesline" style="margin-top:8px;word-break:break-all">—</div>
+      <details id="rawbox" style="margin-top:8px">
+        <summary class="foot" style="cursor:pointer">raw io / msgpp</summary>
+        <div class="foot" id="raw" style="word-break:break-all">—</div>
+      </details>
+    </div>
+
+    <div class="panel">
+      <h2>Receiver</h2>
+      <div class="strip" id="rxstrip"></div>
+      <div class="sparks" id="sparks" style="margin-top:12px"></div>
+    </div>
+  </div>
+</div>
+
+<div class="foot" id="foot">connecting…</div>
+
+<script>
+'use strict';
+
+const CX = 200, CY = 200, RMAX = 176;
+let live = true;
+let timer = null;
+/* C/N0 is a proxy for signal strength; the pseudorange residual is multipath
+ * itself. They disagree exactly where it matters -- a strong reflection is loud
+ * and wrong -- so the plot can be coloured by either. */
+let colourMode = 'cno';
+
+const $ = (id) => document.getElementById(id);
+
+/* C/N0 to colour. The bands are the ones the receiver itself calls usable:
+ * below 25 is marginal, 25-35 is workable, 40+ only comes from a clear view. */
+function cnoColour(cno) {
+  if (cno == null) return '#5a6b78';
+  if (cno < 20) return '#5a6b78';
+  if (cno < 28) return '#ff5d5d';
+  if (cno < 36) return '#f5b83d';
+  if (cno < 43) return '#9ae83d';
+  return '#3ddc84';
+}
+
+/* Residual to colour, the other way round: small is good. Bands in centimetres
+ * -- 1 m is a clean measurement, 15 m is a reflector dominating the path. */
+function resColour(cm) {
+  if (cm == null) return '#5a6b78';
+  const a = Math.abs(cm);
+  if (a < 100) return '#3ddc84';
+  if (a < 300) return '#9ae83d';
+  if (a < 600) return '#f5b83d';
+  if (a < 1500) return '#ff5d5d';
+  return '#ff2d2d';
+}
+
+function satColour(sat) {
+  return colourMode === 'res' ? resColour(sat.prres_cm) : cnoColour(sat.cno);
+}
+
+function radiusFor(elev) {
+  return RMAX * (90 - Math.max(0, Math.min(90, elev))) / 90;
+}
+
+function project(azim, elev) {
+  const r = radiusFor(elev), rad = azim * Math.PI / 180;
+  return { x: CX + r * Math.sin(rad), y: CY - r * Math.cos(rad) };
+}
+
+function svgEl(name, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', name);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+  return el;
+}
+
+/* Static furniture: horizon, elevation rings, cardinal spokes. Drawn once. */
+function drawFurniture() {
+  const rings = $('rings');
+  for (const [elev, label] of [[0, '0°'], [30, '30°'], [60, '60°']]) {
+    rings.appendChild(svgEl('circle', { cx: CX, cy: CY, r: radiusFor(elev), class: 'ring' }));
+    rings.appendChild(Object.assign(
+      svgEl('text', { x: CX + 4, y: CY - radiusFor(elev) + 10, class: 'ringlabel' }),
+      { textContent: label }));
+  }
+  for (const [az, name] of [[0, 'N'], [90, 'E'], [180, 'S'], [270, 'W']]) {
+    const outer = project(az, 0);
+    rings.appendChild(svgEl('line', { x1: CX, y1: CY, x2: outer.x, y2: outer.y, class: 'spoke' }));
+    const label = project(az, -9);
+    rings.appendChild(Object.assign(svgEl('text', { x: label.x, y: label.y, class: 'cardinal' }),
+                                   { textContent: name }));
+  }
+}
+
+function fmt(value, digits = 0, unit = '') {
+  if (value == null || Number.isNaN(value)) return '—';
+  const n = digits ? Number(value).toFixed(digits) : String(Math.round(value));
+  return unit ? `${n}${unit}` : n;
+}
+
+function cell(key, value, cls, unit) {
+  const d = document.createElement('div');
+  d.className = 'cell' + (cls ? ' ' + cls : '');
+  const k = document.createElement('div'); k.className = 'k'; k.textContent = key;
+  const v = document.createElement('div'); v.className = 'v'; v.textContent = value;
+  if (unit) {
+    const u = document.createElement('span'); u.className = 'u'; u.textContent = unit;
+    v.appendChild(u);
+  }
+  d.append(k, v);
+  return d;
+}
+
+function fill(id, cells) {
+  const host = $(id);
+  host.replaceChildren();
+  host.append(...cells);
+}
+
+/* A cumulative counter with the window's increase beside it. The total alone
+ * is ambiguous -- one CRC at boot and one a second both read "1" -- so the
+ * delta does the warning and the total stays for context. */
+function windowed(body, key, total) {
+  const delta = body.recent?.[key];
+  if (delta && body.recent?.window_s) return `${fmt(total)} (+${delta} / ${body.recent.window_s}s)`;
+  return fmt(total);
+}
+
+function activityClass(body, key) {
+  return body.recent?.[key] ? 'warn' : '';
+}
+
+function duration(seconds) {
+  if (seconds == null) return '—';
+  const s = Math.max(0, Math.round(seconds));
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600),
+        m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (d) return `${d}d ${h}h`;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m`;
+  return `${sec}s`;
+}
+
+function renderSky(body) {
+  const layer = $('sats');
+  layer.replaceChildren();
+  const overlay = $('overlay');
+
+  if (!body.ok) {
+    overlay.classList.add('show');
+    $('ovtitle').textContent = 'Box unreachable';
+    $('ovbody').textContent = body.error || 'No response.';
+    return;
+  }
+  if (!body.geometry_ready) {
+    overlay.classList.add('show');
+    $('ovtitle').textContent = 'Geometry pending';
+    $('ovbody').textContent = 'NAV-SAT carries no elevation or azimuth until the receiver has a fix. '
+      + 'The rows below are real; the positions are not yet.';
+    return;
+  }
+  overlay.classList.remove('show');
+
+  for (const sat of body.sats) {
+    if (!sat.has_geometry) continue;
+    const { x, y } = project(sat.azim, sat.elev);
+    const r = 4 + Math.min(7, (sat.cno || 0) / 8);
+    const colour = satColour(sat);
+    layer.appendChild(svgEl('circle', { cx: x, cy: y, r: r + 3, fill: colour, 'fill-opacity': 0.18, class: 'sat' }));
+    layer.appendChild(svgEl('circle', {
+      cx: x, cy: y, r,
+      fill: sat.used ? colour : 'none',
+      stroke: sat.healthy ? (sat.used ? '#ffffff' : colour) : colour,
+      'stroke-width': sat.used ? 2 : 1.5,
+      'stroke-dasharray': sat.healthy ? '' : '3 2',
+      'fill-opacity': sat.used ? 0.95 : 0,
+      class: 'sat',
+    }));
+    const label = svgEl('text', {
+      x: x + r + 4, y: y + 3.5, fill: '#7b8b98', 'font-size': 9, 'font-family': 'monospace',
+    });
+    label.textContent = `${sat.sv}`;
+    layer.appendChild(label);
+  }
+}
+
+function render(body) {
+  /* The verdict is the server's, including "Box unreachable" -- one place
+   * decides the words so the pill and the notes cannot disagree. */
+  const pill = $('verdict');
+  const state = body.verdict?.state || 'bad';
+  pill.className = 'pill ' + state;
+  pill.textContent = body.verdict?.headline || 'unknown';
+
+  const haveData = body.have_data !== false;
+  document.body.classList.toggle('dim', !haveData || !body.ok);
+  /* Which poll this frame was drawn from; lets a check tie a screenshot back
+   * to the exact snapshot. */
+  document.body.dataset.polled = body.polled_at ?? '';
+
+  $('age').textContent = body.age_s == null ? 'never' : `${body.age_s.toFixed(1)}s ago`;
+  $('boxname').textContent = `${body.box}${haveData && body.device?.ip ? ' · ' + body.device.ip : ''}`;
+
+  const notes = $('notes');
+  notes.replaceChildren();
+  for (const note of body.verdict?.notes || []) {
+    const span = document.createElement('span');
+    span.className = 'note'; span.textContent = note;
+    notes.appendChild(span);
+  }
+
+  renderSky(body);
+
+  if (!haveData) {
+    fill('healthstrip', []);
+    const stab = body.stability || {};
+  fill('tiestrip', [
+    cell('TIE max', fmt(body.receiver.tie_max_ns, 0, ' ns'),
+         (body.receiver.tie_max_ns ?? 0) > 5000 ? 'warn' : ''),
+    cell('TIE rms', fmt(body.receiver.tie_rms_ns, 0, ' ns')),
+    cell('Window', fmt(stab.adev_n, 0, ' s'), (stab.adev_n ?? 0) < 200 ? 'warn' : ''),
+  ]);
+  $('adevnote').textContent = stab.adev_n ? `over ${fmt(stab.adev_n, 0)} s` : 'warming up';
+  drawAdev(stab.adev || []);
+
+  fill('sigstrip', []);
+    fill('rxstrip', []);
+    fill('ntpstrip', []);
+    fill('linkstrip', []);
+    $('framesline').textContent = '—';
+    $('raw').textContent = '—';
+    $('sattable').replaceChildren();
+    $('sparks').replaceChildren();
+    $('foot').textContent = `no data yet · ${body.failures || 0}/${body.polls || 0} polls failed`;
+    return;
+  }
+
+  if (!body.ok) {
+    $('foot').textContent =
+      `showing data from ${body.age_s ?? '—'}s ago · ${body.failures}/${body.polls} polls failed`;
+    /* Deliberately no return: the stale numbers stay, dimmed. */
+  }
+
+  const fix = body.time.fix ?? 0;
+  const fixNames = ['no fix', 'dead reckoning', '2D', '3D', 'GNSS+DR', 'time only'];
+  fill('healthstrip', [
+    cell('Fix', fixNames[fix] || `type ${fix}`, fix >= 2 ? 'good' : 'bad'),
+    cell('Time valid', body.time.time_valid ? 'yes' : 'no', body.time.time_valid ? 'good' : 'bad'),
+    cell('Synced', body.time.synced ? 'yes' : 'no', body.time.synced ? 'good' : 'bad'),
+    cell('PPS age', fmt(body.time.pps_age_ms / 1000, 2, ' s'),
+         (body.time.pps_age_ms ?? 1e9) > 2000 ? 'bad' : 'good'),
+    cell('Edges', fmt(body.time.pps_count)),
+    cell('Stratum', fmt(body.time.stratum), body.time.stratum === 1 ? 'good' : 'warn'),
+    cell('Uptime', duration(body.device.uptime_s)),
+    cell('Boots', fmt(body.device.boots)),
+    cell('Heap', fmt(body.device.heap_free / 1024, 0, ' kB')),
+    cell('Link', body.device.link_up ? 'up' : 'down', body.device.link_up ? 'good' : 'bad'),
+    cell('CRC', windowed(body, 'crc', body.frames.dropped_crc), activityClass(body, 'crc')),
+    cell('Rescans', windowed(body, 'rescans', body.frames.rescans), activityClass(body, 'rescans')),
+    cell('Frames', fmt(body.frames.good)),
+    cell('Version', body.device.version || '—'),
+  ]);
+
+  const stab = body.stability || {};
+  fill('tiestrip', [
+    cell('TIE max', fmt(body.receiver.tie_max_ns, 0, ' ns'),
+         (body.receiver.tie_max_ns ?? 0) > 5000 ? 'warn' : ''),
+    cell('TIE rms', fmt(body.receiver.tie_rms_ns, 0, ' ns')),
+    cell('Window', fmt(stab.adev_n, 0, ' s'), (stab.adev_n ?? 0) < 200 ? 'warn' : ''),
+  ]);
+  $('adevnote').textContent = stab.adev_n ? `over ${fmt(stab.adev_n, 0)} s` : 'warming up';
+  drawAdev(stab.adev || []);
+
+  fill('sigstrip', [
+    cell('C/N0 mean', fmt(body.signal.cn0_mean, 1, ' dBHz'), (body.signal.cn0_mean ?? 0) < 25 ? 'warn' : 'good'),
+    cell('C/N0 max', fmt(body.signal.cn0_max, 1, ' dBHz')),
+    cell('In use', fmt(body.signal.cn0_used)),
+    cell('Noise', fmt(body.signal.noise_dbm, 0, ' dBm')),
+    cell('AGC', fmt(body.signal.agc)),
+    cell('Delay', fmt(body.signal.ant_delay_ns, 0, ' ns')),
+  ]);
+
+  fill('rxstrip', [
+    cell('Offset', fmt(body.receiver.offset_ns / 1000, 1, ' µs')),
+    cell('Rate', fmt(body.receiver.rate_ppm, 2, ' ppm')),
+    cell('Jitter', fmt(body.receiver.tp_jitter_ns, 0, ' ns')),
+    cell('tAcc', fmt(body.receiver.t_acc_ns, 0, ' ns')),
+    cell('Root delay', fmt(body.receiver.root_delay_ns, 0, ' ns')),
+    cell('Dispersion', fmt(body.receiver.dispersion_us, 1, ' µs')),
+    cell('Lock window', fmt(body.receiver.lock_window_s, 0, ' s')),
+    cell('Steps', fmt(body.receiver.servo_steps),
+         body.receiver.servo_steps ? 'warn' : ''),
+    cell('Clamps', windowed(body, 'clamps', body.receiver.servo_clamps), activityClass(body, 'clamps')),
+    cell('Spikes', windowed(body, 'spikes', body.receiver.edge_spikes), activityClass(body, 'spikes')),
+    cell('GDOP', fmt(body.receiver.gdop, 2)),
+    cell('PDOP', fmt(body.receiver.pdop, 2)),
+    cell('TTFF', fmt(body.receiver.ttff_ms, 0, ' ms')),
+    cell('TIM-TP', body.receiver.timtp || '—'),
+    cell('TP5', body.receiver.tp5_ok ? 'ok' : 'rejected', body.receiver.tp5_ok ? 'good' : 'warn'),
+    cell('Mode', body.receiver.time_mode || '—'),
+    cell('Sat age', fmt(body.signal.sats_age_ms, 0, ' ms')),
+    cell('fAcc', fmt(body.receiver.f_acc_ps_s, 0, ' ps/s')),
+    cell('Flags', fmt(body.receiver.nav_status_flags), ''),
+    cell('Bridge', body.receiver.bridge_active
+      ? `u-center ×${fmt(body.receiver.bridge_clients)}` : 'none',
+      body.receiver.bridge_active ? 'warn' : ''),
+    cell('RF', body.receiver.rf_cfg || '—',
+      body.receiver.rf_cfg === 'accepted' ? 'good' : ''),
+  ]);
+
+  /* The link the diagnostics ride on. Load is the one that decides whether
+   * another message fits, so it is the one that colours. */
+  const link = body.link || {};
+  fill('linkstrip', [
+    cell('Baud', fmt(link.baud)),
+    cell('Out', fmt(link.tx_bps, 0, ' B/s'), (link.util_pct ?? 0) > 75 ? 'bad' : ''),
+    cell('In', fmt(link.rx_bps, 0, ' B/s')),
+    cell('Load', fmt(link.util_pct, 1, ' %'), (link.util_pct ?? 0) > 75 ? 'bad' : ''),
+    cell('Wire err', fmt((link.parity ?? 0) + (link.framing ?? 0) + (link.overrun ?? 0)),
+         ((link.parity ?? 0) + (link.framing ?? 0) + (link.overrun ?? 0)) ? 'warn' : ''),
+    cell('Discarded', windowed(body, 'skipped', link.skipped_total), activityClass(body, 'skipped')),
+    cell('Rx buf peak', fmt(link.rbuf_peak), (link.rbuf_peak ?? 0) > 0 ? 'warn' : ''),
+    cell('Tx buf peak', fmt(link.tbuf_peak), (link.tbuf_errors ?? 0) ? 'bad' : ''),
+    cell('UBX sent', windowed(body, 'ubx', link.ubx_total), ''),
+  ]);
+
+  /* What the receiver is actually sending, newest first. This is the field that
+   * makes a silent enable (or a trickle of nothing but ACKs) visible. */
+  $('framesline').textContent = body.receiver.holdover_s
+    ? `holdover ${body.receiver.holdover_s.toFixed(1)} s, error `
+      + `${fmt(body.receiver.holdover_error_us, 0)} µs · frames: ${body.receiver.recent_frames || '—'}`
+    : `frames: ${body.receiver.recent_frames || '—'}`;
+  $('raw').textContent = `io ${body.receiver.io_hex || '—'}\nmsgpp ${body.receiver.msgpp_hex || '—'}`;
+
+  fill('ntpstrip', [
+    cell('Serving', body.ntp.serving ? 'yes' : 'no', body.ntp.serving ? 'good' : 'bad'),
+    cell('Answered', fmt(body.ntp.answered)),
+    cell('Per min', fmt(body.ntp.per_minute, 1)),
+    cell('KoD', fmt(body.ntp.kod), body.ntp.kod ? 'warn' : ''),
+    cell('Dropped', fmt(body.ntp.dropped), body.ntp.dropped ? 'warn' : ''),
+    cell('Clients', fmt(body.ntp.clients)),
+    cell('Last served', body.ntp.last_served_s == null ? '—' : `${fmt(body.ntp.last_served_s, 0)} s`),
+    cell('Leap', fmt(body.ntp.leap), body.ntp.leap === 0 ? 'good' : 'warn'),
+    cell('Root delay', fmt(body.ntp.root_delay_us, 0, ' µs')),
+    cell('Root disp', fmt(body.ntp.root_dispersion_us, 0, ' µs')),
+    cell('Leap pend', body.receiver.leap_pending
+      ? `in ${fmt(body.receiver.leap_in_s, 0)} s` : 'no',
+      body.receiver.leap_pending ? 'warn' : ''),
+  ]);
+
+  const tbody = $('sattable');
+  tbody.replaceChildren();
+  for (const sat of body.sats) {
+    const tr = document.createElement('tr');
+    if (sat.used) tr.className = 'used';
+    const first = document.createElement('td');
+    first.textContent = sat.constellation;
+    tr.appendChild(first);
+    const svCell = document.createElement('td');
+    svCell.className = 'sv'; svCell.textContent = String(sat.sv);
+    tr.appendChild(svCell);
+    const cnoCell = document.createElement('td');
+    cnoCell.textContent = sat.cno == null ? '—' : sat.cno.toFixed(1);
+    cnoCell.style.color = cnoColour(sat.cno);
+    tr.appendChild(cnoCell);
+    const barCell = document.createElement('td');
+    const bar = document.createElement('div');
+    bar.className = 'bar';
+    const meter = document.createElement('i');
+    meter.style.width = `${Math.min(100, ((sat.cno || 0) / 50) * 100)}%`;
+    meter.style.background = cnoColour(sat.cno);
+    bar.appendChild(meter);
+    barCell.appendChild(bar);
+    tr.appendChild(barCell);
+    const resCell = document.createElement('td');
+    if (sat.prres_cm == null) {
+      resCell.textContent = '—';
+      resCell.className = 'muted';
+    } else {
+      resCell.textContent = sat.prres_cm.toFixed(0);
+      resCell.style.color = resColour(sat.prres_cm);
+    }
+    tr.appendChild(resCell);
+    for (const [value, cls] of [[fmt(sat.elev, 0, '°'), ''], [fmt(sat.azim, 0, '°'), ''],
+                                [sat.used ? '●' : '·', sat.used ? '' : 'muted'],
+                                [sat.healthy ? 'ok' : 'bad', sat.healthy ? 'muted' : '']]) {
+      const td = document.createElement('td');
+      td.textContent = value;
+      if (cls) td.className = cls;
+      if (!sat.healthy && value === 'bad') td.style.color = 'var(--bad)';
+      tr.appendChild(td);
+    }
+    tbody.appendChild(tr);
+  }
+  $('satcount').textContent = `${body.sats.length} tracked · ${body.signal.cn0_used ?? 0} in use`;
+
+  const survey = body.survey;
+  $('svinstate').textContent = survey.valid ? 'valid' : survey.running ? 'running' : 'idle';
+  $('svinstate').style.color = survey.valid ? 'var(--good)' : survey.running ? 'var(--accent)' : 'var(--dim)';
+  $('svintext').textContent = survey.valid
+    ? 'position fixed'
+    : survey.running ? `${duration(survey.elapsed_s)} of ${duration(survey.target_s)}` : 'not surveying';
+  $('svinbar').style.width = `${(survey.progress || 0) * 100}%`;
+  $('svinbar').style.background = survey.valid ? 'var(--good)' : 'var(--accent)';
+  $('svinfoot').textContent = survey.running
+    ? `${fmt(survey.observations)} observations · accuracy ${fmt(survey.accuracy_mm)} mm, `
+      + `limit ${fmt(survey.limit_mm)} mm · variance ${fmt(survey.variance_mm2)} mm²`
+    : `mode ${body.receiver.time_mode || '—'}`;
+
+  if (body.ok) {
+    $('foot').textContent = `${body.polls} polls · ${body.failures} failed · ${new Date().toLocaleTimeString()}`;
+  }
+}
+
+/* ADEV across seven octaves. Only the octaves the firmware sent are drawn: a
+ * gap at the long end means the window has not filled, and plotting a zero
+ * there would look like a measurement. */
+function drawAdev(values) {
+  const host = $('adevchart');
+  host.replaceChildren();
+  const pts = values.map((v, k) => [2 ** k, v]).filter(([, v]) => v != null && v > 0);
+  if (pts.length < 2) {
+    host.appendChild(Object.assign(document.createElement('div'),
+      { className: 'foot', textContent: 'no deviation yet' }));
+    return;
+  }
+  const W = 300, H = 140, L = 30, R = 8, T = 8, B = 20;
+  const lo = Math.max(0.1, Math.min(...pts.map(([, v]) => v)) / 2);
+  const hi = Math.max(...pts.map(([, v]) => v)) * 2;
+  const x = (tau) => L + (Math.log2(tau) / 6) * (W - L - R);
+  const y = (v) => T + (1 - (Math.log10(v) - Math.log10(lo)) /
+    (Math.log10(hi) - Math.log10(lo) || 1)) * (H - T - B);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'adev' });
+  for (const tick of [1, 10, 100, 1000, 10000]) {
+    if (tick < lo || tick > hi) continue;
+    svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(tick), y2: y(tick), class: 'grid' }));
+    svg.appendChild(Object.assign(svgEl('text', { x: L - 4, y: y(tick) + 3, class: 'axis' }),
+      { textContent: tick >= 1000 ? `${tick / 1000}k` : `${tick}` }));
+  }
+  for (const tau of [1, 4, 16, 64]) {
+    svg.appendChild(Object.assign(svgEl('text', { x: x(tau), y: H - 6, class: 'axis' }),
+      { textContent: `${tau}s` }));
+  }
+  svg.appendChild(svgEl('polyline', {
+    points: pts.map(([t, v]) => `${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' '),
+    class: 'adevline',
+  }));
+  for (const [t, v] of pts) {
+    svg.appendChild(svgEl('circle', { cx: x(t), cy: y(v), r: 2.5, class: 'adevdot' }));
+  }
+  host.appendChild(svg);
+}
+
+/* Sparklines from the viewer's own ring buffer, not the box. */
+async function renderSparks() {
+  let payload;
+  try {
+    const response = await fetch('/api/history');
+    if (response.status === 304) return;
+    payload = await response.json();
+  } catch { return; }
+
+  const samples = payload.samples || [];
+  const host = $('sparks');
+  host.replaceChildren();
+
+  for (const [key, label, unit, colour] of [
+    ['noise_dbm', 'noise', 'dBm', '#57c7ff'],
+    ['agc', 'AGC', '', '#c9a2ff'],
+    ['cn0_mean', 'C/N0 mean', 'dBHz', '#3ddc84'],
+    ['offset_ns', 'offset', 'ns', '#f5b83d'],
+    ['adev1s', 'ADEV 1 s', 'ppb', '#8fd694'],
+  ]) {
+    const values = samples.map((s) => s[key]).filter((v) => v != null);
+    const box = document.createElement('div');
+    box.className = 'spark';
+    const k = document.createElement('div'); k.className = 'k'; k.textContent = label;
+    const v = document.createElement('div'); v.className = 'v';
+    v.textContent = values.length ? `${Math.round(values[values.length - 1])}${unit ? ' ' + unit : ''}` : '—';
+    box.append(k, v);
+
+    if (values.length > 1) {
+      const low = Math.min(...values), high = Math.max(...values);
+      const span = high - low || 1;
+      const step = 190 / Math.max(1, values.length - 1);
+      const points = values.map((value, i, all) =>
+        `${(i * step).toFixed(1)},${(38 - ((value - low) / span) * 34).toFixed(1)}`);
+      const svg = svgEl('svg', { viewBox: '0 0 190 40', preserveAspectRatio: 'none' });
+      svg.appendChild(svgEl('polyline', { points: points.join(' '), stroke: colour }));
+      box.appendChild(svg);
+    }
+    host.appendChild(box);
+  }
+}
+
+async function tick() {
+  if (live) {
+    try {
+      /* 304 means unchanged: keep what is on screen and skip the re-render. The
+       * browser revalidates against the ETag, so several tabs cost the server a
+       * comparison rather than a serialisation each. No early return -- the
+       * timer below still has to be re-armed. */
+      const response = await fetch('/api/snapshot');
+      if (response.status !== 304) {
+        render(await response.json());
+      }
+    } catch (error) {
+      $('foot').textContent = `viewer error: ${error}`;
+    }
+  }
+  clearTimeout(timer);
+  timer = setTimeout(tick, live ? 2000 : 10000);
+}
+
+$('live').addEventListener('click', () => {
+  live = !live;
+  $('live').classList.toggle('on', live);
+  $('live').textContent = live ? 'Live' : 'Paused';
+  if (live) tick();
+});
+
+for (const mode of ['cno', 'res']) {
+  $(`mode-${mode}`).addEventListener('click', () => {
+    colourMode = mode;
+    $('mode-cno').classList.toggle('on', mode === 'cno');
+    $('mode-res').classList.toggle('on', mode === 'res');
+  });
+}
+
+drawFurniture();
+tick();
+renderSparks();
+setInterval(() => { if (live) renderSparks(); }, 5000);
+</script>
+</body>
+</html>
