@@ -1601,6 +1601,36 @@ Not in this milestone, on purpose — or only half done:
   rather than in the counter every task reads. That is the EMAC's PTP counter and
   the driver work in [Next step](#next-step).
 
+## The UART rate
+
+The link to the receiver runs at **38400**, not the module's 9600 default. With
+the diagnostics loaded (NAV-SAT, the MON-diagnostics, TIM-SVIN) 9600 measured 43%
+busy; the same traffic at 38400 is 10%, which is what stops the wire deciding
+what can be enabled. `io_parity`, `io_framing` and `io_overrun` are the check, and
+they stay at zero.
+
+`POST /gps/baud {"baud":38400,"module":true}` moves it. Without `module` only the
+host moves, which is the way back from a line something else desynchronised.
+
+Three things about the receiver are needed to do this safely, and getting any of
+them wrong costs an hour:
+
+- **CFG-PRT alone is RAM** and does not survive a power cut, so the IO section --
+  and only the IO section -- is saved with CFG-CFG. Saving everything would pin
+  the message rates and the GNSS mask to that boot.
+- **The save has to wait for the CFG-PRT to be acknowledged.** Saving immediately
+  captures the old rate, and the save's own port reload then undoes the change.
+- **This module never ACKs CFG-PRT**, even when the change works, so silence has
+  to mean carry on. An explicit NAK is the only thing that stops the move.
+
+Even when it is accepted, the receiver stops scheduling periodic output until it
+is **power-cycled** -- polls still answer, so it reads as a live-but-idle link.
+The old rate is therefore held and written back if frames do not resume within
+two silence windows, and the reordered rate list leads with 38400 so the scan
+does not spend twenty-five seconds walking to a rate the module is already on.
+Every other rate stays in the list: a receiver reset to its factory default comes
+up at 9600 and is still found, just later.
+
 ## Layout
 
 | File                    | Contents                                                        |
