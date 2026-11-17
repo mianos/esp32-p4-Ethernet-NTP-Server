@@ -572,6 +572,27 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("servo_steps", static_cast<double>(gps.servoSteps));
     doc.AddItem("servo_clamps", static_cast<double>(gps.servoClamps));
     doc.AddItem("edge_spikes", static_cast<double>(gps.edgeSpikes));
+    doc.AddItem("tie_max_ns", gps.tieMaxNs);
+    doc.AddItem("tie_rms_ns", gps.tieRmsNs);
+
+    /* The Allan deviation over the fit window, in nanoseconds per second --
+     * which is ppb, and is what the arithmetic already returns because the
+     * phase is in nanoseconds over one-second samples. Published in those units
+     * rather than fractionally because the JSON writer rounds to four decimals
+     * and 1e-10 would arrive as 0.0000. Gated on the sample count because below
+     * ~60 s into a window the short octaves still move by a factor between
+     * polls, and a viewer plotting that reads as instability that is not there.
+     * A zero octave means the window does not reach it. */
+    if (gps.adevN >= 60) {
+        static constexpr const char *kAdevKeys[GpsTime::Status::kAdevOctaves] = {
+            "adev_1s", "adev_2s", "adev_4s", "adev_8s", "adev_16s", "adev_32s", "adev_64s"};
+        for (int k = 0; k < GpsTime::Status::kAdevOctaves; ++k) {
+            if (gps.adev[k] > 0.0) {
+                doc.AddItem(kAdevKeys[k], gps.adev[k]);
+            }
+        }
+        doc.AddItem("adev_n", gps.adevN);
+    }
 
     /* Geometry and clock quality. Each carries its own age so a message that
      * stops is visible as a growing number rather than a stale one that still

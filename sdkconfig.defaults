@@ -63,4 +63,4 @@ CONFIG_WEBSERVER_TASK_STACK_SIZE=12288
 # task overflowed its canary and panicked the board on every boot, which only
 # showed as a 10-second DHCP loop. 4 KB leaves room for the handlers and the
 # float parsing they do.
-CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144

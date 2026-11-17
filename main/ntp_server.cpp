@@ -28,7 +28,12 @@ constexpr int          kPort             = 123;
 constexpr size_t       kPacketBytes      = 48;   /* NTPv4 header, no MAC */
 constexpr uint32_t     kReceiveTimeoutMs = 1000; /* how often the task looks up */
 constexpr uint32_t     kReportEveryMs    = 60000;
-constexpr int          kTaskStack        = 4096;
+/* 8192, not 4096: every request copies a GpsTime::Status by value (the
+ * reference's error budget and lock state come out of it) and status() parses
+ * the antenna delay with from_chars<double>, whose fast_float path alone is
+ * several hundred bytes. At 4096 the stack-protector tripped inside
+ * from_chars within a minute of the first client, and the board rolled back. */
+constexpr int          kTaskStack        = 8192;
 constexpr UBaseType_t  kTaskPriority     = 5;    /* above the status logger, below lwIP */
 
 constexpr size_t       kStampBytes    = 8;

@@ -250,6 +250,15 @@ public:
         bool     rfSeen       = false;
         int64_t  rfAgeUs      = -1;
         uint8_t  rfCfg        = 0;
+        /* Worst and RMS phase excursion in the fit window, nanoseconds. */
+        double   tieMaxNs     = 0;
+        double   tieRmsNs     = 0;
+        /* Overlapping Allan deviation in ppb (nanoseconds per second), octave
+         * k at 2^k seconds. Zero where the window is too short to reach it, and
+         * the count below says how many samples stand behind the numbers. */
+        static constexpr int kAdevOctaves = 7;
+        double   adev[kAdevOctaves] = {};
+        uint16_t adevN        = 0;
         uint32_t ticksPerUs   = 0; /* systimer ticks in a microsecond, as IDF converts it */
         int64_t  tickUsDelta  = 0; /* ticks-derived microseconds minus esp_timer's */
         uint32_t cycPhase     = 0; /* phase at boot */
@@ -714,6 +723,17 @@ private:
     uint32_t   m_servoSteps        = 0;
     uint32_t   m_servoClamps       = 0;
     uint32_t   m_edgeSpikes        = 0;
+    /* Phase relative to the fit's base sample, for the deviation below. The
+     * absolute offsets are ~1.8e18 ns and a double resolves only ~256 ns there,
+     * so a second difference taken on them cancels to exactly zero -- measured
+     * on the host before it was believed. Relative, the numbers are seconds and
+     * the arithmetic is exact. Static, because 300 doubles does not belong on
+     * the GPS task's stack. */
+    double     m_adevPhase[kRateWindow] = {};
+    double     m_tieMaxNs          = 0;
+    double     m_tieRmsNs          = 0;
+    double     m_adevPpb[Status::kAdevOctaves] = {};
+    uint16_t   m_adevN             = 0;
     uint32_t   m_secFrames         = 0; /* frames in the current second */
     int64_t    m_secStartUs        = 0;
     uint8_t    m_poorSecs          = 0; /* consecutive seconds under the floor */

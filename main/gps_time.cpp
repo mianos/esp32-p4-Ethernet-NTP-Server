@@ -138,7 +138,9 @@ constexpr int64_t kEdgeSpikeNs = 1000000; /* 1 ms */
  * and the NAV-SAT walk all run here, and a frame walk that keeps a row per
  * satellite is what pushed the old figure over: it overflowed into a panic
  * loop that only showed as the box re-DHCPing every ten seconds. */
-constexpr int          kTaskStack    = 6144;
+/* 8192: status() is a large by-value Status and the same fast_float call the
+ * responder hit, and this task builds Status in its own log helpers. */
+constexpr int          kTaskStack    = 8192;
 constexpr UBaseType_t  kTaskPriority = 4; /* below the responder: it answers packets */
 
 /* NTP refid for this reference, spelled the way RFC 5905 spells it: four ASCII
@@ -2707,12 +2709,14 @@ void GpsTime::fitRate()
      * through all of them is the stamping jitter, measured, and RMS is the
      * figure a root dispersion wants. TIM-TP would describe the same jitter
      * directly, and this receiver refuses TIM-TP, so the residuals carry it. */
-    double sse = 0.0;
+    double sse    = 0.0;
+    double tieMax = 0.0;
     for (int i = 0; i < m_rateCount; ++i) {
         const double dx = static_cast<double>(m_rate[i].monoNs - base.monoNs) - meanX;
         const double dy = static_cast<double>(m_rate[i].utcNs - base.utcNs) - meanY -
                           slope * dx;
         sse += dy * dy;
+        tieMax = std::fabs(dy) > tieMax ? std::fabs(dy) : tieMax;
     }
     m_fitUs = esp_timer_get_time() - t0;
     const double residualNs = std::sqrt(sse / m_rateCount);
@@ -2722,6 +2726,61 @@ void GpsTime::fitRate()
                                      : static_cast<int64_t>(residualNs);
         portENTER_CRITICAL(&m_mux);
         m_jitterNs = jitterNs;
+        portEXIT_CRITICAL(&m_mux);
+    }
+
+    /* The worst excursion, from the same residuals: one bad edge shows here
+     * while an RMS barely moves. The RMS is the residual already computed. */
+    {
+        portENTER_CRITICAL(&m_mux);
+        m_tieMaxNs = tieMax;
+        m_tieRmsNs = residualNs;
+        portEXIT_CRITICAL(&m_mux);
+    }
+
+    /* Overlapping Allan deviation over the same window: the second difference
+     * of the phase, which is immune to a constant rate offset and so measures
+     * the reference's wander rather than its tuning. Phase is taken relative to
+     * the newest sample for the reason the fit is: the absolute offsets are
+     * 1.8e18 and a double resolves only ~256 ns there, so a second difference
+     * taken on them cancels to exactly zero -- measured on the host before it
+     * was believed.
+     *
+     * Overlapping, not disjoint: with a 300 s window, disjoint bins leave 4
+     * differences at 64 s and the estimate is worthless, while overlapping
+     * leaves 86. The bias that buys is small compared with the scatter it
+     * removes, and the octaves are read as a trend by eye, not as absolutes. */
+    for (int i = 0; i < m_rateCount; ++i) {
+        /* Time error: the reference's offset from the counter, not the offset
+         * itself. The counter's own rate comes out in the difference, which is
+         * what an Allan deviation is defined on. */
+        m_adevPhase[i] =
+            static_cast<double>((m_rate[i].utcNs - base.utcNs) - (m_rate[i].monoNs - base.monoNs));
+    }
+    int      octaves = 0;
+    for (int k = 0; k < Status::kAdevOctaves; ++k) {
+        const int m = 1 << k;
+        const int n = m_rateCount - 2 * m;
+        if (n < 16) {
+            break; /* fewer than 16 differences is noise, not a measurement */
+        }
+        double ss = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const double d =
+                m_adevPhase[i + 2 * m] - 2.0 * m_adevPhase[i + m] + m_adevPhase[i];
+            ss += d * d;
+        }
+        /* d is nanoseconds and tau is m seconds, so the root is already
+         * nanoseconds per second: ppb, the unit it is published in. */
+        m_adevPpb[k] = std::sqrt(ss / (2.0 * m * m * n));
+        ++octaves;
+    }
+    {
+        portENTER_CRITICAL(&m_mux);
+        m_adevN = static_cast<uint16_t>(m_rateCount);
+        for (int k = octaves; k < Status::kAdevOctaves; ++k) {
+            m_adevPpb[k] = 0.0;
+        }
         portEXIT_CRITICAL(&m_mux);
     }
 
@@ -2912,6 +2971,12 @@ GpsTime::Status GpsTime::status() const
     st.rfAgcMin          = m_rfAgcMin;
     st.rfSeen            = m_rfSeen;
     st.rfCfg             = static_cast<uint8_t>(m_rfCfg);
+    st.tieMaxNs          = m_tieMaxNs;
+    st.tieRmsNs          = m_tieRmsNs;
+    st.adevN             = m_adevN;
+    for (int k = 0; k < Status::kAdevOctaves; ++k) {
+        st.adev[k] = m_adevPpb[k];
+    }
     {
         const uint32_t lo = systimer_ll_get_counter_value_low(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);
         const uint32_t hi = systimer_ll_get_counter_value_high(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);
