@@ -283,7 +283,7 @@ public:
         /* The last frames by class:id, so "what is it actually sending" is
          * answerable from the API rather than only from the serial console. */
         std::string recentFrames;
-        std::string ioHex;
+        std::string ioHex; /* string in Status; the 241-byte buffer is the member */
         /* The host's current rate, so utilisation can be computed against it. */
         uint32_t baud         = 0;
 
@@ -663,10 +663,14 @@ private:
     uint32_t   m_msgSkipped        = 0;
     bool       m_ioSeen            = false;
     int64_t    m_ioAtUs            = -1;
-    std::string m_msgppHex;
+    /* Fixed storage: written per message, and as std::string each byte was a
+     * std::format -- 120 allocations per message, in the GPS task, forever. 241
+     * holds the 120-byte payload as 240 hex digits plus a terminator, and
+     * sizeof() on it is the real buffer, which is what the copies rely on. */
+    text::Buf<241> m_msgppHex;
     uint16_t    m_recentFrames[16] = {};
     uint8_t     m_recentAt         = 0;
-    std::string m_ioHex;
+    text::Buf<241> m_ioHex;
     bool       m_antCfgAcked       = false;
     bool       m_antCfgNaked       = false;
     bool       m_antLogged         = false;

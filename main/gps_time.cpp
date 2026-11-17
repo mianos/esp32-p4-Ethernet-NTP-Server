@@ -1914,22 +1914,6 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     }
 }
 
-/* Hex into a fixed buffer. A nibble table rather than std::format: 120 bytes is
- * 120 formats, each allocating, on a message that arrives every few seconds.
- * Returns the length written. */
-static std::size_t hexInto(text::Buf<241> &dst, const ubx::Frame &f)
-{
-    static constexpr char kDigits[] = "0123456789abcdef";
-    const std::size_t bytes = f.len * 2 < dst.size() - 1 ? f.len : (dst.size() - 1) / 2;
-    for (std::size_t i = 0; i < bytes; ++i) {
-        const uint8_t byte = f.u8(i);
-        dst[i * 2]         = kDigits[byte >> 4];
-        dst[i * 2 + 1]     = kDigits[byte & 0x0F];
-    }
-    dst[bytes * 2] = '\0';
-    return bytes * 2;
-}
-
 /* MON-IO: 20 bytes per port, in the receiver's fixed port order. UART1 is block
  * 1 -- the only port wired here -- and its counts are what say whether the line
  * is coping. Parity and framing errors are the wire's own verdict, separate
@@ -1944,7 +1928,14 @@ void GpsTime::onMonIo(const ubx::Frame &f)
     const std::size_t at  = kBlock * kPort;
     const int64_t     now = esp_timer_get_time();
     text::Buf<241> hex = {};
-    hexInto(hex, f);
+        static constexpr char kDigits[] = "0123456789abcdef";
+        const std::size_t bytes = f.len < 120 ? f.len : 120;
+        for (std::size_t i = 0; i < bytes; ++i) {
+            const uint8_t byte = f.u8(i);
+            hex[i * 2]         = kDigits[byte >> 4];
+            hex[i * 2 + 1]     = kDigits[byte & 0x0F];
+        }
+        hex[bytes * 2] = '\0';
     portENTER_CRITICAL(&m_mux);
     std::memcpy(m_ioHex.data(), hex.data(), sizeof(m_ioHex));
     m_ioRxBytes = f.u4(at);
@@ -2006,7 +1997,14 @@ void GpsTime::onMonMsgpp(const ubx::Frame &f)
     }
     constexpr std::size_t kPort1 = 16; /* msg2 */
     text::Buf<241> hex = {};
-    hexInto(hex, f);
+        static constexpr char kDigits[] = "0123456789abcdef";
+        const std::size_t bytes = f.len < 120 ? f.len : 120;
+        for (std::size_t i = 0; i < bytes; ++i) {
+            const uint8_t byte = f.u8(i);
+            hex[i * 2]         = kDigits[byte >> 4];
+            hex[i * 2 + 1]     = kDigits[byte & 0x0F];
+        }
+        hex[bytes * 2] = '\0';
     portENTER_CRITICAL(&m_mux);
     m_msgUbx     = f.u2(kPort1);
     m_msgSkipped = f.u4(96 + 4 * 1);
