@@ -2692,6 +2692,7 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     m_pulseOnSecond = onSecond;
     m_pulseOffsetNs = offsetNs;
     m_timTpFlags    = flags;
+    m_qErrAtUs      = esp_timer_get_time();
     portEXIT_CRITICAL(&m_mux);
 
     /* Once, so the log says which regime this board is in: a measured
@@ -2731,6 +2732,27 @@ void GpsTime::anchor(time_t second)
     ppsMonoUs = m_ppsMonoUs;
     ppsMonoNs = m_ppsMonoNs;
     ppsCount  = m_ppsCount;
+    /* The edge's own quantisation, from the TIM-TP that described this pulse.
+     * Convention is corrected = captured - qErr (gnssdo, qerr.rs); the sawtooth
+     * is the receiver only being able to place an edge on its own clock's grid.
+     * TIM-TP describes the *next* pulse, so a correction received in the last
+     * 1.2 s belongs to this edge; older than that and it describes the one
+     * before, younger than -50 ms and it arrived after this one and belongs to
+     * the next.
+     *
+     * Requires the UTC base with UTC available. gpsd also withholds the figure
+     * while raim is active; this module reports raim active continuously
+     * (flags 0x0b), so following that would disable the correction outright --
+     * and raim says nothing about the pulse generator's grid. */
+    if (m_qErrValid && (m_timTpFlags & 0x03) == 0x03 && m_qErrAtUs != 0) {
+        const int64_t ageUs = ppsMonoUs - m_qErrAtUs;
+        if (ageUs >= -50000 && ageUs <= 1200000) {
+            ppsMonoUs -= m_qErrNs;
+            if (ppsMonoNs != 0) {
+                ppsMonoNs -= m_qErrNs;
+            }
+        }
+    }
     portEXIT_CRITICAL(&m_mux);
 
     /* No edge yet, or this second's edge is already anchored: the frame carries

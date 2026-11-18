@@ -756,6 +756,7 @@ private:
     double     m_tieRmsNs          = 0;
     double     m_adevPpb[Status::kAdevOctaves] = {};
     int64_t    m_pulseOffsetNs     = 0; /* where TIM-TP says the pulse sits */
+    int64_t    m_qErrAtUs          = 0;  /* when the last qErr arrived */
     int32_t    m_pvtNanoNs         = 0;
     uint32_t   m_pvtItowMs         = 0;
     uint8_t    m_timTpFlags        = 0;
