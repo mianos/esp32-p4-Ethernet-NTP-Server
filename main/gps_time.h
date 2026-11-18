@@ -454,6 +454,7 @@ public:
      * Persisted by the caller: this only queues the frame for the task. */
     void requestAntDelay();
     void requestPulseMs(uint32_t ms);
+    void requestPeriodUs(uint32_t us);
     /* Set the host side's rate on its own, without telling the receiver. That
      * is how a line that has been desynchronised by something other than this
      * firmware -- or deliberately, to watch the scan -- is put back. */
@@ -773,6 +774,7 @@ private:
     uint32_t   m_tp5Period         = 0;
     uint32_t   m_tp5Ratio          = 0;
     uint32_t   m_pulseMs           = 100;
+    uint32_t   m_periodUs          = 1000000;
     bool       m_tosLogged         = false;
     uint16_t   m_adevN             = 0;
     uint32_t   m_secFrames         = 0; /* frames in the current second */

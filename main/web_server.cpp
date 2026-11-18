@@ -832,8 +832,10 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
     const bool  havePulse = doc.GetField("pulse_ms", pulseMs);
     double      userNs   = 0;
     const bool  haveUser = doc.GetField("user_ns", userNs);
+    double      periodUs = 0;
+    const bool  havePeriod = doc.GetField("period_us", periodUs);
 
-    if (!haveBias && !haveDelay && !havePulse && !haveUser) {
+    if (!haveBias && !haveDelay && !havePulse && !haveUser && !havePeriod) {
         return sendJsonError(req, 400,
                              "give \"bias\" (on|off), \"delay_ns\" and/or \"pulse_ms\"");
     }
@@ -850,6 +852,9 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
         return sendJsonError(req, 400, "pulse_ms must be 1..500");
     }
     /* 10 ms of calibration is more than any receiver should need. */
+    if (havePeriod && (periodUs < 100000 || periodUs > 10000000)) {
+        return sendJsonError(req, 400, "period_us must be 100000..10000000");
+    }
     if (haveUser && (userNs < -10000000 || userNs > 10000000)) {
         return sendJsonError(req, 400, "user_ns must be -10000000..10000000");
     }
@@ -884,6 +889,12 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
         ESP_LOGW(TAG, "POST /gps/ant from %s: user delay %ld ns", callerAddress(req).c_str(),
                  static_cast<long>(userNs));
         resp.AddItem("user_ns", userNs);
+    }
+    if (havePeriod) {
+        GpsTime::instance().requestPeriodUs(static_cast<uint32_t>(periodUs));
+        ESP_LOGW(TAG, "POST /gps/ant from %s: period %u us", callerAddress(req).c_str(),
+                 static_cast<unsigned>(periodUs));
+        resp.AddItem("period_us", periodUs);
     }
     if (havePulse) {
         GpsTime::instance().requestPulseMs(static_cast<uint32_t>(pulseMs));

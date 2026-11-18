@@ -266,6 +266,15 @@ void GpsTime::requestPulseMs(uint32_t ms)
     m_tp5Cmd  = true;
 }
 
+/* Period in microseconds, so 1000000 is 1 Hz. Changing it is the structural
+ * test of whether this frame reaches the hardware at all: the pulse then stops
+ * matching the second and every anchor shifts by a known fraction. */
+void GpsTime::requestPeriodUs(uint32_t us)
+{
+    m_periodUs = us;
+    m_tp5Cmd   = true;
+}
+
 void GpsTime::requestBaud(uint32_t baud, bool moduleToo)
 {
     m_baudReq       = baud;
@@ -1306,15 +1315,27 @@ void GpsTime::task()
                          r == 0 ? "rejected" : "unanswered");
             }
         }
-        /* A new cable delay re-sends the pulse frame and nothing else. The
-         * survey and the mask are untouched: this is a property of the lead, and
-         * restarting a day's survey to change it would be a poor trade. */
+        /* A new cable or user delay re-sends the pulse frame and nothing else.
+         * The survey and the mask are untouched: this is a property of the lead,
+         * and restarting a day's survey to change it would be a poor trade.
+         *
+         * The rate window is thrown away, though, and that is the point. A delay
+         * is a step in the phase: inside a 300 s fit a 10 ms step reads as
+         * 33 ppm of rate error, so the servo trims it back out over the window
+         * and the correction quietly undoes itself. Measured: a 10 ms delay
+         * moved the pulse for a second or two and left the served time where it
+         * was. With the window cleared, the step is geometry again. */
         if (m_tp5Cmd) {
             m_tp5Cmd = false;
             const int8_t r = sendTp5();
             m_tp5Acked     = r == 1;
             m_tp5Naked     = r == 0;
-            if (r != 1) {
+            if (r == 1) {
+                m_rateCount    = 0;
+                m_rateNext     = 0;
+                m_rateLogged   = false;
+                m_lastRateOffsetSet = false;
+            } else {
                 ESP_LOGW(TAG, "CFG-TP5 delay change %s", r == 0 ? "rejected" : "unanswered");
             }
         }
@@ -1511,7 +1532,11 @@ void GpsTime::advanceBaud()
 int8_t GpsTime::sendTp5()
 {
     uint8_t tp5[32] = {};
-    tp5[1]          = 1; /* version */
+    /* Version 0. The interface description says "0x00 for this version", and a
+     * 1 here is the FTS variant of the same message: it is acknowledged and
+     * echoed either way, which is why this went unnoticed while nothing the
+     * frame carried took effect. */
+    tp5[1] = 0; /* version */
     /* The antenna lead's delay, nanoseconds (offset 4). Positive tells the
      * receiver the signal arrives late so it brings the pulse forward by the
      * same amount; leaving it at zero puts the whole cable's delay into the
@@ -1530,7 +1555,7 @@ int8_t GpsTime::sendTp5()
     text::putLe(tp5 + 24, userNs);
     text::putLe(tp5 + 4, cableNs);
     /* freqPeriod and freqPeriodLock, in microseconds: isFreq (bit 3) is clear. */
-    constexpr uint32_t kOneHzUs = 1000000;
+    const uint32_t kOneHzUs = m_periodUs;
     /* Pulse width as a fraction of the period, 2^-32 units. Default stays the
      * module's own 100 ms, but it is settable: qErr is a statement about
      * generating the edge, and a 100 ms pulse is an unusual thing to quantify. */
@@ -1542,9 +1567,12 @@ int8_t GpsTime::sendTp5()
     text::putLe(tp5 + 12, kOneHzUs);
     text::putLe(tp5 + 16, kRatio10);
     text::putLe(tp5 + 20, kRatio10);
-    /* active, lockGnssFreq, lockedOtherSet, alignToTow, rising, gridUtcGps. */
-    constexpr uint32_t kTp5Flags = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5) | (1u << 6) |
-                                   (1u << 7);
+    /* active, lockGnssFreq, lockedOtherSet, alignToTow, rising, and no grid
+     * bits: from protocol 16 the single gridUtcGps bit became a three-bit
+     * gridUtcGnss, 0 = UTC, 1 = GPS, so leaving 7 clear selects UTC. Setting it
+     * selects GPS and the TIM-TP time base then reports GNSS -- which is how the
+     * wrong meaning was caught. */
+    constexpr uint32_t kTp5Flags = (1u << 0) | (1u << 1) | (1u << 2) | (1u << 5) | (1u << 6);
     text::putLe(tp5 + 28, kTp5Flags);
 
     /* Each result is acted on by the caller rather than by whoever reads the log
@@ -2597,8 +2625,14 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
      *
      * The flags byte, bit 0: 0 = GNSS time base, 1 = UTC -- that way round per
      * the u-blox 8/M8 receiver description, and this read it inverted until a
-     * timing question forced the manual open. Bit 3 marks qErr invalid. The
-     * rest (utc, raim, refInfo) say nothing used here.
+     * timing question forced the manual open.
+     *
+     * qErrInvalid is bit 4, not bit 3: raim sits between them and is two bits
+     * wide (0 unavailable, 1 not active, 2 active). Reading bit 3 therefore
+     * tested raim's high bit, which is 1 whenever raim is "not active" -- so
+     * this reported the quantisation invalid on a module that was sending a
+     * real one several times a second (9.7 ns, -3.8 ns, 4.0 ns ...) and the
+     * correction never ran.
      *
      * This is the receiver narrating its own pulse, and it is the only source
      * for two things this reference used to assume: how well the receiver knows
@@ -2617,7 +2651,7 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     const uint8_t  flags     = f.u8(14);
 
     const bool gnssBase    = (flags & 0x01) == 0;
-    const bool qErrInvalid = (flags & 0x08) != 0;
+    const bool qErrInvalid = (flags & 0x10) != 0;
 
     /* Where in the second the pulse sits, in nanoseconds: a UTC-aligned 1 Hz
      * pulse is a hair either side of zero. A reported position just under a

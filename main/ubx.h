@@ -80,7 +80,9 @@ inline constexpr Def kDefs[] = {
     {0x01, 0x26, 24, 24, "NAV-TIMELS"},
     {0x01, 0x27, 16, 16, "NAV-TIM-TP"},
     {0x01, 0x35, 8, 512, "NAV-SAT"}, /* 8 + 12n, n <= 42 */
+    {0x0D, 0x01, 16, 16, "TIM-TP"},
     {0x0D, 0x04, 28, 28, "TIM-SVIN"},
+    {0x0D, 0x12, 56, 56, "TIM-TOS"},
     {0x05, 0x00, 2, 2, "ACK-ACK"},
     {0x05, 0x01, 2, 2, "ACK-NAK"},
     {0x06, 0x00, 20, 20, "CFG-PRT"},
