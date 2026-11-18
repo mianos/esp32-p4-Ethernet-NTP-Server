@@ -1,0 +1,30 @@
+# Chrony configuration for a client of this box. Drop-in; no `prefer`.
+#
+# The box is a stratum-1 GPS reference one cable away, and it beats a pool by
+# four orders of magnitude of distance while it is sane. It has also returned
+# 134 ms of confidently-wrong time for two and a half hours while claiming
+# 2.4 us, so it must be able to lose. Without `prefer`, chrony ranks on distance
+# and does exactly that within minutes; with `prefer` it keeps taking it.
+#
+# Named, not addressed: the box holds a static DHCP reservation, so the name
+# survives an address change instead of the client going quietly stale.
+#
+# Internet sources stay as the fallback for a reboot, a lost fix or a dead box.
+# chrony needs no mark removed to switch back.
+
+server esp32p4-ntp.mianos.com iburst minpoll 4 maxpoll 6
+
+# Fallbacks. minpoll 5 is 32 s, which is plenty for a source that should rarely
+# be needed.
+pool 2.debian.pool.ntp.org iburst minpoll 5 maxpoll 7
+server time.cloudflare.com iburst minpoll 5 maxpoll 7
+server time.apple.com      iburst minpoll 5 maxpoll 7
+
+# Step only for gross errors: a jump of a second is a fault, not drift, and
+# slewing it would take twenty minutes.
+makestep 1.0 3
+
+# Never trust a source that claims more than this.
+maxdistance 16.0
+
+driftfile /var/lib/chrony/chrony.drift
