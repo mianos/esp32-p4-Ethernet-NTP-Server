@@ -550,6 +550,12 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     if (gps.locked) {
         doc.AddItem("dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);
         doc.AddItem("lock_window_s", static_cast<double>(gps.lockWindowUs) / 1000000);
+        /* Usually absent. Present only while the pulse position is unobserved,
+         * so a large dispersion can be told from a bad clock. */
+        if (gps.pulseUnobservedNs > 0) {
+            doc.AddItem("pulse_unobserved_us",
+                        static_cast<double>(gps.pulseUnobservedNs) / 1000.0);
+        }
     }
     /* The pulse's own quality. The jitter is OURS -- the spread of our own
      * stamping from the rate fit -- and was gated behind timTpCount with the two

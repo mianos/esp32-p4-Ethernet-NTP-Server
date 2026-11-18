@@ -3467,6 +3467,40 @@ GpsTime::Status GpsTime::status() const
         const int64_t ageS = st.ppsAgeUs > 0 ? st.ppsAgeUs / 1000000 : 0;
         st.rootDelayNs  = kIsrLatencyNs + (st.qErrValid ? st.qErrNs / 2 : 0);
         st.dispersionNs = st.rootDelayNs + st.jitterNs + ageS * kWanderNsPerS;
+
+        /* A pulse nobody is watching. While TIM-TP is agreeing to be sent and
+         * has stopped arriving, the position of the edge against its own second
+         * is unobserved -- the servo cannot see it either, because the anchor is
+         * taken from the same edge and moves with it. Unobserved is not known:
+         * the 133 ms failure of 18:43 was exactly this state, on a clock quoting
+         * 2.4 us of dispersion, and chrony had to work it out for itself.
+         *
+         * So the stated uncertainty grows with how long the pulse has been
+         * unobserved. 10 us a second covers the measured growth (4.2 us/s to
+         * 133 ms) with margin, and the 30 s grace keeps a mode change from
+         * widening it. Capped at 200 ms, which is six times the worst error seen
+         * and still finite. */
+        int64_t lastTpUs = 0;
+        portENTER_CRITICAL(&m_mux);
+        lastTpUs = m_qErrAtUs;
+        portEXIT_CRITICAL(&m_mux);
+        if (m_timTpCfg == 1) {
+            const int64_t silentS = (esp_timer_get_time() - lastTpUs) / 1000000;
+            if (silentS > 30) {
+                const int64_t termNs = std::min<int64_t>((silentS - 30) * 10000, 200000000);
+                st.pulseUnobservedNs += termNs;
+                st.dispersionNs += termNs;
+                if (!m_pulseUnobservedLogged) {
+                    m_pulseUnobservedLogged = true;
+                    ESP_LOGW(TAG, "TIM-TP silent for %lld s: the pulse position is unobserved, "
+                                  "widening dispersion from here",
+                             static_cast<long long>(silentS));
+                }
+            } else if (m_pulseUnobservedLogged) {
+                m_pulseUnobservedLogged = false;
+                ESP_LOGI(TAG, "TIM-TP flowing again: dispersion back to its measured terms");
+            }
+        }
     }
 
     return st;

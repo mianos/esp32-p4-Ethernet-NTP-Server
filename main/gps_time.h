@@ -160,6 +160,10 @@ public:
          * onNavTimTp() for what is measured and what stays named. */
         int64_t  rootDelayNs  = 0;
         int64_t  dispersionNs = 0;
+        /* The part of dispersion that exists because TIM-TP has gone silent and
+         * the pulse position is therefore unobserved. Published on its own so
+         * the term is deniable in public rather than buried in a total. */
+        int64_t  pulseUnobservedNs = 0;
 
         /* What UBX-NAV-TIM-TP says about the pulse itself: the receiver's
          * stated quantisation error (how well it knows where the edge truly
@@ -667,6 +671,7 @@ private:
     bool       m_rateLogged        = false;
     int64_t    m_lastLoggedPpb     = 0;
     bool       m_holdoverLogged    = false;
+    mutable bool m_pulseUnobservedLogged = false;
     int8_t     m_leapLoggedSeconds = -1;
     int8_t     m_leapLoggedChange  = 0;
     bool       m_timTpLogged       = false;
