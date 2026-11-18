@@ -258,6 +258,14 @@ void GpsTime::requestAntDelay()
     m_tp5Cmd = true;
 }
 
+/* Pulse width, as a fraction of the second. Kept in the object only: it is a
+ * bench knob for the timepulse, not a site setting. */
+void GpsTime::requestPulseMs(uint32_t ms)
+{
+    m_pulseMs = ms;
+    m_tp5Cmd  = true;
+}
+
 void GpsTime::requestBaud(uint32_t baud, bool moduleToo)
 {
     m_baudReq       = baud;
@@ -1511,10 +1519,25 @@ int8_t GpsTime::sendTp5()
     unsigned long asked = 0;
     text::getList(Settings::instance().antDelayNs(), ',', asked);
     const auto cableNs = static_cast<int32_t>(asked > 200000 ? 200000 : asked);
+    /* The calibration term, i4 nanoseconds at offset 24. Separate from the cable
+     * delay so a measured correction and a lead length stay distinguishable. */
+    long userAsked = 0;
+    text::getList(Settings::instance().gpsUserDelayNs(), ',', userAsked);
+    /* int32_t, not the long the clamp produces: putLe writes sizeof, and eight
+     * bytes at 24 run over the flags at 28. */
+    const int32_t userNs = static_cast<int32_t>(
+        userAsked > 10000000L ? 10000000L : userAsked < -10000000L ? -10000000L : userAsked);
+    text::putLe(tp5 + 24, userNs);
     text::putLe(tp5 + 4, cableNs);
     /* freqPeriod and freqPeriodLock, in microseconds: isFreq (bit 3) is clear. */
     constexpr uint32_t kOneHzUs = 1000000;
-    constexpr uint32_t kRatio10 = 429496730; /* 0.1 of the period in 2^-32 */
+    /* Pulse width as a fraction of the period, 2^-32 units. Default stays the
+     * module's own 100 ms, but it is settable: qErr is a statement about
+     * generating the edge, and a 100 ms pulse is an unusual thing to quantify. */
+    const uint32_t ratio =
+        m_pulseMs >= 1000 ? 4294967295u
+                          : static_cast<uint32_t>((static_cast<uint64_t>(m_pulseMs) << 32) / 1000);
+    const uint32_t kRatio10 = ratio;
     text::putLe(tp5 + 8, kOneHzUs);
     text::putLe(tp5 + 12, kOneHzUs);
     text::putLe(tp5 + 16, kRatio10);
@@ -1531,7 +1554,14 @@ int8_t GpsTime::sendTp5()
     if (cableNs != 0) {
         ESP_LOGW(TAG, "pulse cable delay set to %ld ns", static_cast<long>(cableNs));
     }
-    return sendAndWait(0x06, 0x31, tp5, sizeof(tp5));
+    const int8_t r = sendAndWait(0x06, 0x31, tp5, sizeof(tp5));
+    /* Read it straight back, every time. The frame has a userConfigDelay at 24
+     * that this firmware never writes, so whatever sits there came from
+     * somewhere else and shifts every anchor by a constant -- the shape of the
+     * milliseconds being chased. An ACK says "stored", never "stored what", so
+     * the poll is the only way to know what the module is actually running. */
+    sendUbx(0x06, 0x31, nullptr, 0);
+    return r;
 }
 
 void GpsTime::configureModule()
@@ -1577,12 +1607,6 @@ void GpsTime::configureModule()
      * 36-byte M8 layout has, so a 32-byte frame is the whole message and the
      * delay is the first word of it. */
     int8_t r = sendTp5();
-    /* Read it straight back. The frame has a userConfigDelay at 24 that this
-     * firmware never writes, so whatever is there came from somewhere else and
-     * shifts every anchor by a constant -- which is exactly the shape of the
-     * milliseconds being chased. A poll is the only way to see it: the ACK to
-     * the set says "stored", not "stored what". */
-    sendUbx(0x06, 0x31, nullptr, 0);
     m_tp5Acked = r == 1;
     m_tp5Naked = r == 0;
     if (r == 1) {
@@ -2492,6 +2516,8 @@ void GpsTime::onCfgTp5(const ubx::Frame &f)
     m_tp5CableNs = cable;
     m_tp5UserNs  = user;
     m_tp5Flags   = flags;
+    m_tp5Period  = f.u4(8);
+    m_tp5Ratio   = f.u4(16);
     ESP_LOGW(TAG, "CFG-TP5 reads back: cable %d ns, user delay %ld ns, flags 0x%08lx",
              static_cast<int>(cable), static_cast<long>(user), static_cast<unsigned long>(flags));
 }
@@ -3082,6 +3108,8 @@ GpsTime::Status GpsTime::status() const
     st.tp5CableNs        = m_tp5CableNs;
     st.tp5UserNs         = m_tp5UserNs;
     st.tp5Flags          = m_tp5Flags;
+    st.tp5PeriodUs       = m_tp5Period;
+    st.tp5Ratio          = m_tp5Ratio;
     st.tp5Rejected       = m_tp5Naked;
     st.timTpRejected     = m_timTpNaked;
     st.timTpAcked        = m_timTpAcked;
@@ -3089,6 +3117,7 @@ GpsTime::Status GpsTime::status() const
     st.antShort          = m_antShort;
     st.antLatched        = m_antLatched;
     text::getList(Settings::instance().antDelayNs(), ',', st.antDelayNs);
+    text::getList(Settings::instance().gpsUserDelayNs(), ',', st.userDelayNs);
     st.antCfgAcked       = m_antCfgAcked;
     st.antCfgRejected    = m_antCfgNaked;
     st.antStatus         = m_antStatus;

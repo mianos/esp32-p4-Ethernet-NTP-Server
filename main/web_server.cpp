@@ -569,6 +569,8 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("tp5_cable_ns", static_cast<double>(gps.tp5CableNs));
     doc.AddItem("tp5_user_ns", static_cast<double>(gps.tp5UserNs));
     doc.AddItem("tp5_flags", static_cast<double>(gps.tp5Flags));
+    doc.AddItem("tp5_period_us", static_cast<double>(gps.tp5PeriodUs));
+    doc.AddItem("tp5_ratio", static_cast<double>(gps.tp5Ratio));
     doc.AddItem("timtp_tim_replies", static_cast<double>(gps.timTpTimN));
     doc.AddItem("timtp_nav_replies", static_cast<double>(gps.timTpNavN));
     if (gps.timTpCount != 0) {
@@ -704,6 +706,7 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         doc.AddItem("ant_bias", gps.antBiasOn ? "on" : "off");
         doc.AddItem("ant_short", gps.antShort);
         doc.AddItem("ant_delay_ns", gps.antDelayNs);
+        doc.AddItem("user_delay_ns", gps.userDelayNs);
         doc.AddItem("noise_dbm", -static_cast<double>(gps.noisePerMs));
         doc.AddItem("agc", static_cast<double>(gps.agcCnt));
         doc.AddItem("jam_ind", static_cast<double>(gps.jamInd));
@@ -825,9 +828,14 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
     const bool  haveBias = doc.GetField("bias", bias);
     double      delayNs  = 0;
     const bool  haveDelay = doc.GetField("delay_ns", delayNs);
+    double      pulseMs  = 0;
+    const bool  havePulse = doc.GetField("pulse_ms", pulseMs);
+    double      userNs   = 0;
+    const bool  haveUser = doc.GetField("user_ns", userNs);
 
-    if (!haveBias && !haveDelay) {
-        return sendJsonError(req, 400, "give \"bias\" (on|off) and/or \"delay_ns\"");
+    if (!haveBias && !haveDelay && !havePulse && !haveUser) {
+        return sendJsonError(req, 400,
+                             "give \"bias\" (on|off), \"delay_ns\" and/or \"pulse_ms\"");
     }
     if (haveBias && bias != "on" && bias != "off") {
         return sendJsonError(req, 400, "bias must be \"on\" or \"off\"");
@@ -836,6 +844,14 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
      * receiver's own solution is the limit, not the number. */
     if (haveDelay && (delayNs < 0 || delayNs > 200000)) {
         return sendJsonError(req, 400, "delay_ns must be 0..200000");
+    }
+    /* Short enough to be an edge, long enough for a scope. */
+    if (havePulse && (pulseMs < 1 || pulseMs > 500)) {
+        return sendJsonError(req, 400, "pulse_ms must be 1..500");
+    }
+    /* 10 ms of calibration is more than any receiver should need. */
+    if (haveUser && (userNs < -10000000 || userNs > 10000000)) {
+        return sendJsonError(req, 400, "user_ns must be -10000000..10000000");
     }
 
     JsonWrapper resp;
@@ -859,6 +875,21 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
         ESP_LOGW(TAG, "POST /gps/ant from %s: cable delay %u ns", callerAddress(req).c_str(),
                  static_cast<unsigned>(delayNs));
         resp.AddItem("delay_ns", delayNs);
+    }
+
+    if (haveUser) {
+        Settings::instance().setGpsUserDelayNs(std::format("{}", static_cast<long>(userNs)));
+        Settings::instance().save();
+        GpsTime::instance().requestAntDelay();
+        ESP_LOGW(TAG, "POST /gps/ant from %s: user delay %ld ns", callerAddress(req).c_str(),
+                 static_cast<long>(userNs));
+        resp.AddItem("user_ns", userNs);
+    }
+    if (havePulse) {
+        GpsTime::instance().requestPulseMs(static_cast<uint32_t>(pulseMs));
+        ESP_LOGW(TAG, "POST /gps/ant from %s: pulse width %u ms", callerAddress(req).c_str(),
+                 static_cast<unsigned>(pulseMs));
+        resp.AddItem("pulse_ms", pulseMs);
     }
 
     /* Answered before it has happened: the GPS task owns the UART, so the

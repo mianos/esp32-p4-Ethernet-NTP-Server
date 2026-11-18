@@ -101,6 +101,12 @@ public:
      * cable length. */
     const std::string &antDelayNs() const { return m_antDelayNs; }
     void setAntDelayNs(const std::string &v) { m_antDelayNs = v; }
+    /* The calibration term: what the pulse was measured to be out, entered as a
+     * delay so the receiver moves the edge by the same amount. Nothing inside
+     * the receiver can see a constant error, which is why it has to be measured
+     * outside and written in. */
+    const std::string &gpsUserDelayNs() const { return m_gpsUserDelayNs; }
+    void setGpsUserDelayNs(const std::string &v) { m_gpsUserDelayNs = v; }
     /* Power cuts are a normal event here -- street works, storms -- so the count
      * of boots is worth carrying: a survey that vanished is otherwise
      * indistinguishable from one that was never started. */
@@ -140,6 +146,7 @@ private:
     std::string m_gpsFixedPos;
     std::string m_gpsSurvey;
     std::string m_antDelayNs = "0";
+    std::string m_gpsUserDelayNs = "0";
     std::string m_logHost;
     std::string m_logPort    = "5514";
     std::string m_boots      = "0";

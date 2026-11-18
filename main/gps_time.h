@@ -187,6 +187,8 @@ public:
         int32_t  tp5CableNs     = 0; /* as the module holds them, not as sent */
         int32_t  tp5UserNs      = 0;
         uint32_t tp5Flags       = 0;
+        uint32_t tp5PeriodUs    = 0;
+        uint32_t tp5Ratio       = 0;
 
         /* What the receiver says it is, from UBX-MON-VER, and which of this
          * firmware's two configuration messages it refused. An empty moduleId
@@ -203,6 +205,7 @@ public:
         /* What the receiver has been told the lead delays the signal by, so the
          * installed figure can be read back rather than remembered. */
         double   antDelayNs    = 0;
+        double   userDelayNs   = 0; /* as stored, not as the module echoes it */
 
         bool     tp5Rejected   = false;
         bool     timTpRejected = false;
@@ -450,6 +453,7 @@ public:
     /* Re-send the pulse frame with a new antenna cable delay, in nanoseconds.
      * Persisted by the caller: this only queues the frame for the task. */
     void requestAntDelay();
+    void requestPulseMs(uint32_t ms);
     /* Set the host side's rate on its own, without telling the receiver. That
      * is how a line that has been desynchronised by something other than this
      * firmware -- or deliberately, to watch the scan -- is put back. */
@@ -766,6 +770,9 @@ private:
     int32_t    m_tp5CableNs        = 0;
     int32_t    m_tp5UserNs         = 0;
     uint32_t   m_tp5Flags          = 0;
+    uint32_t   m_tp5Period         = 0;
+    uint32_t   m_tp5Ratio          = 0;
+    uint32_t   m_pulseMs           = 100;
     bool       m_tosLogged         = false;
     uint16_t   m_adevN             = 0;
     uint32_t   m_secFrames         = 0; /* frames in the current second */

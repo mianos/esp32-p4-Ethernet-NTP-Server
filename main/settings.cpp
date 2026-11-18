@@ -41,6 +41,7 @@ Settings::Settings(NvsStorageManager &nvs)
     field("gpsFixedPos", m_gpsFixedPos);
     field("gpsSurvey", m_gpsSurvey);
     field("antDelayNs", m_antDelayNs);
+    field("gpsUserDelayNs", m_gpsUserDelayNs);
     field("logHost", m_logHost);
     field("logPort", m_logPort);
     field("boots", m_boots);
