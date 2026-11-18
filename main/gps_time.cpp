@@ -1577,6 +1577,12 @@ void GpsTime::configureModule()
      * 36-byte M8 layout has, so a 32-byte frame is the whole message and the
      * delay is the first word of it. */
     int8_t r = sendTp5();
+    /* Read it straight back. The frame has a userConfigDelay at 24 that this
+     * firmware never writes, so whatever is there came from somewhere else and
+     * shifts every anchor by a constant -- which is exactly the shape of the
+     * milliseconds being chased. A poll is the only way to see it: the ACK to
+     * the set says "stored", not "stored what". */
+    sendUbx(0x06, 0x31, nullptr, 0);
     m_tp5Acked = r == 1;
     m_tp5Naked = r == 0;
     if (r == 1) {
@@ -1926,6 +1932,8 @@ void GpsTime::onFrame(const ubx::Frame &frame)
         onNavPvt(frame);
     } else if (cls == 0x01 && id == 0x26) { /* UBX-NAV-TIMELS */
         onNavTimels(frame);
+    } else if (cls == 0x06 && id == 0x31) { /* UBX-CFG-TP5, polled back */
+        onCfgTp5(frame);
     } else if (cls == 0x0D && id == 0x12) { /* UBX-TIM-TOS */
         onTimTos(frame);
     } else if ((cls == 0x0D && id == 0x01) || (cls == 0x01 && id == 0x27)) {
@@ -2465,6 +2473,27 @@ void GpsTime::onNavPvt(const ubx::Frame &f)
     }
 
     anchor(stamp);
+}
+
+void GpsTime::onCfgTp5(const ubx::Frame &f)
+{
+    /* Reply to the poll above: 32 bytes, antCableDelay (i2) at 4,
+     * userConfigDelay (i4) at 24, flags at 28. Published because a nonzero user
+     * delay is a constant shift nobody can see any other way. */
+    if (f.len < 32) {
+        return;
+    }
+    const int16_t cable = static_cast<int16_t>(f.u2(4));
+    const int32_t user  = f.i4(24);
+    const uint32_t flags = f.u4(28);
+    if (cable == m_tp5CableNs && user == m_tp5UserNs && flags == m_tp5Flags) {
+        return;
+    }
+    m_tp5CableNs = cable;
+    m_tp5UserNs  = user;
+    m_tp5Flags   = flags;
+    ESP_LOGW(TAG, "CFG-TP5 reads back: cable %d ns, user delay %ld ns, flags 0x%08lx",
+             static_cast<int>(cable), static_cast<long>(user), static_cast<unsigned long>(flags));
 }
 
 void GpsTime::onTimTos(const ubx::Frame &f)
@@ -3050,6 +3079,9 @@ GpsTime::Status GpsTime::status() const
     st.tosCfg            = static_cast<uint8_t>(m_tosCfg);
     st.timTpTimN         = m_timTpTimN;
     st.timTpNavN         = m_timTpNavN;
+    st.tp5CableNs        = m_tp5CableNs;
+    st.tp5UserNs         = m_tp5UserNs;
+    st.tp5Flags          = m_tp5Flags;
     st.tp5Rejected       = m_tp5Naked;
     st.timTpRejected     = m_timTpNaked;
     st.timTpAcked        = m_timTpAcked;

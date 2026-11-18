@@ -184,6 +184,9 @@ public:
         uint8_t  tosCfg         = 0;
         uint32_t timTpTimN      = 0; /* replies to the TIM spelling */
         uint32_t timTpNavN      = 0; /* replies to the NAV spelling */
+        int32_t  tp5CableNs     = 0; /* as the module holds them, not as sent */
+        int32_t  tp5UserNs      = 0;
+        uint32_t tp5Flags       = 0;
 
         /* What the receiver says it is, from UBX-MON-VER, and which of this
          * firmware's two configuration messages it refused. An empty moduleId
@@ -533,6 +536,7 @@ private:
     void onNavTimels(const ubx::Frame &f);
     void onNavTimTp(const ubx::Frame &f);
     void onTimTos(const ubx::Frame &f);
+    void onCfgTp5(const ubx::Frame &f);
     void onMonVer(const ubx::Frame &f);
     void onMonHw(const ubx::Frame &f);
     void onNavSat(const ubx::Frame &f);
@@ -759,6 +763,9 @@ private:
     uint32_t   m_tosCount          = 0;
     uint32_t   m_timTpTimN         = 0;
     uint32_t   m_timTpNavN         = 0;
+    int32_t    m_tp5CableNs        = 0;
+    int32_t    m_tp5UserNs         = 0;
+    uint32_t   m_tp5Flags          = 0;
     bool       m_tosLogged         = false;
     uint16_t   m_adevN             = 0;
     uint32_t   m_secFrames         = 0; /* frames in the current second */
