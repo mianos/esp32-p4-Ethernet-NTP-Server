@@ -59,7 +59,7 @@ across two sessions.
 
 ## 3. Phase 1 — hardware timestamps, and what they fix first
 
-The P4's EMAC has an IEEE 1588 unit (`SOC_EMAC_IEEE1588V2_SUPPORTED`) and IDF v6.0.1
+The P4's EMAC has an IEEE 1588 unit (`SOC_EMAC_IEEE1588V2_SUPPORTED`) and IDF v6.0
 exposes more than the README currently claims:
 
 | API | gives |

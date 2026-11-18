@@ -795,11 +795,12 @@ $ curl -s -X POST -d '{"action":"stop"}'  http://192.0.2.20/gps/survey    # back
 `CFG-TMODE2` ends a survey only when the minimum duration **and** the mean variance
 limit are both met, so `acc_mm` decides whether it ever finishes. The default is
 **30 m, not the 3 m "survey-grade" suggests**, because the limit is compared against
-the *site's wander* — measured here at about 26–30 m — and not against how well the
-mean is known. A limit under the wander does not give a better position, it only
-means the survey never satisfies its own condition: the 2 h run at 3 m ended with
-`valid` false having scrolled from 32 m to 26 m and stopped. 30 m crosses within
-about five minutes on this site
+the *site's wander* and not against how well the mean is known. Those are different
+numbers and the wander is usually the larger, so a limit chosen for the mean can sit
+under a scatter the site will never beat: the survey then runs its whole duration
+and ends with `valid` false, which reads as failure for a position that was fine.
+Pick the limit from the receiver's own `gps_svin_acc_mm` while it runs, not from the
+accuracy that is wanted.
 
 A start whose limit is tighter than what the receiver is already scattering is
 logged as such, rather than being discovered a day later.
@@ -827,16 +828,13 @@ rather than from a specification.
 So the square comes off on the way to the wire, even though the positions beside
 them in the same message are in **centimetres**.
 
-This was wrong for a while and behaviour could not settle it: a limit of 9e8 mm
-(900 km) finishes a survey and 9e6 mm (9 km) does not, which is true whether the
-field is read as mm or mm², so both readings passed the same test. The cost of the
-wrong one was not the survey limit but the fixed position: `fixedPosAcc` wants mm
-and was being sent the raw variance, so the receiver was told its antenna was known
-to **14 000 km** where the truth was 3 754 mm. The spec is explicit that this
-figure "directly affects the accuracy of the timepulse" (R27 p.100) — and in fixed
-mode it produced an unlocked pulse, no `TIM-TP`, and a clock that free-ran 133 ms in
-two and a half hours while stating 2.4 µs. With the field in mm the same lock holds
-inside 100 µs with `TIM-TP` arriving.
+Behaviour alone cannot settle this, which is why the wrong reading survived: a
+limit of 9e8 finishes a survey and 9e6 does not, and that is true under either
+reading. The spec decides it, and the same page says why the field matters — the
+3D accuracy "directly affects the accuracy of the timepulse" (R27 p.100). Sent the
+raw variance, the receiver is told its antenna is known to hundreds of kilometres,
+and in fixed mode that is an unlocked pulse, no `TIM-TP`, and a clock free-running
+at the crystal's rate while still publishing an accuracy in microseconds.
 
 The API still takes an accuracy in mm and squares it to keep the variance; the
 read-back roots it, and both `gps_svin_var_mm2` and `gps_svin_acc_mm` are published
