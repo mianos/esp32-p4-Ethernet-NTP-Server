@@ -542,6 +542,9 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         doc.AddItem("svin_acc_mm", gps.svinAccMm);
         doc.AddItem("svin_var_mm2", gps.svinVarMm2);
         doc.AddItem("svin_obs", gps.svinObs);
+        doc.AddItem("svin_mean_x_cm", static_cast<double>(gps.svinMeanCm[0]));
+        doc.AddItem("svin_mean_y_cm", static_cast<double>(gps.svinMeanCm[1]));
+        doc.AddItem("svin_mean_z_cm", static_cast<double>(gps.svinMeanCm[2]));
         doc.AddItem("svin_target_s", gps.svinTargetS);
         doc.AddItem("svin_limit_mm", gps.svinLimitMm);
         doc.AddItem("svin_valid", gps.svinValid);

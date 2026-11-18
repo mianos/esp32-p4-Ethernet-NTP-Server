@@ -354,6 +354,12 @@ public:
         double   svinAccMm  = 0;
         double   svinVarMm2 = 0;
         double   svinObs    = 0;
+        /* The mean the survey has so far, in ECEF centimetres, which is the
+         * unit the message carries and the unit CFG-TMODE2 takes. Published
+         * because "action":"fix" stores exactly this: without it the decision at
+         * the end of a survey is made blind, and a mean a few metres from the
+         * provisioned position would be locked over the top of it unremarked. */
+        int32_t  svinMeanCm[3] = {};
         /* What the survey was asked for, beside what it has. Without the pair
          * there is no way to tell "nearly there" from "asked for six hours and
          * the limit is unmet", which is the whole decision at the end. */

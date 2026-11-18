@@ -3398,6 +3398,9 @@ GpsTime::Status GpsTime::status() const
     st.svinAccMm = static_cast<double>(isqrt(m_svinAcc));
     st.svinVarMm2 = static_cast<double>(m_svinAcc);
     st.svinObs  = static_cast<double>(m_svinObs);
+    for (int k = 0; k < 3; ++k) {
+        st.svinMeanCm[k] = m_svinMean[k];
+    }
     st.svinTargetS = static_cast<double>(m_svinDurS);
     st.svinLimitMm = static_cast<double>(m_svinAccMm);
     st.svinValid = m_svinValid;
