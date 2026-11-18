@@ -396,14 +396,23 @@ void GpsTime::restoreTimeMode()
         long long     y   = 0;
         long long     z   = 0;
         unsigned long acc = 0;
-        if (text::getList(settings.gpsFixedPos(), ',', x, y, z, acc)) {
+        unsigned long val = 0;
+        /* The validated flag rides on the position as a fifth field: it is a
+         * property of that position, and it used to live only in RAM, so every
+         * reboot silently threw away a survey that had signed itself off. Four
+         * fields is the older form and reads as unvalidated, which is what it
+         * was. */
+        if (text::getList(settings.gpsFixedPos(), ',', x, y, z, acc, val) ||
+            text::getList(settings.gpsFixedPos(), ',', x, y, z, acc)) {
             for (int i = 0; i < 3; ++i) {
                 m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
             }
-            m_fixedAcc   = acc;
-            m_fixedValid = true;
-            m_holdWanted = true;
-            ESP_LOGW(TAG, "position hold restored from NVS");
+            m_fixedAcc      = acc;
+            m_fixedValid    = true;
+            m_holdWanted    = true;
+            m_holdValidated = val != 0;
+            ESP_LOGW(TAG, "position hold restored from NVS%s",
+                     m_holdValidated ? ", survey-validated" : "");
             return;
         }
         /* The mode says fixed but the position did not survive. Falling out of
@@ -457,6 +466,24 @@ void GpsTime::reassertFix()
             ESP_LOGW(TAG, "survey restarted after the reset");
         }
         return;
+    }
+    /* Re-read the record instead of trusting the copy in RAM. This runs after a
+     * reset, and whatever took the mode away may also have been the moment
+     * gpsFixedPos was corrected by hand -- applying the stale copy would quietly
+     * undo the correction. The RAM copy is the fallback for a record that will
+     * not parse, which is also how the flag survives a value without one. */
+    long long          x    = 0;
+    long long          y    = 0;
+    long long          z    = 0;
+    unsigned long      acc  = 0;
+    unsigned long      val  = 0;
+    const std::string &pos  = Settings::instance().gpsFixedPos();
+    if (text::getList(pos, ',', x, y, z, acc, val) || text::getList(pos, ',', x, y, z, acc)) {
+        for (int i = 0; i < 3; ++i) {
+            m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
+        }
+        m_fixedAcc      = acc;
+        m_holdValidated = val != 0;
     }
     uint8_t tm[28] = {};
     tm[0]          = 2; /* fixed */
@@ -1332,9 +1359,14 @@ void GpsTime::task()
                     Settings::instance().setGpsSurvey(std::format("{},{}", hours, accMm));
                 }
                 if (cmd == 3) {
-                    Settings::instance().setGpsFixedPos(std::format("{},{},{},{}", m_svinMean[0],
-                                                                   m_svinMean[1], m_svinMean[2],
-                                                                   m_svinAcc));
+                    /* Set before the write, because the write is what has to
+                     * carry it. */
+                    portENTER_CRITICAL(&m_mux);
+                    m_holdValidated = m_svinValid;
+                    portEXIT_CRITICAL(&m_mux);
+                    Settings::instance().setGpsFixedPos(
+                        std::format("{},{},{},{},{}", m_svinMean[0], m_svinMean[1], m_svinMean[2],
+                                    m_svinAcc, m_holdValidated ? 1 : 0));
                 }
                 saveTimeMode();
                 m_svinAtUs = 0;
@@ -1359,10 +1391,7 @@ void GpsTime::task()
                      * the state that produced the 18:43 free-run, and nothing
                      * said so at the time. Say it, and keep saying it in
                      * /gps/info through hold_validated. */
-                    portENTER_CRITICAL(&m_mux);
-                    m_holdValidated = m_svinValid;
-                    portEXIT_CRITICAL(&m_mux);
-                    if (!m_svinValid) {
+                    if (!m_holdValidated) {
                         ESP_LOGW(TAG, "  the survey had NOT met its own limit (%u mm needed, "
                                       "%u mm measured): locked unvalidated",
                                  static_cast<unsigned>(m_svinAccMm),
