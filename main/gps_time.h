@@ -360,6 +360,10 @@ public:
         double   svinTargetS = 0;
         double   svinLimitMm = 0;
         bool     svinValid  = false;
+        /* True only when the held fixed position came from a survey that had
+         * met its own accuracy limit. False is usable but unsignoff, and is
+         * what a lock taken from an abandoned survey looks like. */
+        bool     holdValidated = false;
         double   svinAgeS   = -1;
         /* MON-HW's pin map: which module pins the receiver has assigned, their
          * direction and level. The antenna supervisor is a pin pair, so this is
@@ -831,6 +835,7 @@ private:
     uint32_t         m_svinAcc      = 0;
     uint32_t         m_svinObs      = 0;
     bool             m_svinValid    = false;
+    bool             m_holdValidated = false;
     bool             m_svinActive   = false;
     int64_t          m_svinAtUs     = 0;
     /* A position hold lives in the module's RAM and this firmware's copy of it

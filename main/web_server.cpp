@@ -546,6 +546,7 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         doc.AddItem("svin_limit_mm", gps.svinLimitMm);
         doc.AddItem("svin_valid", gps.svinValid);
         doc.AddItem("svin_age_s", gps.svinAgeS);
+        doc.AddItem("hold_validated", gps.holdValidated);
     }
     if (gps.locked) {
         doc.AddItem("dispersion_us", static_cast<double>(gps.dispersionNs) / 1000.0);

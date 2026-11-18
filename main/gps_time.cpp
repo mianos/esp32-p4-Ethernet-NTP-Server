@@ -1332,6 +1332,21 @@ void GpsTime::task()
                 } else if (cmd == 3) {
                     ESP_LOGW(TAG, "position locked fixed at %d %d %d mm", m_svinMean[0],
                              m_svinMean[1], m_svinMean[2]);
+                    /* A lock taken before the survey signed itself off is a
+                     * position the receiver never agreed was good enough. It is
+                     * usually fine -- metres are nanoseconds -- but it is also
+                     * the state that produced the 18:43 free-run, and nothing
+                     * said so at the time. Say it, and keep saying it in
+                     * /gps/info through hold_validated. */
+                    portENTER_CRITICAL(&m_mux);
+                    m_holdValidated = m_svinValid;
+                    portEXIT_CRITICAL(&m_mux);
+                    if (!m_svinValid) {
+                        ESP_LOGW(TAG, "  the survey had NOT met its own limit (%u mm needed, "
+                                      "%u mm measured): locked unvalidated",
+                                 static_cast<unsigned>(m_svinAccMm),
+                                 static_cast<unsigned>(isqrt(m_svinAcc)));
+                    }
                 } else {
                     ESP_LOGW(TAG, "time mode cleared: back to a moving position");
                 }
@@ -3386,6 +3401,7 @@ GpsTime::Status GpsTime::status() const
     st.svinTargetS = static_cast<double>(m_svinDurS);
     st.svinLimitMm = static_cast<double>(m_svinAccMm);
     st.svinValid = m_svinValid;
+    st.holdValidated = m_holdValidated;
     st.svinAgeS = m_svinAtUs != 0 ? static_cast<double>(esp_timer_get_time() - m_svinAtUs) / 1e6
                                   : -1;
     st.pinSel            = m_pinSel;
