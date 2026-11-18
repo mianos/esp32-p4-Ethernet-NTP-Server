@@ -453,38 +453,45 @@ bool GpsTime::startSurveyFromSettings()
 
 void GpsTime::reassertFix()
 {
-    if (!m_fixedValid || !m_holdWanted) {
-        /* Not a hold: a survey may be the thing that was wanted. Restarting it
-         * loses its elapsed time, which is still better than a reset silently
-         * ending a day's run. */
-        /* A mode of "fixed" with nothing held counts here too: after a reset it
-         * may be the position that failed to come back, not the mode that was
-         * meant, and restoreTimeMode falls back for the same reason. */
+    /* Runs after a reset or a clear-to-defaults, when the time mode has just
+     * been taken away. The stored record is the authority: if a position
+     * survived, it goes back. Only when none survived does a survey resume --
+     * the same order, and for the same reason, as restoreTimeMode.
+     *
+     * m_fixedValid is deliberately not the test. After a reset the receiver
+     * cannot yet say what the mode was, so it can be false while the record is
+     * perfectly good -- which is how a power cycle used to restart a survey
+     * over the top of a validated hold.
+     *
+     * The record is re-read rather than taken from RAM for the same reason: a
+     * reset may be exactly when it was corrected by hand, and applying the
+     * stale copy would quietly undo that. */
+    long long     x   = 0;
+    long long     y   = 0;
+    long long     z   = 0;
+    unsigned long acc = 0;
+    unsigned long val = 0;
+    const std::string &pos = Settings::instance().gpsFixedPos();
+    if (!text::getList(pos, ',', x, y, z, acc, val) &&
+        !text::getList(pos, ',', x, y, z, acc)) {
+        /* No hold to put back: a survey may be the thing that was wanted.
+         * Restarting it loses its elapsed time, which is still better than a
+         * reset silently ending a day's run. */
         const std::string &mode = Settings::instance().gpsTimeMode();
-        if ((mode == "survey" || (mode == "fixed" && !m_fixedValid)) &&
-            startSurveyFromSettings()) {
+        if ((mode == "survey" || mode == "fixed") && startSurveyFromSettings()) {
             ESP_LOGW(TAG, "survey restarted after the reset");
         }
         return;
     }
-    /* Re-read the record instead of trusting the copy in RAM. This runs after a
-     * reset, and whatever took the mode away may also have been the moment
-     * gpsFixedPos was corrected by hand -- applying the stale copy would quietly
-     * undo the correction. The RAM copy is the fallback for a record that will
-     * not parse, which is also how the flag survives a value without one. */
-    long long          x    = 0;
-    long long          y    = 0;
-    long long          z    = 0;
-    unsigned long      acc  = 0;
-    unsigned long      val  = 0;
-    const std::string &pos  = Settings::instance().gpsFixedPos();
-    if (text::getList(pos, ',', x, y, z, acc, val) || text::getList(pos, ',', x, y, z, acc)) {
-        for (int i = 0; i < 3; ++i) {
-            m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
-        }
-        m_fixedAcc      = acc;
-        m_holdValidated = val != 0;
+
+    for (int i = 0; i < 3; ++i) {
+        m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
     }
+    m_fixedAcc      = acc;
+    m_fixedValid    = true;
+    m_holdWanted    = true;
+    m_holdValidated = val != 0;
+
     uint8_t tm[28] = {};
     tm[0]          = 2; /* fixed */
     for (int i = 0; i < 3; ++i) {
@@ -493,7 +500,8 @@ void GpsTime::reassertFix()
     text::putLe(tm + 16, m_fixedAcc);
     if (sendAndWait(0x06, 0x3D, tm, sizeof(tm)) == 1) {
         m_tmode = 2;
-        ESP_LOGW(TAG, "position hold put back after the reset");
+        ESP_LOGW(TAG, "position hold put back after the reset%s",
+                 m_holdValidated ? ", survey-validated" : "");
     } else {
         ESP_LOGW(TAG, "position hold could not be put back");
     }
