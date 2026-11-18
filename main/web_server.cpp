@@ -728,8 +728,12 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         }
     }
     if (gps.lastHoldoverUs > 0) {
-        doc.AddItem("holdover_s", static_cast<double>(gps.lastHoldoverUs) / 1e6);
-        doc.AddItem("holdover_error_us", static_cast<double>(gps.lastHoldoverErrNs) / 1000.0);
+        /* "last_", not "holdover_": this is a record of the previous outage, not
+         * the age of the current edge. /gps/pps publishes that one, and the two
+         * were read as the same number -- an 80 s scar in this field looks
+         * exactly like a clock that is 80 s into a holdover right now. */
+        doc.AddItem("last_holdover_s", static_cast<double>(gps.lastHoldoverUs) / 1e6);
+        doc.AddItem("last_holdover_error_us", static_cast<double>(gps.lastHoldoverErrNs) / 1000.0);
     }
 
     if (gps.monHwValid) {

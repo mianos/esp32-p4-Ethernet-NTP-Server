@@ -662,6 +662,8 @@ private:
     int        m_rateNext          = 0; /* where the next sample goes */
     int64_t    m_lastRateOffsetNs  = 0;
     bool       m_lastRateOffsetSet = false;
+    int64_t    m_lastRateMonoNs    = 0;
+    bool       m_lastRateMonoSet   = false;
     bool       m_rateLogged        = false;
     int64_t    m_lastLoggedPpb     = 0;
     bool       m_holdoverLogged    = false;
@@ -786,7 +788,6 @@ private:
     /* configureModule() takes about three seconds and its own traffic is the
      * only thing on the wire while it runs. Testing the rate underneath it
      * cancels the configuration that would have raised the rate. */
-    bool       m_configuring       = false;
     int64_t    m_warmRetryAtUs     = 0;
     uint8_t    m_warmRetries       = 0;
     /* Requests from the HTTP task, serviced by the GPS task on its next pass so

@@ -65,6 +65,13 @@ constexpr uint8_t kTimTosEnable[8] = {0x0D, 0x12, 0, 1, 0, 0, 0, 0};
 
 /* How long one baud rate gets to produce a single valid UBX frame. */
 constexpr int64_t kScanAfterUs = 4000000;
+/* The first rate is the one the module is expected to be on, and it gets longer.
+ * Four seconds was not enough and cost a boot: the scan walked off a correct
+ * 38400 before the module had finished starting, landed on 9600, and there read
+ * mangled frames off a 38400 stream as though they were a link. Fifteen seconds
+ * covers a module boot plus a config burst; a wrong rate only costs 15 s of one
+ * pass, and the pass starts again afterwards. */
+constexpr int64_t kFirstRateUs = 15000000;
 /* Silence that counts as a dead line rather than a quiet one. The receiver sends
 a message set at 1 Hz, so 5 s is five missed turns of it. */
 constexpr int64_t kFrameSilenceUs = 5000000;
@@ -120,6 +127,15 @@ constexpr int64_t kWanderNsPerS = 1000;
  * is the module moving the clock, or a pairing that landed a second out. Either
  * way the servo's history is about a different clock now, so it starts again. */
 constexpr int64_t kRateResetNs = 100000000; /* 100 ms */
+
+/* A gap in the reference longer than this restarts the rate window. The sample
+ * that spans a gap averages the rate on both sides of it, and the sample sits at
+ * the far end of the baseline where leverage is highest: one 5 ms error there
+ * moves a full 300 s fit by about 330 ppb, which is more than a whole tuning
+ * step. Two seconds is one missed edge and not worth the churn; three is an
+ * outage. (An 80 s outage at 1.6 ppm is 131 ms, and only trips the 100 ms step
+ * detector by luck -- a shorter one would have been fitted straight in.) */
+constexpr int64_t kRateGapNs = 3000000000; /* 3 s */
 
 /* A larger estimate than this is a bad fit rather than a bad crystal (200 ppm
  * is already ten times a cheap XTAL's worst case), so it is clamped instead of
@@ -981,7 +997,7 @@ esp_err_t GpsTime::begin()
     m_decoder.listen(this);
     m_begun       = true;
     m_baud        = kBauds[0];
-    m_nextScanUs  = esp_timer_get_time() + kScanAfterUs;
+    m_nextScanUs  = esp_timer_get_time() + kFirstRateUs;
     m_nextCheckUs = esp_timer_get_time() + 1000000;
 
     /* A lone TIM-TP enable three seconds in, if none has produced a frame. Ask
@@ -1072,9 +1088,13 @@ void GpsTime::task()
         if (m_secStartUs == 0) {
             m_secStartUs = nowUs;
         } else if (nowUs - m_secStartUs >= 1000000) {
-            if (m_configuring) {
-                m_poorSecs = 0;
-            } else if (m_secFrames < kMinFramesPerSec) {
+            /* No exemption while the config burst is talking. A rate that works
+             * answers the burst with ACKs, so an empty second during a config is
+             * itself evidence; a rate that does not work sits there silently. The
+             * exemption used to be unconditional, and it was what wedged the boot
+             * at 9600: the burst runs every six seconds, so it kept zeroing the
+             * counter and the poor-rate test could never reach its limit. */
+            if (m_secFrames < kMinFramesPerSec) {
                 if (m_poorSecs < 255) {
                     ++m_poorSecs;
                 }
@@ -1093,7 +1113,7 @@ void GpsTime::task()
 
         if (!m_frameSeen && nowUs >= m_nextScanUs) {
             advanceBaud();
-            m_nextScanUs = nowUs + kScanAfterUs;
+            m_nextScanUs = nowUs + (m_baudIndex == 0 ? kFirstRateUs : kScanAfterUs);
         }
         if (nowUs >= m_nextCheckUs) {
             logLockChange();
@@ -1529,11 +1549,9 @@ void GpsTime::advanceBaud()
         ESP_LOGW(TAG, "uart_set_baudrate(%u): %s", static_cast<unsigned>(m_baud),
                  esp_err_to_name(err));
     }
-    m_configuring = true;
-    m_poorSecs    = 0;
-    m_secFrames   = 0;
+    m_poorSecs  = 0;
+    m_secFrames = 0;
     configureModule();
-    m_configuring = false;
 }
 
 /* The pulse frame on its own, so the delay can be changed without re-running the
@@ -2851,6 +2869,33 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
 {
     const int64_t offsetNs = utcNs - monoNs;
 
+    /* A gap in the reference: neither the fit below nor a second difference
+     * wants a sample with a hole in front of it. Drop the window, drop the
+     * spanning sample, and let the first post-gap second seed it again. */
+    if (m_lastRateMonoSet && monoNs - m_lastRateMonoNs > kRateGapNs) {
+        const int64_t gapMs = (monoNs - m_lastRateMonoNs) / 1000000;
+        m_rateCount         = 0;
+        m_rateNext          = 0;
+        m_lastRateOffsetSet = false;
+        m_lastRateMonoNs    = monoNs;
+        m_lastRateMonoSet   = true;
+        /* Published ADEV and anchor count have to go with the window they were
+         * taken over, or the panel keeps quoting a deviation and a sample count
+         * for a sequence that no longer exists. rateSamples is normally only
+         * refreshed inside fitRate(), which early-returns below its minimum, so
+         * left alone it would sit at the old number for a minute. */
+        portENTER_CRITICAL(&m_mux);
+        m_adevN       = 0;
+        m_rateSamples = 0;
+        for (double &v : m_adevPpb) {
+            v = 0.0;
+        }
+        portEXIT_CRITICAL(&m_mux);
+        ESP_LOGW(TAG, "servo: %lld s without a reference, dropping the rate window",
+                 static_cast<long long>(gapMs / 1000));
+        return;
+    }
+
     if (m_lastRateOffsetSet &&
         (offsetNs - m_lastRateOffsetNs > kRateResetNs || m_lastRateOffsetNs - offsetNs > kRateResetNs)) {
         /* The module moved the clock under us, or a pairing landed a second out.
@@ -2860,11 +2905,22 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
         const int64_t stepMs = (offsetNs - m_lastRateOffsetNs) / 1000000;
         m_rateCount          = 0;
         m_rateNext           = 0;
+        /* Same reason as the gap path: the published figures describe the old
+         * window until fitRate() is allowed to run again. */
+        portENTER_CRITICAL(&m_mux);
+        m_adevN       = 0;
+        m_rateSamples = 0;
+        for (double &v : m_adevPpb) {
+            v = 0.0;
+        }
+        portEXIT_CRITICAL(&m_mux);
         ESP_LOGW(TAG, "servo: %+lld ms step in the reference, refitting the rate",
                  static_cast<long long>(stepMs));
     }
     m_lastRateOffsetNs  = offsetNs;
     m_lastRateOffsetSet = true;
+    m_lastRateMonoNs    = monoNs;
+    m_lastRateMonoSet   = true;
 
     m_rate[m_rateNext] = RateSample{monoNs, utcNs};
     m_rateNext         = (m_rateNext + 1) % kRateWindow;

@@ -517,9 +517,11 @@ function render(body) {
 
   /* What the receiver is actually sending, newest first. This is the field that
    * makes a silent enable (or a trickle of nothing but ACKs) visible. */
-  $('framesline').textContent = body.receiver.holdover_s
-    ? `holdover ${body.receiver.holdover_s.toFixed(1)} s, error `
-      + `${fmt(body.receiver.holdover_error_us, 0)} µs · frames: ${body.receiver.recent_frames || '—'}`
+  /* "last": a record of the previous outage, not the age of the current edge --
+   * with the live meaning it read as a holdover that was happening now. */
+  $('framesline').textContent = body.receiver.last_holdover_s
+    ? `last holdover ${body.receiver.last_holdover_s.toFixed(1)} s, error `
+      + `${fmt(body.receiver.last_holdover_error_us, 0)} µs · frames: ${body.receiver.recent_frames || '—'}`
     : `frames: ${body.receiver.recent_frames || '—'}`;
   $('raw').textContent = `io ${body.receiver.io_hex || '—'}\nmsgpp ${body.receiver.msgpp_hex || '—'}`;
 
