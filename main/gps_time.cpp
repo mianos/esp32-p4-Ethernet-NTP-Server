@@ -1404,6 +1404,13 @@ void GpsTime::task()
             const uint8_t cfg[12] = {0x1F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
             ESP_LOGW(TAG, "receiver configuration cleared to defaults");
             sendUbx(0x06, 0x09, cfg, sizeof(cfg));
+            /* The clear takes CFG-PRT back to the module's 9600 default with it.
+             * Left alone the scan adopts 9600, then walks down looking for a
+             * line that will carry the message set, and at 4800 the frames are
+             * late enough to spike an edge a minute -- 109 of them and 1.5 ms of
+             * offset before this was spotted. Put the working rate straight back
+             * rather than let the scan find its way there. */
+            requestBaud(m_baud, true);
             /* Forced: the clear took every rate to zero, so a client attached
              * right now has no stream either. */
             m_reconfigForce = true;
