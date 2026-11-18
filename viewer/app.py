@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
+import statistics
 import sqlite3
 import time
 from collections import deque
@@ -27,6 +29,7 @@ from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
 from typing import Any
 
+import adev as analysis
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -49,6 +52,11 @@ DB_PATH = os.environ.get("DB", os.path.join(HERE, "samples.db"))
 RECORD_S = float(os.environ.get("RECORD_S", "1"))
 RETENTION_D = int(os.environ.get("RETENTION_D", "90"))
 PRUNE_S = 3600.0
+# Long-span transport: never more than this many buckets in one reply, and a
+# reply is reused for LONG_CACHE_S rather than recomputed per view.
+LONG_BUCKETS = 600
+LONG_CACHE_S = 30.0
+LONG_SPANS = (3600, 21600, 86400, 604800)
 
 # gnssId as the receiver numbers it. 255 is the receiver's "no slot" value,
 # which shows up on the GLONASS rows here.
@@ -626,6 +634,7 @@ def build(poller: Poller) -> dict[str, Any]:
 
 poller: Poller
 CLIENT = httpx.AsyncClient(timeout=8.0)
+LONG_CACHE: dict[int, tuple[float, dict[str, Any]]] = {}
 
 
 @contextlib.asynccontextmanager
@@ -691,6 +700,71 @@ async def snapshot(request: Request) -> Response:
         return Response(status_code=304, headers={"etag": poller.etag, "cache-control": "no-cache"})
     return Response(poller.body, media_type="application/json",
                     headers={"etag": poller.etag, "cache-control": "no-cache"})
+
+
+def build_long(span: int) -> dict[str, Any]:
+    """Bucket the log and take an ADEV over it, for one span.
+
+    Buckets carry min and max as well as the mean, because a decimator that
+    only averages hides exactly the spikes the page exists to show. The ADEV is
+    computed from the raw rows, not the buckets: downsampling first would put a
+    false floor under the short octaves.
+    """
+    since = time.time() - span
+    db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    rows = db.execute(
+        "SELECT t, offset_us, rate_ppm FROM samples WHERE gap = 0 AND t >= ? ORDER BY t", (since,)
+    ).fetchall()
+    db.close()
+
+    width = max(1.0, span / LONG_BUCKETS)
+    buckets: dict[int, list[tuple[float, float | None, float | None]]] = {}
+    for t, off, rate in rows:
+        buckets.setdefault(int((t - since) / width), []).append((t, off, rate))
+
+    series = []
+    for key in sorted(buckets):
+        group = buckets[key]
+        point: dict[str, Any] = {"t": round(since + (key + 0.5) * width, 1)}
+        for name, index in (("off", 1), ("rate", 2)):
+            values = [g[index] for g in group if g[index] is not None]
+            if values:
+                point[name] = round(sum(values) / len(values), 3)
+                point[f"{name}lo"] = round(min(values), 3)
+                point[f"{name}hi"] = round(max(values), 3)
+        series.append(point)
+
+    # One tau per octave, out to an eighth of the span: past that there are too
+    # few independent windows for the answer to mean anything.
+    deviation = []
+    pairs = [(t, rate) for t, _, rate in rows if rate is not None]
+    parts = analysis.runs(pairs)
+    tau0 = analysis.sample_interval(pairs)
+    if parts and tau0 > 0:
+        m = 1
+        while m * tau0 <= span / 8.0:
+            numbers: list[float] = []
+            for run in parts:
+                numbers.extend(analysis.adev_freq(run, m))
+            if numbers:
+                sigma = math.sqrt(0.5 * statistics.fmean(numbers)) * 1e3
+                deviation.append({"tau": round(m * tau0, 2), "sigma": round(sigma, 4),
+                                  "pairs": len(numbers)})
+            m *= 2
+
+    return {"span": span, "series": series, "adev": deviation, "rows": len(rows)}
+
+
+@app.get("/api/long")
+async def long_window(span: int = 3600) -> JSONResponse:
+    span = max(600, min(span, RETENTION_D * 86400))
+    cached = LONG_CACHE.get(span)
+    now = time.time()
+    if cached is not None and now - cached[0] < LONG_CACHE_S:
+        return JSONResponse(cached[1], headers={"cache-control": "max-age=10"})
+    payload = await asyncio.to_thread(build_long, span)
+    LONG_CACHE[span] = (now, payload)
+    return JSONResponse(payload, headers={"cache-control": "max-age=10"})
 
 
 @app.get("/api/history")

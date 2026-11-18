@@ -41,12 +41,17 @@ def load(path: str, field: str) -> list[tuple[float, float]]:
     return [(float(t), float(v)) for t, v in rows]
 
 
+def sample_interval(samples: list[tuple[float, float]]) -> float:
+    """Median gap between samples, and zero when there is only one."""
+    steps = [b[0] - a[0] for a, b in zip(samples, samples[1:]) if b[0] > a[0]]
+    return statistics.median(steps) if steps else 0.0
+
+
 def runs(samples: list[tuple[float, float]]) -> list[list[float]]:
     """Split into stretches with no gap and no interval out of family."""
     if len(samples) < 3:
         return []
-    steps = [b[0] - a[0] for a, b in zip(samples, samples[1:]) if b[0] > a[0]]
-    nominal = statistics.median(steps)
+    nominal = sample_interval(samples)
     out: list[list[float]] = [[samples[0][1]]]
     for (t0, _), (t1, v) in zip(samples, samples[1:]):
         if nominal * 0.5 <= (t1 - t0) <= nominal * 2.0:
@@ -56,12 +61,27 @@ def runs(samples: list[tuple[float, float]]) -> list[list[float]]:
     return [r for r in out if len(r) >= 2]
 
 
+def means(values: list[float], m: int) -> list[float]:
+    """Sliding m-point means in one pass.
+
+    Slicing each window is O(n*m), which is fine for a minute of samples and
+    not for a week: at a 2 s sample and a day of data the largest averaging
+    factor is tens of thousands of points.
+    """
+    total = sum(values[:m])
+    out = [total / m]
+    for i in range(m, len(values)):
+        total += values[i] - values[i - m]
+        out.append(total / m)
+    return out
+
+
 def adev_freq(run: list[float], m: int) -> list[float]:
     """Squared second differences of m-sample means, the ADEV numerator."""
     if len(run) < m + 1:
         return []
-    means = [statistics.fmean(run[i:i + m]) for i in range(len(run) - m + 1)]
-    return [(b - a) ** 2 for a, b in zip(means, means[1:])]
+    averaged = means(run, m)
+    return [(b - a) ** 2 for a, b in zip(averaged, averaged[1:])]
 
 
 def adev_phase(run: list[float], m: int) -> list[float]:

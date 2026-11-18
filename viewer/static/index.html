@@ -94,6 +94,13 @@
   .adev .axis { fill: var(--dim); font: 9px/1 ui-monospace, monospace; }
   .adev .adevline { fill: none; stroke: #8fd694; stroke-width: 1.6; }
   .adev .adevdot { fill: #8fd694; }
+  .longchart svg { width: 100%; height: auto; display: block; }
+  .longchart { min-height: 40px; }
+  .longchart .grid { stroke: var(--line); stroke-width: 1; }
+  .longchart .axis { fill: var(--dim); font: 9px/1 ui-monospace, monospace; }
+  .longchart .band { stroke: none; fill: #8fd694; fill-opacity: .18; }
+  .longchart .mean { fill: none; stroke: #8fd694; stroke-width: 1.4; }
+  .longchart .label { fill: var(--dim); font: 10px/1 ui-monospace, monospace; }
   .sparks { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
   .spark .k { font-size: 9px; text-transform: uppercase; letter-spacing: .7px; color: var(--dim); }
   .spark .v { font: 600 12px var(--mono); }
@@ -173,6 +180,19 @@
         300 s rate window: ppb against averaging time, log-log. Down and to the
         right is better; a rising tail is drift, and points short of the window
         are withheld.</div>
+    </div>
+
+    <div class="panel">
+      <h2>Long term <span class="muted" id="longnote"></span></h2>
+      <div class="strip" id="longspans" style="margin-bottom:8px"></div>
+      <div id="longoff" class="longchart"></div>
+      <div id="longrate" class="longchart" style="margin-top:8px"></div>
+      <div id="longadev" class="longchart" style="margin-top:8px"></div>
+      <div class="foot" style="margin-top:6px">From the SQLite log, not the
+        window: min-max band with the mean through it, so a spike survives the
+        decimation. ADEV is computed from the raw rows out to an eighth of the
+        span and stops there. Nothing under 300 s is the crystal — that is
+        inside the firmware's own fit window.</div>
     </div>
 
     <div class="panel">
@@ -645,6 +665,120 @@ function drawAdev(values) {
   host.appendChild(svg);
 }
 
+/* Long-span charts out of the log. Deliberately separate from drawAdev: that
+ * one draws the firmware's live octaves over its 300 s fit, this one draws
+ * whatever span is selected out of SQLite, and conflating them would let a
+ * 7-day view look like a live measurement. */
+let longSpan = 3600;
+
+function longChart(host, points, key, unit, axis) {
+  host.replaceChildren();
+  const pts = points.filter((p) => p[key] != null);
+  const head = document.createElement('div');
+  head.className = 'label';
+  head.textContent = axis;
+  host.appendChild(head);
+  if (pts.length < 2) {
+    const none = document.createElement('div');
+    none.className = 'foot';
+    none.textContent = 'nothing logged in this span';
+    host.appendChild(none);
+    return;
+  }
+  const W = 600, H = 90, L = 44, R = 8, T = 6, B = 14;
+  const lo = Math.min(...pts.map((p) => p[`${key}lo`] ?? p[key]));
+  const hi = Math.max(...pts.map((p) => p[`${key}hi`] ?? p[key]));
+  const pad = (hi - lo) * 0.1 || 1;
+  const bottom = lo - pad, top = hi + pad;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  const x = (t) => L + ((t - t0) / ((t1 - t0) || 1)) * (W - L - R);
+  const y = (v) => T + (1 - (v - bottom) / ((top - bottom) || 1)) * (H - T - B);
+
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}` });
+  for (const tick of [bottom, (bottom + top) / 2, top]) {
+    svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(tick), y2: y(tick), class: 'grid' }));
+    svg.appendChild(Object.assign(svgEl('text', { x: L - 4, y: y(tick) + 3, class: 'axis' }),
+      { textContent: `${tick.toFixed(1)}` }));
+  }
+  const band = pts.map((p) => `${x(p.t).toFixed(1)},${y(p[`${key}hi`] ?? p[key]).toFixed(1)}`)
+    .concat(pts.slice().reverse()
+      .map((p) => `${x(p.t).toFixed(1)},${y(p[`${key}lo`] ?? p[key]).toFixed(1)}`));
+  svg.appendChild(svgEl('polygon', { points: band.join(' '), class: 'band' }));
+  svg.appendChild(svgEl('polyline', {
+    points: pts.map((p) => `${x(p.t).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' '),
+    class: 'mean',
+  }));
+  host.appendChild(svg);
+}
+
+function longAdev(host, deviation) {
+  host.replaceChildren();
+  const head = document.createElement('div');
+  head.className = 'label';
+  head.textContent = 'ADEV from the same rows (ppb)';
+  host.appendChild(head);
+  const pts = deviation.filter((d) => d.sigma > 0 && d.pairs > 1);
+  if (pts.length < 2) {
+    const none = document.createElement('div');
+    none.className = 'foot';
+    none.textContent = 'not enough pairs yet for a deviation';
+    host.appendChild(none);
+    return;
+  }
+  const W = 600, H = 120, L = 44, R = 8, T = 8, B = 18;
+  const lo = Math.min(...pts.map((d) => d.sigma)) / 2;
+  const hi = Math.max(...pts.map((d) => d.sigma)) * 2;
+  const tlo = Math.log2(pts[0].tau), thi = Math.log2(pts[pts.length - 1].tau);
+  const x = (tau) => L + ((Math.log2(tau) - tlo) / ((thi - tlo) || 1)) * (W - L - R);
+  const y = (v) => T + (1 - (Math.log10(v) - Math.log10(lo)) /
+    ((Math.log10(hi) - Math.log10(lo)) || 1)) * (H - T - B);
+  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}` });
+  for (const tick of [1, 10, 100, 1000, 10000]) {
+    if (tick < lo || tick > hi) continue;
+    svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(tick), y2: y(tick), class: 'grid' }));
+    svg.appendChild(Object.assign(svgEl('text', { x: L - 4, y: y(tick) + 3, class: 'axis' }),
+      { textContent: tick >= 1000 ? `${tick / 1000}k` : `${tick}` }));
+  }
+  for (const d of pts) {
+    svg.appendChild(Object.assign(svgEl('text', { x: x(d.tau), y: H - 5, class: 'axis' }),
+      { textContent: `${d.tau}s` }));
+  }
+  svg.appendChild(svgEl('polyline', {
+    points: pts.map((d) => `${x(d.tau).toFixed(1)},${y(d.sigma).toFixed(1)}`).join(' '),
+    class: 'mean',
+  }));
+  host.appendChild(svg);
+}
+
+async function renderLong() {
+  let payload;
+  try {
+    const response = await fetch(`/api/long?span=${longSpan}`);
+    payload = await response.json();
+  } catch { return; }
+  const label = { 3600: '1 h', 21600: '6 h', 86400: '24 h', 604800: '7 d' }[longSpan] || `${longSpan} s`;
+  $('longnote').textContent = `last ${label}, ${payload.rows ?? 0} samples`;
+  longChart($('longoff'), payload.series || [], 'off', 'us', 'offset, us (band = min..max)');
+  longChart($('longrate'), payload.series || [], 'rate', 'ppm', 'servo rate, ppm (band = min..max)');
+  longAdev($('longadev'), payload.adev || []);
+}
+
+function buildSpans() {
+  const host = $('longspans');
+  host.replaceChildren();
+  for (const [span, label] of [[3600, '1 h'], [21600, '6 h'], [86400, '24 h'], [604800, '7 d']]) {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.className = span === longSpan ? 'on' : '';
+    button.addEventListener('click', () => {
+      longSpan = span;
+      buildSpans();
+      renderLong();
+    });
+    host.appendChild(button);
+  }
+}
+
 /* Sparklines from the viewer's own ring buffer, not the box. */
 async function renderSparks() {
   let payload;
@@ -724,7 +858,10 @@ for (const mode of ['cno', 'res']) {
 drawFurniture();
 tick();
 renderSparks();
+buildSpans();
+renderLong();
 setInterval(() => { if (live) renderSparks(); }, 5000);
+setInterval(() => { if (live) renderLong(); }, 30000);
 </script>
 </body>
 </html>
