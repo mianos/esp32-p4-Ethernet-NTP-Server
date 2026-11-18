@@ -89,11 +89,6 @@
   .notes { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
   .note { font-size: 11px; font-family: var(--mono); padding: 3px 8px; border-radius: 5px;
           background: #2a2110; color: var(--warn); border: 1px solid #4a3a13; }
-  .adev { width: 100%; height: auto; display: block; }
-  .adev .grid { stroke: var(--line); stroke-width: 1; }
-  .adev .axis { fill: var(--dim); font: 9px/1 ui-monospace, monospace; }
-  .adev .adevline { fill: none; stroke: #8fd694; stroke-width: 1.6; }
-  .adev .adevdot { fill: #8fd694; }
   .longchart svg { width: 100%; height: auto; display: block; }
   .longchart { min-height: 40px; }
   .longchart .grid { stroke: var(--line); stroke-width: 1; }
@@ -173,14 +168,8 @@
 
   <div>
     <div class="panel">
-      <h2>Stability, firmware window <span class="muted" id="adevnote"></span></h2>
+      <h2>Stability <span class="muted" id="windownote"></span></h2>
       <div class="strip" id="tiestrip"></div>
-      <div id="adevchart" style="margin-top:10px"></div>
-      <div class="foot" style="margin-top:6px">The box's own ADEV over its 300 s
-        rate window, as it computes it: ppb against averaging time, log-log. Down
-        and to the right is better; a rising tail is drift, and points short of
-        the window are withheld. The same octaves from our own rows are in Long
-        term at 5 min, so the two disagreeing is a bug in one of them.</div>
     </div>
 
     <div class="panel">
@@ -430,10 +419,9 @@ function render(body) {
     cell('TIE max', fmt(body.receiver.tie_max_ns, 0, ' ns'),
          (body.receiver.tie_max_ns ?? 0) > 5000 ? 'warn' : ''),
     cell('TIE rms', fmt(body.receiver.tie_rms_ns, 0, ' ns')),
-    cell('Window', fmt(stab.adev_n, 0, ' s'), (stab.adev_n ?? 0) < 200 ? 'warn' : ''),
+    cell('Window', fmt(stab.rate_n, 0, ' s'), (stab.rate_n ?? 0) < 200 ? 'warn' : ''),
   ]);
-  $('adevnote').textContent = stab.adev_n ? `over ${fmt(stab.adev_n, 0)} s` : 'warming up';
-  drawAdev(stab.adev || []);
+  $('windownote').textContent = stab.rate_n ? `over ${fmt(stab.rate_n, 0)} s` : 'warming up';
 
   fill('sigstrip', []);
     fill('rxstrip', []);
@@ -478,10 +466,9 @@ function render(body) {
     cell('TIE max', fmt(body.receiver.tie_max_ns, 0, ' ns'),
          (body.receiver.tie_max_ns ?? 0) > 5000 ? 'warn' : ''),
     cell('TIE rms', fmt(body.receiver.tie_rms_ns, 0, ' ns')),
-    cell('Window', fmt(stab.adev_n, 0, ' s'), (stab.adev_n ?? 0) < 200 ? 'warn' : ''),
+    cell('Window', fmt(stab.rate_n, 0, ' s'), (stab.rate_n ?? 0) < 200 ? 'warn' : ''),
   ]);
-  $('adevnote').textContent = stab.adev_n ? `over ${fmt(stab.adev_n, 0)} s` : 'warming up';
-  drawAdev(stab.adev || []);
+  $('windownote').textContent = stab.rate_n ? `over ${fmt(stab.rate_n, 0)} s` : 'warming up';
 
   fill('sigstrip', [
     cell('C/N0 mean', fmt(body.signal.cn0_mean, 1, ' dBHz'), (body.signal.cn0_mean ?? 0) < 25 ? 'warn' : 'good'),
@@ -629,47 +616,9 @@ function render(body) {
 /* ADEV across seven octaves. Only the octaves the firmware sent are drawn: a
  * gap at the long end means the window has not filled, and plotting a zero
  * there would look like a measurement. */
-function drawAdev(values) {
-  const host = $('adevchart');
-  host.replaceChildren();
-  const pts = values.map((v, k) => [2 ** k, v]).filter(([, v]) => v != null && v > 0);
-  if (pts.length < 2) {
-    host.appendChild(Object.assign(document.createElement('div'),
-      { className: 'foot', textContent: 'no deviation yet' }));
-    return;
-  }
-  const W = 300, H = 140, L = 30, R = 8, T = 8, B = 20;
-  const lo = Math.max(0.1, Math.min(...pts.map(([, v]) => v)) / 2);
-  const hi = Math.max(...pts.map(([, v]) => v)) * 2;
-  const x = (tau) => L + (Math.log2(tau) / 6) * (W - L - R);
-  const y = (v) => T + (1 - (Math.log10(v) - Math.log10(lo)) /
-    (Math.log10(hi) - Math.log10(lo) || 1)) * (H - T - B);
-
-  const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}`, class: 'adev' });
-  for (const tick of [1, 10, 100, 1000, 10000]) {
-    if (tick < lo || tick > hi) continue;
-    svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(tick), y2: y(tick), class: 'grid' }));
-    svg.appendChild(Object.assign(svgEl('text', { x: L - 4, y: y(tick) + 3, class: 'axis' }),
-      { textContent: tick >= 1000 ? `${tick / 1000}k` : `${tick}` }));
-  }
-  for (const tau of [1, 4, 16, 64]) {
-    svg.appendChild(Object.assign(svgEl('text', { x: x(tau), y: H - 6, class: 'axis' }),
-      { textContent: `${tau}s` }));
-  }
-  svg.appendChild(svgEl('polyline', {
-    points: pts.map(([t, v]) => `${x(t).toFixed(1)},${y(v).toFixed(1)}`).join(' '),
-    class: 'adevline',
-  }));
-  for (const [t, v] of pts) {
-    svg.appendChild(svgEl('circle', { cx: x(t), cy: y(v), r: 2.5, class: 'adevdot' }));
-  }
-  host.appendChild(svg);
-}
-
-/* Long-span charts out of the log. Deliberately separate from drawAdev: that
- * one draws the firmware's live octaves over its 300 s fit, this one draws
- * whatever span is selected out of SQLite, and conflating them would let a
- * 7-day view look like a live measurement. */
+/* Long-span charts out of the log. The firmware used to compute its own ADEV
+ * over its 300 s fit and this page drew it; the host has the rows and can
+ * compute any averaging time now, so the firmware copy is gone. */
 let longSpan = 300;
 
 function longChart(host, points, key, unit, axis) {
@@ -798,7 +747,7 @@ async function renderSparks() {
     ['agc', 'AGC', '', '#c9a2ff'],
     ['cn0_mean', 'C/N0 mean', 'dBHz', '#3ddc84'],
     ['offset_ns', 'offset', 'ns', '#f5b83d'],
-    ['adev1s', 'ADEV 1 s', 'ppb', '#8fd694'],
+    ['rate_ppm', 'rate', 'ppm', '#8fd694'],
   ]) {
     const values = samples.map((s) => s[key]).filter((v) => v != null);
     const box = document.createElement('div');

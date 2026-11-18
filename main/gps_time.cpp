@@ -2991,11 +2991,7 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
          * refreshed inside fitRate(), which early-returns below its minimum, so
          * left alone it would sit at the old number for a minute. */
         portENTER_CRITICAL(&m_mux);
-        m_adevN       = 0;
         m_rateSamples = 0;
-        for (double &v : m_adevPpb) {
-            v = 0.0;
-        }
         portEXIT_CRITICAL(&m_mux);
         ESP_LOGW(TAG, "servo: %lld s without a reference, dropping the rate window",
                  static_cast<long long>(gapMs / 1000));
@@ -3014,11 +3010,7 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
         /* Same reason as the gap path: the published figures describe the old
          * window until fitRate() is allowed to run again. */
         portENTER_CRITICAL(&m_mux);
-        m_adevN       = 0;
         m_rateSamples = 0;
-        for (double &v : m_adevPpb) {
-            v = 0.0;
-        }
         portEXIT_CRITICAL(&m_mux);
         ESP_LOGW(TAG, "servo: %+lld ms step in the reference, refitting the rate",
                  static_cast<long long>(stepMs));
@@ -3131,62 +3123,6 @@ void GpsTime::fitRate()
         portENTER_CRITICAL(&m_mux);
         m_tieMaxNs = tieMax;
         m_tieRmsNs = residualNs;
-        portEXIT_CRITICAL(&m_mux);
-    }
-
-    /* Overlapping Allan deviation over the same window: the second difference
-     * of the phase, which is immune to a constant rate offset and so measures
-     * the reference's wander rather than its tuning. Phase is taken relative to
-     * the newest sample for the reason the fit is: the absolute offsets are
-     * 1.8e18 and a double resolves only ~256 ns there, so a second difference
-     * taken on them cancels to exactly zero -- measured on the host before it
-     * was believed.
-     *
-     * Overlapping, not disjoint: with a 300 s window, disjoint bins leave 4
-     * differences at 64 s and the estimate is worthless, while overlapping
-     * leaves 86. The bias that buys is small compared with the scatter it
-     * removes, and the octaves are read as a trend by eye, not as absolutes. */
-    /* The oldest live slot: when the ring is full this is the one about to be
-     * overwritten, and while it is filling the sequence has not wrapped. */
-    const int oldest = (m_rateNext + kRateWindow - m_rateCount) % kRateWindow;
-    for (int i = 0; i < m_rateCount; ++i) {
-        /* Oldest first. The fit above does not care about order -- its sums are
-         * over the same pairs either way -- but a second difference does, and
-         * once the ring wraps m_rate[i] is a rotated sequence. Read flat, the
-         * one seam joins the newest sample to the oldest 300 s away and the
-         * deviation comes out as the seam (509 000 ppb on the board, 503 967
-         * reproduced on the host), not the clock. */
-        const RateSample &s = m_rate[(oldest + i) % kRateWindow];
-        /* Time error: the reference's offset from the counter, not the offset
-         * itself. The counter's own rate comes out in the difference, which is
-         * what an Allan deviation is defined on. */
-        m_adevPhase[i] =
-            static_cast<double>((s.utcNs - base.utcNs) - (s.monoNs - base.monoNs));
-    }
-    int      octaves = 0;
-    for (int k = 0; k < Status::kAdevOctaves; ++k) {
-        const int m = 1 << k;
-        const int n = m_rateCount - 2 * m;
-        if (n < 16) {
-            break; /* fewer than 16 differences is noise, not a measurement */
-        }
-        double ss = 0.0;
-        for (int i = 0; i < n; ++i) {
-            const double d =
-                m_adevPhase[i + 2 * m] - 2.0 * m_adevPhase[i + m] + m_adevPhase[i];
-            ss += d * d;
-        }
-        /* d is nanoseconds and tau is m seconds, so the root is already
-         * nanoseconds per second: ppb, the unit it is published in. */
-        m_adevPpb[k] = std::sqrt(ss / (2.0 * m * m * n));
-        ++octaves;
-    }
-    {
-        portENTER_CRITICAL(&m_mux);
-        m_adevN = static_cast<uint16_t>(m_rateCount);
-        for (int k = octaves; k < Status::kAdevOctaves; ++k) {
-            m_adevPpb[k] = 0.0;
-        }
         portEXIT_CRITICAL(&m_mux);
     }
 
@@ -3397,10 +3333,6 @@ GpsTime::Status GpsTime::status() const
     st.rfCfg             = static_cast<uint8_t>(m_rfCfg);
     st.tieMaxNs          = m_tieMaxNs;
     st.tieRmsNs          = m_tieRmsNs;
-    st.adevN             = m_adevN;
-    for (int k = 0; k < Status::kAdevOctaves; ++k) {
-        st.adev[k] = m_adevPpb[k];
-    }
     {
         const uint32_t lo = systimer_ll_get_counter_value_low(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);
         const uint32_t hi = systimer_ll_get_counter_value_high(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);

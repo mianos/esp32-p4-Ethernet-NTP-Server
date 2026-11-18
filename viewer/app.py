@@ -208,6 +208,7 @@ class Poller:
                 "noise_dbm": num(info.get("noise_dbm")),
                 "agc": num(info.get("agc")),
                 "offset_ns": num(info.get("offset_ns")),
+                "rate_ppm": num(info.get("rate_ppm")),
                 "fix": num(health.get("gps_fix")),
                 "used": num(sats.get("used")),
                 # Cumulative since boot, so the delta over the window is what
@@ -220,7 +221,6 @@ class Poller:
                 "io_tx": num(info.get("io_tx_bytes")),
                 "skipped": num(info.get("msg_skipped")),
                 "ubx": num(info.get("msg_ubx")),
-                "adev1s": num(info.get("adev_1s")),
             }
         )
         self.recorder.sample(info, health)
@@ -566,10 +566,9 @@ def build(poller: Poller) -> dict[str, Any]:
             "io_hex": text(info.get("io_hex"), 300),
         },
         "stability": {
-            # The firmware publishes ppb per octave and withholds the whole set
-            # until it has 60 samples, so a missing key is "not yet", not zero.
-            "adev_n": integer(info.get("adev_n")),
-            "adev": [num(info.get(f"adev_{1 << k}s")) for k in range(7)],
+            # How many anchors the fit window holds. It is the servo's own
+            # state, and a window that keeps dropping back is a gap or a step.
+            "rate_n": integer(info.get("rate_n")),
         },
         "signal": {
             "ant": text(info.get("ant")),
