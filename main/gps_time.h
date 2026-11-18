@@ -481,6 +481,7 @@ public:
      * after something has cleared it. */
     void adoptTimeMode();
     void reassertFix();
+    bool startSurveyFromSettings();
     void restoreTimeMode();
     void saveTimeMode();
 

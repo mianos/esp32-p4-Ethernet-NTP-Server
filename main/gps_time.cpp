@@ -406,18 +406,40 @@ void GpsTime::restoreTimeMode()
             ESP_LOGW(TAG, "position hold restored from NVS");
             return;
         }
-    }
-    if (mode == "survey") {
-        unsigned long hours = 0;
-        unsigned long accMm = 0;
-        if (text::getList(settings.gpsSurvey(), ',', hours, accMm) && hours >= 2 && hours <= 48 &&
-            accMm >= 50 && accMm <= 60000) {
-            m_svinDurS  = hours * 3600;
-            m_svinAccMm = accMm;
-            m_svinCmd   = 1;
-            ESP_LOGW(TAG, "survey resumed from NVS: %lu h, %lu mm", hours, accMm);
+        /* The mode says fixed but the position did not survive. Falling out of
+         * this block used to leave the receiver holding nothing at all, because
+         * the survey arm below was gated on the mode being "survey" -- so the
+         * box came up moving, with no hold, and said nothing. The survey pair is
+         * still in NVS from the run the position was locked from, which is
+         * exactly what this case needs. */
+        ESP_LOGW(TAG, "time mode is fixed but no position survived: surveying instead");
+        if (!startSurveyFromSettings()) {
+            ESP_LOGW(TAG, "  and no survey parameters survived either: moving position");
         }
+        return;
     }
+    if (mode == "survey" && !startSurveyFromSettings()) {
+        ESP_LOGW(TAG, "time mode is survey but the parameters did not survive: moving position");
+    }
+}
+
+bool GpsTime::startSurveyFromSettings()
+{
+    /* Shared by the boot restore and the reset re-assert, which want the same
+     * thing for the same reason: an armed survey that outlives the RAM. The
+     * mode decision stays with the callers -- a stale pair must not start a
+     * survey on a box that was deliberately left moving. */
+    unsigned long hours = 0;
+    unsigned long accMm = 0;
+    if (!text::getList(Settings::instance().gpsSurvey(), ',', hours, accMm) || hours < 2 ||
+        hours > 48 || accMm < 50 || accMm > 60000) {
+        return false;
+    }
+    m_svinDurS  = hours * 3600;
+    m_svinAccMm = accMm;
+    m_svinCmd   = 1;
+    ESP_LOGW(TAG, "survey armed from NVS: %lu h, %lu mm", hours, accMm);
+    return true;
 }
 
 void GpsTime::reassertFix()
@@ -426,13 +448,12 @@ void GpsTime::reassertFix()
         /* Not a hold: a survey may be the thing that was wanted. Restarting it
          * loses its elapsed time, which is still better than a reset silently
          * ending a day's run. */
-        unsigned long hours = 0;
-        unsigned long accMm = 0;
-        if (Settings::instance().gpsTimeMode() == "survey" &&
-            text::getList(Settings::instance().gpsSurvey(), ',', hours, accMm)) {
-            m_svinDurS  = hours * 3600;
-            m_svinAccMm = accMm;
-            m_svinCmd   = 1;
+        /* A mode of "fixed" with nothing held counts here too: after a reset it
+         * may be the position that failed to come back, not the mode that was
+         * meant, and restoreTimeMode falls back for the same reason. */
+        const std::string &mode = Settings::instance().gpsTimeMode();
+        if ((mode == "survey" || (mode == "fixed" && !m_fixedValid)) &&
+            startSurveyFromSettings()) {
             ESP_LOGW(TAG, "survey restarted after the reset");
         }
         return;
