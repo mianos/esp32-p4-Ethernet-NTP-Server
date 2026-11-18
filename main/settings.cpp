@@ -17,8 +17,12 @@ constexpr const char *kNvsKey       = "config";
 
 /* The keys POST /config accepts. Anything else in the body is ignored, as it
  * always was. */
-constexpr const char *kKeys[] = {"hostname", "tz", "timeSource", "ntpServer", "serveNtp",
-                                 "logHost", "logPort"};
+/* Writable through POST /config. gpsFixedPos is here because a known antenna
+ * position should be provisioned rather than surveyed: it is the one input that
+ * lets the receiver stop solving for itself, which is what the interface
+ * description asks for before any timing claim. */
+constexpr const char *kKeys[] = {"hostname",  "tz",           "timeSource", "ntpServer",
+                                 "serveNtp",  "gpsFixedPos",  "logHost",    "logPort"};
 
 }  // namespace
 
