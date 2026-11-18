@@ -1111,7 +1111,11 @@ void GpsTime::task()
                  * again, on whatever rate that turns out to be. */
                 m_baudPrev            = m_baud;
                 m_baudRevertTo        = m_baud;
-                m_baudRevertAtUs      = esp_timer_get_time() + 2 * kFrameSilenceUs;
+                /* Four silence windows, not two. This module can take most of
+                 * ten seconds to answer at a new rate -- measured: it accepted
+                 * 115200, sent frames at 8.7 s, and had already been reverted at
+                 * 8.0 s, so the change looked like a failure and undid itself. */
+                m_baudRevertAtUs      = esp_timer_get_time() + 4 * kFrameSilenceUs;
                 m_baudRevertPending   = true;
                 uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
                 /* Acknowledged, not fire-and-forget: saving while the port
