@@ -64,7 +64,7 @@ without positions.
 
 | variable | default |
 |---|---|
-| `BOX_HOST` | `esp32p4-ntp.mianos.com` |
+| `BOX_HOST` | `esp32p4-ntp` |
 | `BOX_PORT` | `80` |
 | `POLL_S` | `2` |
 | `PORT` | `8765` (listener) |

@@ -31,7 +31,7 @@ from fastapi.responses import JSONResponse
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-BOX_HOST = os.environ.get("BOX_HOST", "esp32p4-ntp.mianos.com")
+BOX_HOST = os.environ.get("BOX_HOST", "esp32p4-ntp")
 BOX_PORT = int(os.environ.get("BOX_PORT", "80"))
 POLL_S = float(os.environ.get("POLL_S", "2"))
 HISTORY_S = 300  # seconds of sparkline, ~150 samples at the default interval
