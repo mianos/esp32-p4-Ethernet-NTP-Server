@@ -173,6 +173,8 @@ public:
         uint32_t timTpCount     = 0;
         bool     pulseOnSecond  = false;
         int64_t  pulseOffsetNs  = 0; /* where TIM-TP says the pulse sits, ns */
+        int32_t  pvtNanoNs      = 0; /* NAV-PVT's offset into its own second */
+        uint32_t pvtItowMs      = 0; /* the same instant, on the GPS time base */
 
         /* What the receiver says it is, from UBX-MON-VER, and which of this
          * firmware's two configuration messages it refused. An empty moduleId
@@ -735,6 +737,8 @@ private:
     double     m_tieRmsNs          = 0;
     double     m_adevPpb[Status::kAdevOctaves] = {};
     int64_t    m_pulseOffsetNs     = 0; /* where TIM-TP says the pulse sits */
+    int32_t    m_pvtNanoNs         = 0;
+    uint32_t   m_pvtItowMs         = 0;
     uint16_t   m_adevN             = 0;
     uint32_t   m_secFrames         = 0; /* frames in the current second */
     int64_t    m_secStartUs        = 0;

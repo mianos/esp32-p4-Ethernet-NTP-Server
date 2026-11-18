@@ -2400,6 +2400,8 @@ void GpsTime::onNavPvt(const ubx::Frame &f)
     m_timeValid  = haveTime;
     m_fixType    = fix;
     m_satellites = sats;
+    m_pvtNanoNs  = nano;
+    m_pvtItowMs  = f.u4(0);
     portEXIT_CRITICAL(&m_mux);
 
     if (!haveTime) {
@@ -2960,6 +2962,8 @@ GpsTime::Status GpsTime::status() const
     st.jitterNs          = m_jitterNs;
     st.pulseOnSecond     = m_pulseOnSecond;
     st.pulseOffsetNs     = m_pulseOffsetNs;
+    st.pvtNanoNs         = m_pvtNanoNs;
+    st.pvtItowMs         = m_pvtItowMs;
     st.tp5Rejected       = m_tp5Naked;
     st.timTpRejected     = m_timTpNaked;
     st.timTpAcked        = m_timTpAcked;

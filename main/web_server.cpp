@@ -566,6 +566,16 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
          * Constant here means every anchor, and so the served time, is shifted
          * by it; nothing downstream can see a constant. */
         doc.AddItem("tp_offset_ns", static_cast<double>(gps.pulseOffsetNs));
+        /* The solution's own offset into the second it names. If this tracks the
+         * disagreement with outside time, the receiver's UTC is displaced from
+         * its pulse and no amount of servo work can see it. */
+        doc.AddItem("pvt_nano_ns", static_cast<double>(gps.pvtNanoNs));
+        /* The same instant on the GPS time base. GPS and UTC differ only by
+         * whole leap seconds, so the fractional parts of this and of pvt_nano
+         * must agree: to within the solution, they are the same epoch. A
+         * disagreement is the receiver's UTC displaced from its own GNSS time,
+         * and that needs nothing outside the receiver to see. */
+        doc.AddItem("pvt_itow_ms", static_cast<double>(gps.pvtItowMs % 1000));
     }
 
     /* The servo's work counters, and the measurement-path half of the error
