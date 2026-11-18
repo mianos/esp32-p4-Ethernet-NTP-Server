@@ -571,6 +571,9 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("tp5_flags", static_cast<double>(gps.tp5Flags));
     doc.AddItem("tp5_period_us", static_cast<double>(gps.tp5PeriodUs));
     doc.AddItem("tp5_ratio", static_cast<double>(gps.tp5Ratio));
+    if (gps.rateCfg != 0) {
+        doc.AddItem("rate_cfg", gps.rateCfg == 1 ? "accepted" : "rejected");
+    }
     doc.AddItem("timtp_tim_replies", static_cast<double>(gps.timTpTimN));
     doc.AddItem("timtp_nav_replies", static_cast<double>(gps.timTpNavN));
     if (gps.timTpCount != 0) {

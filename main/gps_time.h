@@ -184,6 +184,7 @@ public:
         uint8_t  tosCfg         = 0;
         uint32_t timTpTimN      = 0; /* replies to the TIM spelling */
         uint32_t timTpNavN      = 0; /* replies to the NAV spelling */
+        uint8_t  rateCfg        = 0; /* CFG-RATE: 1 accepted, 2 rejected */
         int32_t  tp5CableNs     = 0; /* as the module holds them, not as sent */
         int32_t  tp5UserNs      = 0;
         uint32_t tp5Flags       = 0;
@@ -769,6 +770,7 @@ private:
     uint32_t   m_tosCount          = 0;
     uint32_t   m_timTpTimN         = 0;
     uint32_t   m_timTpNavN         = 0;
+    uint8_t    m_rateCfg           = 0;
     int32_t    m_tp5CableNs        = 0;
     int32_t    m_tp5UserNs         = 0;
     uint32_t   m_tp5Flags          = 0;

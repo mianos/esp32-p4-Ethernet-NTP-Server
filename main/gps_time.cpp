@@ -1634,6 +1634,24 @@ void GpsTime::configureModule()
      * one antenna-delay slot, not the antCableDelay/rfGroupDelay pair the
      * 36-byte M8 layout has, so a 32-byte frame is the whole message and the
      * delay is the first word of it. */
+    /* UBX-CFG-RATE (0x06 0x08): 1 Hz measurement, one measurement per
+     * navigation solution, UTC time reference. Never set here before -- the
+     * module's own default was left to apply -- and the interface description
+     * is explicit that "the rate of UBX-TIM-TP is bound to the measurement
+     * rate". In 0-D mode that binding is evidently what starves TIM-TP: the
+     * message stops entirely and even a poll goes unanswered, which is what
+     * cost a morning of blaming the receiver. Assert it rather than inherit it,
+     * and assert it before the pulse. */
+    {
+        constexpr uint8_t kRate[6] = {0xE8, 0x03, 0, 0, 0, 1}; /* 1000 ms, 1:1, UTC */
+        const int8_t rr = sendAndWait(0x06, 0x08, kRate, sizeof(kRate));
+        m_rateCfg = rr == 1 ? 1 : rr == 0 ? 2 : 0;
+        if (rr == 1) {
+            ESP_LOGI(TAG, "CFG-RATE accepted: 1 Hz measurement, UTC reference");
+        } else {
+            ESP_LOGW(TAG, "CFG-RATE %s", rr == 0 ? "rejected" : "unanswered");
+        }
+    }
     int8_t r = sendTp5();
     m_tp5Acked = r == 1;
     m_tp5Naked = r == 0;
@@ -3161,6 +3179,7 @@ GpsTime::Status GpsTime::status() const
     st.tosCfg            = static_cast<uint8_t>(m_tosCfg);
     st.timTpTimN         = m_timTpTimN;
     st.timTpNavN         = m_timTpNavN;
+    st.rateCfg           = static_cast<uint8_t>(m_rateCfg);
     st.tp5CableNs        = m_tp5CableNs;
     st.tp5UserNs         = m_tp5UserNs;
     st.tp5Flags          = m_tp5Flags;
