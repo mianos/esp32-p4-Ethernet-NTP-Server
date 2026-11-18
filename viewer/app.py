@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
@@ -146,35 +147,23 @@ class Poller:
     task: asyncio.Task[None] | None = None
     recorder: Recorder = field(default_factory=lambda: Recorder(DB_PATH))
 
-    async def _get(self, path: str) -> dict[str, Any] | None:
-        """GET through nc rather than through a socket library.
+    async def _get(self, path: str) -> dict[str, Any]:
+        """GET through httpx.
 
-        On this host, python and curl both fail to reach a LAN address with
-        EHOSTUNREACH while /usr/bin/nc connects fine -- curl and nc to the same
-        IP back to back, one always failing and the other always working, so it
-        is the binaries and not the network. Since nc is reliable here, the
-        poller uses it and the viewer keeps working regardless.
+        This used to shell out to nc: on the Mac python and curl both failed to
+        reach a LAN address with EHOSTUNREACH while nc worked, so nc was the
+        only thing that ran. On a container that quirk is gone, and every poll
+        was paying for a fork, so the client library does it now. The failure is
+        still a RuntimeError so the caller and the page need not know.
         """
-        # -N shuts the socket down once stdin ends, so nc exits when the box
-        # answers instead of sitting until -w expires. Without it every poll
-        # took the full 5 s timeout and the 1 s interval was really 5 s.
-        request = f"GET {path} HTTP/1.0\r\nHost: box\r\n\r\n".encode()
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "nc", "-N", "-w", "5", BOX_HOST, str(BOX_PORT),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(request), timeout=8.0)
-        except (OSError, asyncio.TimeoutError) as exc:
+            reply = await CLIENT.get(f"http://{BOX_HOST}:{BOX_PORT}{path}")
+        except httpx.HTTPError as exc:
             raise RuntimeError(f"{path}: {type(exc).__name__}") from exc
-
-        head, _, body = stdout.partition(b"\r\n\r\n")
-        if b" 200 " not in head.split(b"\r\n")[0]:
-            raise RuntimeError(f"{path}: no 200")
+        if reply.status_code != 200:
+            raise RuntimeError(f"{path}: {reply.status_code}")
         try:
-            decoded = json.loads(body)
+            decoded = reply.json()
         except ValueError as exc:
             raise RuntimeError(f"{path}: not JSON") from exc
         if not isinstance(decoded, dict):
@@ -636,6 +625,7 @@ def build(poller: Poller) -> dict[str, Any]:
 
 
 poller: Poller
+CLIENT = httpx.AsyncClient(timeout=8.0)
 
 
 @contextlib.asynccontextmanager
@@ -651,6 +641,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         poller.recorder.close()
+        await CLIENT.aclose()
         if poller.task:
             poller.task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

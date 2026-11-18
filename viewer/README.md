@@ -73,12 +73,15 @@ without positions.
 | `RECORD_S` | `1` — floor on the interval between rows |
 | `RETENTION_D` | `90` days |
 
-## Why nc and not a socket library
+## Why it used to shell out to nc
 
-On this host, python and curl both fail to reach a LAN address with
-`EHOSTUNREACH` while `/usr/bin/nc` connects fine — the two back to back, one
-always failing and the other always working. It is the binaries, not the
-network, so the poller shells out to `nc` and the viewer keeps working.
+On the Mac this was written on, python and curl both failed to reach a LAN
+address with `EHOSTUNREACH` while `/usr/bin/nc` connected fine — the two back
+to back, one always failing and the other always working. It was the binaries,
+not the network, so the poller shelled out to `nc`.
+
+On a container that quirk is gone and every poll was paying for a fork, so it
+uses `httpx` now. `nc` is no longer needed at runtime.
 
 ## Long-term samples, and adev.py
 
