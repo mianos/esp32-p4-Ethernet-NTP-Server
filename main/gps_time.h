@@ -189,6 +189,7 @@ public:
         uint32_t timTpTimN      = 0; /* replies to the TIM spelling */
         uint32_t timTpNavN      = 0; /* replies to the NAV spelling */
         uint8_t  rateCfg        = 0; /* CFG-RATE: 1 accepted, 2 rejected */
+        uint8_t  nav5Cfg        = 0; /* CFG-NAV5: 1 accepted, 2 rejected */
         int32_t  tp5CableNs     = 0; /* as the module holds them, not as sent */
         int32_t  tp5UserNs      = 0;
         uint32_t tp5Flags       = 0;
@@ -680,6 +681,7 @@ private:
     int64_t    m_timTpLastUs       = 0;
     bool       m_pulseOnSecondSeen = true;
     bool       m_tp5Acked          = false;
+    uint8_t    m_nav5Cfg           = 0; /* 0 unanswered, 1 accepted, 2 rejected */
     bool       m_tp5Naked          = false;
     bool       m_timTpNaked        = false;
     bool       m_timTpAcked        = false;

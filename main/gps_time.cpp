@@ -1682,6 +1682,38 @@ void GpsTime::configureModule()
             ESP_LOGW(TAG, "CFG-RATE %s", rr == 0 ? "rejected" : "unanswered");
         }
     }
+    /* UBX-CFG-NAV5 (0x06 0x24): dynamic model and UTC standard. Never set here
+     * either, and both defaults are wrong for this box.
+     *
+     * dynModel stays at 0 (portable), which tells a receiver on a mast that it
+     * may move; stationary (2) is what the timing products expect and is what
+     * stops the navigation filter chasing a solution that is only noise.
+     *
+     * utcStandard stays at 0 (automatic) while CFG-TP5 below asks for a
+     * UTC-aligned pulse. The datasheet is explicit that the standard "should be
+     * selected in CFG-NAV5 of which the receiver has knowledge" and that other
+     * selections "may result in relatively large timing uncertainties until the
+     * offset between GNSS time and the selected UTC becomes available". GPS is
+     * the one carried in the signals this box actually tracks, so it is the one
+     * that is known.
+     *
+     * Mask 0x0401 selects exactly those two fields, so a firmware default behind
+     * them cannot be clobbered by accident. Asserted before the pulse, so the
+     * UTC that the pulse is aligned to is already defined. */
+    {
+        uint8_t nav5[36] = {};
+        text::putLe(nav5 + 0, 0x0401u); /* mask: dynModel | utcStandard */
+        nav5[2]  = 2;                   /* dynModel: stationary */
+        nav5[30] = 3;                   /* utcStandard: UTC(USNO) from GPS */
+        const int8_t nr = sendAndWait(0x06, 0x24, nav5, sizeof(nav5));
+        m_nav5Cfg = nr == 1 ? 1 : nr == 0 ? 2 : 0;
+        if (nr == 1) {
+            ESP_LOGI(TAG, "CFG-NAV5 accepted: stationary platform, UTC from GPS");
+        } else {
+            ESP_LOGW(TAG, "CFG-NAV5 %s: dynamic model and UTC standard are defaults",
+                     nr == 0 ? "rejected" : "unanswered");
+        }
+    }
     int8_t r = sendTp5();
     m_tp5Acked = r == 1;
     m_tp5Naked = r == 0;
@@ -3248,6 +3280,7 @@ GpsTime::Status GpsTime::status() const
     st.timTpTimN         = m_timTpTimN;
     st.timTpNavN         = m_timTpNavN;
     st.rateCfg           = static_cast<uint8_t>(m_rateCfg);
+    st.nav5Cfg           = static_cast<uint8_t>(m_nav5Cfg);
     st.tp5CableNs        = m_tp5CableNs;
     st.tp5UserNs         = m_tp5UserNs;
     st.tp5Flags          = m_tp5Flags;

@@ -580,6 +580,11 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     if (gps.rateCfg != 0) {
         doc.AddItem("rate_cfg", gps.rateCfg == 1 ? "accepted" : "rejected");
     }
+    /* Dynamic model and UTC standard: both defaults are wrong for a mast, so
+     * whether the assertion took is part of what this endpoint answers. */
+    if (gps.nav5Cfg != 0) {
+        doc.AddItem("nav5_cfg", gps.nav5Cfg == 1 ? "accepted" : "rejected");
+    }
     doc.AddItem("timtp_tim_replies", static_cast<double>(gps.timTpTimN));
     doc.AddItem("timtp_nav_replies", static_cast<double>(gps.timTpNavN));
     if (gps.timTpCount != 0) {
