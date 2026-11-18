@@ -69,6 +69,9 @@ without positions.
 | `POLL_S` | `2` |
 | `PORT` | `8765` (listener) |
 | `BIND` | `127.0.0.1` |
+| `DB` | `samples.db` beside the code; empty disables writing |
+| `RECORD_S` | `1` — floor on the interval between rows |
+| `RETENTION_D` | `90` days |
 
 ## Why nc and not a socket library
 
@@ -76,6 +79,30 @@ On this host, python and curl both fail to reach a LAN address with
 `EHOSTUNREACH` while `/usr/bin/nc` connects fine — the two back to back, one
 always failing and the other always working. It is the binaries, not the
 network, so the poller shells out to `nc` and the viewer keeps working.
+
+## Long-term samples, and adev.py
+
+The sparkline keeps 300 s, which is what the firmware's own 300 s fit is over
+and therefore the most the live page can honestly draw. Anything longer needs
+storage, so the poller also appends one row a second to SQLite: `rate_ppm`,
+`offset_us`, `dispersion_us`, `timtp_flags`, fix, satellites and the last
+holdover. A failed poll writes a **gap row** rather than nothing, because
+interpolating across an outage invents stability at the longest averaging
+times, which is where nobody can check it by eye.
+
+`adev.py` reads that file and prints overlapping Allan deviation. Frequency by
+default, since the 1 µs stamp makes phase ADEV a picture of the timer below a
+minute; `--phase` gives the phase form for comparison. Gaps split the series
+into runs and no window spans a hole.
+
+```
+./adev.py --db samples.db --max-tau 86400
+./adev.py --db samples.db --phase --max-tau 600
+```
+
+Two things the numbers need beside them: with the servo running this measures
+the loop, not the crystal, and tau under 300 s is inside the fit window, so it
+reports smoothing rather than the oscillator.
 
 ## Notes
 

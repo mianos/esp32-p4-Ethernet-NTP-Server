@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import json
 import os
+import sqlite3
 import time
 from collections import deque
 from dataclasses import dataclass, field
@@ -38,6 +39,16 @@ HISTORY_S = 300  # seconds of sparkline, ~150 samples at the default interval
 RECENT_S = 300  # window over which a cumulative fault counter is judged
 MIN_BASELINE_S = 30  # below this much history, claim nothing
 
+# Long-term recording, which the sparkline's 300 s cannot serve. sqlite because
+# the geometry here is one writer, one reader later, and no server to run.
+# RECORD_S is a floor on the interval between rows, not a scheduler: the poller
+# already ticks at POLL_S and a row per poll is what the statistics want. A day
+# is 86 400 rows and about 5 MB, so RETENTION_D can be generous.
+DB_PATH = os.environ.get("DB", os.path.join(HERE, "samples.db"))
+RECORD_S = float(os.environ.get("RECORD_S", "1"))
+RETENTION_D = int(os.environ.get("RETENTION_D", "90"))
+PRUNE_S = 3600.0
+
 # gnssId as the receiver numbers it. 255 is the receiver's "no slot" value,
 # which shows up on the GLONASS rows here.
 GNSS = {0: "GPS", 1: "SBAS", 2: "Galileo", 3: "BeiDou", 4: "IMES", 5: "QZSS", 6: "GLONASS", 7: "NavIC"}
@@ -46,6 +57,71 @@ GNSS = {0: "GPS", 1: "SBAS", 2: "Galileo", 3: "BeiDou", 4: "IMES", 5: "QZSS", 6:
 FLAG_USED = 1 << 3
 FLAG_HEALTHY = 1 << 4
 FLAG_EPH = 1 << 8
+
+
+class Recorder:
+    """Append-only sample log, with the gaps written down as gaps.
+
+    The point of a gap row is that a failed poll is not the same as a clock
+    that did not move. Interpolating across an outage makes a clean-looking
+    series whose longest averaging times are fiction, so the writer says so and
+    the reader is left to drop the run.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.db: sqlite3.Connection | None = None
+        self.last_t = 0.0
+        self.next_prune = time.time() + PRUNE_S
+
+    def open(self) -> None:
+        if not self.path:
+            return
+        self.db = sqlite3.connect(self.path, isolation_level=None)
+        # WAL so the analysis can read while this keeps writing; NORMAL sync is
+        # enough because losing the last second of a stability series to a power
+        # cut costs one sample, not a file.
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS samples ("
+            " t REAL PRIMARY KEY, gap INTEGER NOT NULL,"
+            " rate_ppm REAL, offset_us REAL, dispersion_us REAL,"
+            " flags INTEGER, fix INTEGER, sats INTEGER, holdover_s REAL)"
+        )
+
+    def _insert(self, row: tuple[Any, ...]) -> None:
+        if self.db is None:
+            return
+        self.db.execute("INSERT OR REPLACE INTO samples VALUES (?,?,?,?,?,?,?,?,?)", row)
+        if time.time() >= self.next_prune:
+            self.next_prune = time.time() + PRUNE_S
+            self.db.execute("DELETE FROM samples WHERE t < ?", (time.time() - RETENTION_D * 86400.0,))
+
+    def sample(self, info: dict[str, Any], health: dict[str, Any]) -> None:
+        now = time.time()
+        if now - self.last_t < RECORD_S:
+            return
+        self.last_t = now
+        self._insert((
+            now, 0, num(info.get("rate_ppm")), num(info.get("offset_us")),
+            num(info.get("dispersion_us")), num(info.get("timtp_flags")),
+            num(health.get("gps_fix")), num(health.get("gps_sats")),
+            num(info.get("last_holdover_s")),
+        ))
+
+    def gap(self) -> None:
+        """A failed poll, or the box not answering."""
+        now = time.time()
+        if now - self.last_t < RECORD_S:
+            return
+        self.last_t = now
+        self._insert((now, 1, None, None, None, None, None, None, None))
+
+    def close(self) -> None:
+        if self.db is not None:
+            self.db.close()
+            self.db = None
 
 
 @dataclass
@@ -68,6 +144,7 @@ class Poller:
     failures: int = 0
     consecutive_failures: int = 0
     task: asyncio.Task[None] | None = None
+    recorder: Recorder = field(default_factory=lambda: Recorder(DB_PATH))
 
     async def _get(self, path: str) -> dict[str, Any] | None:
         """GET through nc rather than through a socket library.
@@ -114,6 +191,7 @@ class Poller:
             self.failures += 1
             self.consecutive_failures += 1
             self.error = str(exc)
+            self.recorder.gap()
             # Rebuilt on failure too, so a client that arrives mid-outage gets
             # the stale-but-honest view rather than the last good one silently.
             self.rebuild()
@@ -145,6 +223,7 @@ class Poller:
                 "adev1s": num(info.get("adev_1s")),
             }
         )
+        self.recorder.sample(info, health)
         # After the append: build() reads the history this poll just added.
         self.rebuild()
 
@@ -563,10 +642,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     if not BOX_HOST:
         raise SystemExit("BOX_HOST is empty")
     poller = Poller()
+    poller.recorder.open()
     poller.task = asyncio.create_task(poller.loop())
     try:
         yield
     finally:
+        poller.recorder.close()
         if poller.task:
             poller.task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
