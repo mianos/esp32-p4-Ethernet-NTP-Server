@@ -1271,24 +1271,25 @@ void GpsTime::task()
             if (cmd == 1) {
                 tm[0]    = 1; /* survey-in */
                 minDur   = m_svinDurS;
-                /* The limit is a *variance*, so it is squared -- and in mm
-                 * squared, even though the positions in the same message are in
-                 * centimetres. Mixed units, which is why this was got wrong
-                 * once in each direction. What settles it is behaviour rather
-                 * than a datasheet: this site's variance sits near 6.8e8, a
-                 * limit of 9e8 lets the survey finish and a limit of 9e6 never
-                 * does, so the two numbers are compared directly and direct
-                 * comparison of that magnitude is only millimetres. The cap
-                 * keeps the square inside a uint32 (60000^2 is 3.6e9). */
-                accLimit = m_svinAccMm * m_svinAccMm;
+                /* Millimetres, not millimetres squared. Both accuracy fields
+                 * in this message are plain mm with no scaling (spec R27 p.267);
+                 * everything the receiver says about its survey is a variance in
+                 * mm squared, so the square has to come off here. It used to go
+                 * on the wire squared: a 30 m limit was sent as 9e8 mm, i.e.
+                 * 900 km, which no site can fail. */
+                accLimit = m_svinAccMm;
             } else if (cmd == 3) {
                 /* ECEF from the receiver's own mean: it reports ECEF and takes
                  * ECEF, so staying in it avoids a projection between two things
-                 * that already agree. The accuracy goes in as the mean variance
-                 * the survey ended with, which is what the receiver itself uses
-                 * to decide how far to trust the position. */
+                 * that already agree. The accuracy is the mean's own standard
+                 * deviation, again in mm out of a variance in mm squared. This
+                 * is not decoration: the spec (R27 p.100) says the 3D accuracy
+                 * here "directly affects the accuracy of the timepulse", so a
+                 * variance of 1.4e7 sent raw told the receiver its position was
+                 * good to 14 000 km and put the stated pulse accuracy near 47 ms
+                 * -- which is the size of the errors that then went unnoticed. */
                 tm[0]    = 2; /* fixed */
-                fixedAcc = m_svinAcc;
+                fixedAcc = isqrt(m_svinAcc);
                 for (int i = 0; i < 3; ++i) {
                     text::putLe(tm + 4 + 4 * i, m_svinMean[i]);
                 }
@@ -1323,7 +1324,7 @@ void GpsTime::task()
                      * below what the receiver is already scattering can never
                      * be met and the survey will run the duration out. Say so
                      * at the start rather than 24 hours later. */
-                    if (m_svinAcc != 0 && m_svinAcc > accLimit) {
+                    if (m_svinAcc != 0 && isqrt(m_svinAcc) > accLimit) {
                         ESP_LOGW(TAG, "  the limit is tighter than this site scatters (%u mm "
                                       "now): expect it to run the full duration",
                                  static_cast<unsigned>(isqrt(m_svinAcc)));

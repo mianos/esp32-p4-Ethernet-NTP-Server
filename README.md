@@ -822,13 +822,25 @@ prefix is the tell: this is a TIM firmware, and the `onNavSvin` parser reads `du
 the mean position, `meanV` and `obs` from offsets confirmed against live frames
 rather than from a specification.
 
-`meanV` is a **variance in mm²**, not an accuracy in mm — and in millimetres even
-though the positions beside it in the same message are in **centimetres**. Mixed
-units: what settles the variance being millimetres is behaviour rather than a
-datasheet, since this site sits near 6.8e8 and a limit of 9e8 finishes a survey
-while 9e6 never can, so the two are compared directly. The API takes an accuracy in
-mm and squares it on the way in; the read-back roots it, and both `gps_svin_var_mm2`
-and `gps_svin_acc_mm` are published so a disagreement is visible.
+`meanV` is a **variance in mm²**, and the two accuracy fields of `CFG-TMODE2`
+(`fixedPosAcc`, `svinAccLimit`) are **plain mm with no scaling** — spec R27 p.267.
+So the square comes off on the way to the wire, even though the positions beside
+them in the same message are in **centimetres**.
+
+This was wrong for a while and behaviour could not settle it: a limit of 9e8 mm
+(900 km) finishes a survey and 9e6 mm (9 km) does not, which is true whether the
+field is read as mm or mm², so both readings passed the same test. The cost of the
+wrong one was not the survey limit but the fixed position: `fixedPosAcc` wants mm
+and was being sent the raw variance, so the receiver was told its antenna was known
+to **14 000 km** where the truth was 3 754 mm. The spec is explicit that this
+figure "directly affects the accuracy of the timepulse" (R27 p.100) — and in fixed
+mode it produced an unlocked pulse, no `TIM-TP`, and a clock that free-ran 133 ms in
+two and a half hours while stating 2.4 µs. With the field in mm the same lock holds
+inside 100 µs with `TIM-TP` arriving.
+
+The API still takes an accuracy in mm and squares it to keep the variance; the
+read-back roots it, and both `gps_svin_var_mm2` and `gps_svin_acc_mm` are published
+so a disagreement is visible.
 
 Changing the time mode while one is already running does not restart it — the
 duration keeps counting. `stop` then `start` is the way to begin again with
