@@ -55,6 +55,14 @@ constexpr uint32_t kBauds[] = {38400, 9600, 115200, 57600, 19200, 4800};
  * 16 bytes; only the class differs, and only this one is answered here. */
 constexpr uint8_t kTimTpEnable[8] = {0x0D, 0x01, 0, 1, 0, 0, 0, 0};
 
+/* UBX-TIM-TOS, same TIM family. "Only with Time & Frequency Sync products" per
+ * the interface description, so this may be refused -- but it is the only
+ * message that states the pulse's offset from the UTC top of second with an
+ * uncertainty, and whether the pulse is locked or coherently generated at all.
+ * A pulse that is not locked is expected to wander by milliseconds, which is
+ * the thing being chased. */
+constexpr uint8_t kTimTosEnable[8] = {0x0D, 0x12, 0, 1, 0, 0, 0, 0};
+
 /* How long one baud rate gets to produce a single valid UBX frame. */
 constexpr int64_t kScanAfterUs = 4000000;
 /* Silence that counts as a dead line rather than a quiet one. The receiver sends
@@ -1660,6 +1668,8 @@ void GpsTime::configureModule()
     /* NAV-TIM-TP needs protocol 15. This module acknowledges the enable and then
      * sends nothing, which is why the answer is recorded in three states rather
      * than two: "accepted" and "on the wire" are not the same thing. */
+    const int8_t tos = sendAndWait(0x06, 0x01, kTimTosEnable, sizeof(kTimTosEnable));
+    m_tosCfg = tos == 1 ? 1 : tos == 0 ? 2 : 0;
     r = sendAndWait(0x06, 0x01, kTimTpEnable, sizeof(kTimTpEnable));
     m_timTpAcked = r == 1;
     m_timTpNaked = r == 0;
@@ -1890,6 +1900,8 @@ void GpsTime::onFrame(const ubx::Frame &frame)
         onNavPvt(frame);
     } else if (cls == 0x01 && id == 0x26) { /* UBX-NAV-TIMELS */
         onNavTimels(frame);
+    } else if (cls == 0x0D && id == 0x12) { /* UBX-TIM-TOS */
+        onTimTos(frame);
     } else if ((cls == 0x0D && id == 0x01) || (cls == 0x01 && id == 0x27)) {
         /* TIM-TP, and the NAV spelling of it, in case another module answers
          * only that one. Same payload and same handler either way. */
@@ -2421,6 +2433,32 @@ void GpsTime::onNavPvt(const ubx::Frame &f)
     anchor(stamp);
 }
 
+void GpsTime::onTimTos(const ubx::Frame &f)
+{
+    /* 56 bytes: flags (X4) at 4, utcOffset (i4, ns) at 16, utcUncertainty (u4,
+     * ns) at 20. The flag order is the graphic's, so cohPulse and lockedPulse
+     * are the last two: bits 12 and 13. */
+    const uint32_t flags    = f.u4(4);
+    const int32_t  utcOff   = f.i4(16);
+    const uint32_t utcUnc   = f.u4(20);
+
+    portENTER_CRITICAL(&m_mux);
+    ++m_tosCount;
+    m_tosFlags     = flags;
+    m_tosUtcOffset = utcOff;
+    m_tosUtcUnc    = utcUnc;
+    portEXIT_CRITICAL(&m_mux);
+
+    if (!m_tosLogged) {
+        m_tosLogged = true;
+        ESP_LOGW(TAG, "TIM-TOS flowing: pulse %s, generation %s, %.3f us off the UTC second "
+                      "(+/- %.3f us)",
+                 (flags & (1u << 13)) != 0 ? "locked" : "NOT locked",
+                 (flags & (1u << 12)) != 0 ? "coherent" : "not coherent",
+                 static_cast<double>(utcOff) / 1e3, static_cast<double>(utcUnc) / 1e3);
+    }
+}
+
 void GpsTime::onNavTimels(const ubx::Frame &f)
 {
     /* 24 bytes, version 0, from the u-blox 8 interface description:
@@ -2468,8 +2506,10 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
      *    8 qErr (i4, picoseconds)
      *   12 week (u2)   14 flags (X1)   15 refInfo (u1)
      *
-     * The flags byte, bit 0: 0 = UTC time base, 1 = GPS. Bit 3 marks qErr
-     * invalid. The rest (utc, raim, refInfo) say nothing used here.
+     * The flags byte, bit 0: 0 = GNSS time base, 1 = UTC -- that way round per
+     * the u-blox 8/M8 receiver description, and this read it inverted until a
+     * timing question forced the manual open. Bit 3 marks qErr invalid. The
+     * rest (utc, raim, refInfo) say nothing used here.
      *
      * This is the receiver narrating its own pulse, and it is the only source
      * for two things this reference used to assume: how well the receiver knows
@@ -2487,7 +2527,7 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     const int32_t  qErrPs    = f.i4(8);
     const uint8_t  flags     = f.u8(14);
 
-    const bool utcBase     = (flags & 0x01) == 0;
+    const bool gnssBase    = (flags & 0x01) == 0;
     const bool qErrInvalid = (flags & 0x08) != 0;
 
     /* Where in the second the pulse sits, in nanoseconds: a UTC-aligned 1 Hz
@@ -2503,7 +2543,11 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     if (msIntoSecond == 999) {
         offsetNs -= 1000000000;
     }
-    const bool onSecond = utcBase && offsetNs > -2000000 && offsetNs < 2000000;
+    /* About the position alone, not the base: a GNSS-base pulse sits at the
+     * same instant as a UTC one -- the labels differ by whole leap seconds, and
+     * whole seconds are already handled by pairing the frame's second with the
+     * edge. Requiring UTC here marked a perfectly placed pulse as off. */
+    const bool onSecond = offsetNs > -2000000 && offsetNs < 2000000;
 
     int32_t qErrNs = qErrPs / 1000;
     if (qErrNs < 0) {
@@ -2524,6 +2568,7 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     m_qErrValid     = !qErrInvalid;
     m_pulseOnSecond = onSecond;
     m_pulseOffsetNs = offsetNs;
+    m_timTpFlags    = flags;
     portEXIT_CRITICAL(&m_mux);
 
     /* Once, so the log says which regime this board is in: a measured
@@ -2545,7 +2590,7 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
         if (m_pulseOnSecondSeen) {
             ESP_LOGW(TAG, "timepulse is %.3f ms off the UTC second (%s base): every anchor is "
                           "shifted with it", static_cast<double>(offsetNs) / 1e6,
-                     utcBase ? "UTC" : "GPS");
+                     gnssBase ? "GNSS" : "UTC");
         }
     } else if (!m_pulseOnSecondSeen) {
         ESP_LOGI(TAG, "timepulse back on the UTC second");
@@ -2964,6 +3009,11 @@ GpsTime::Status GpsTime::status() const
     st.pulseOffsetNs     = m_pulseOffsetNs;
     st.pvtNanoNs         = m_pvtNanoNs;
     st.pvtItowMs         = m_pvtItowMs;
+    st.timTpFlags        = m_timTpFlags;
+    st.tosFlags          = m_tosFlags;
+    st.tosUtcOffsetNs    = m_tosUtcOffset;
+    st.tosUtcUncNs       = m_tosUtcUnc;
+    st.tosCfg            = static_cast<uint8_t>(m_tosCfg);
     st.tp5Rejected       = m_tp5Naked;
     st.timTpRejected     = m_timTpNaked;
     st.timTpAcked        = m_timTpAcked;

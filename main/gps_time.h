@@ -175,6 +175,13 @@ public:
         int64_t  pulseOffsetNs  = 0; /* where TIM-TP says the pulse sits, ns */
         int32_t  pvtNanoNs      = 0; /* NAV-PVT's offset into its own second */
         uint32_t pvtItowMs      = 0; /* the same instant, on the GPS time base */
+        uint8_t  timTpFlags     = 0; /* timeBase and qErrInvalid live here */
+        /* TIM-TOS: the pulse against the UTC top of second, with an
+         * uncertainty, and whether it is locked at all. */
+        uint32_t tosFlags       = 0;
+        int32_t  tosUtcOffsetNs = 0;
+        uint32_t tosUtcUncNs    = 0;
+        uint8_t  tosCfg         = 0;
 
         /* What the receiver says it is, from UBX-MON-VER, and which of this
          * firmware's two configuration messages it refused. An empty moduleId
@@ -523,6 +530,7 @@ private:
     void onNavPvt(const ubx::Frame &f);
     void onNavTimels(const ubx::Frame &f);
     void onNavTimTp(const ubx::Frame &f);
+    void onTimTos(const ubx::Frame &f);
     void onMonVer(const ubx::Frame &f);
     void onMonHw(const ubx::Frame &f);
     void onNavSat(const ubx::Frame &f);
@@ -739,6 +747,13 @@ private:
     int64_t    m_pulseOffsetNs     = 0; /* where TIM-TP says the pulse sits */
     int32_t    m_pvtNanoNs         = 0;
     uint32_t   m_pvtItowMs         = 0;
+    uint8_t    m_timTpFlags        = 0;
+    uint32_t   m_tosFlags          = 0;
+    int32_t    m_tosUtcOffset      = 0;
+    uint32_t   m_tosUtcUnc         = 0;
+    uint8_t    m_tosCfg            = 0;
+    uint32_t   m_tosCount          = 0;
+    bool       m_tosLogged         = false;
     uint16_t   m_adevN             = 0;
     uint32_t   m_secFrames         = 0; /* frames in the current second */
     int64_t    m_secStartUs        = 0;

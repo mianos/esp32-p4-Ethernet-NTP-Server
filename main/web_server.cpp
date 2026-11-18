@@ -557,6 +557,15 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
      * (this one does). qErr and onSecond genuinely need TIM-TP; the jitter does
      * not, so it stands alone. */
     doc.AddItem("tp_jitter_ns", static_cast<double>(gps.jitterNs));
+    if (gps.tosCfg != 0) {
+        doc.AddItem("tos_cfg", gps.tosCfg == 1 ? "accepted" : "rejected");
+    }
+    if (gps.tosFlags != 0) {
+        doc.AddItem("tos_locked", (gps.tosFlags & (1u << 13)) != 0);
+        doc.AddItem("tos_coherent", (gps.tosFlags & (1u << 12)) != 0);
+        doc.AddItem("tos_utc_offset_ns", static_cast<double>(gps.tosUtcOffsetNs));
+        doc.AddItem("tos_utc_unc_ns", static_cast<double>(gps.tosUtcUncNs));
+    }
     if (gps.timTpCount != 0) {
         if (gps.qErrValid) {
             doc.AddItem("tp_qerr_ns", static_cast<double>(gps.qErrNs));
@@ -576,6 +585,8 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
          * disagreement is the receiver's UTC displaced from its own GNSS time,
          * and that needs nothing outside the receiver to see. */
         doc.AddItem("pvt_itow_ms", static_cast<double>(gps.pvtItowMs % 1000));
+        /* bit 0 time base (0 = GNSS, 1 = UTC), bit 3 qErr invalid. */
+        doc.AddItem("timtp_flags", static_cast<double>(gps.timTpFlags));
     }
 
     /* The servo's work counters, and the measurement-path half of the error
