@@ -155,10 +155,13 @@ class Poller:
         is the binaries and not the network. Since nc is reliable here, the
         poller uses it and the viewer keeps working regardless.
         """
+        # -N shuts the socket down once stdin ends, so nc exits when the box
+        # answers instead of sitting until -w expires. Without it every poll
+        # took the full 5 s timeout and the 1 s interval was really 5 s.
         request = f"GET {path} HTTP/1.0\r\nHost: box\r\n\r\n".encode()
         try:
             proc = await asyncio.create_subprocess_exec(
-                "nc", "-w", "5", BOX_HOST, str(BOX_PORT),
+                "nc", "-N", "-w", "5", BOX_HOST, str(BOX_PORT),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
