@@ -566,6 +566,8 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
         doc.AddItem("tos_utc_offset_ns", static_cast<double>(gps.tosUtcOffsetNs));
         doc.AddItem("tos_utc_unc_ns", static_cast<double>(gps.tosUtcUncNs));
     }
+    doc.AddItem("timtp_tim_replies", static_cast<double>(gps.timTpTimN));
+    doc.AddItem("timtp_nav_replies", static_cast<double>(gps.timTpNavN));
     if (gps.timTpCount != 0) {
         if (gps.qErrValid) {
             doc.AddItem("tp_qerr_ns", static_cast<double>(gps.qErrNs));

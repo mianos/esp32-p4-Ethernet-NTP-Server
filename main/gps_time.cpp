@@ -1014,7 +1014,27 @@ void GpsTime::task()
             m_decoder.feed(std::span(buf, static_cast<std::size_t>(got > 0 ? got : 0)));
         }
 
+        /* TIM-TP is only produced while the receiver is surveying.
+         *
+         * This cost a morning. In fixed (time) mode the M8T acknowledges the
+         * rate, answers a poll with nothing, and emits no frame at all -- for
+         * hours, across reboots, a power reset and a configuration default
+         * clear. Back in survey mode it returns at 1 Hz immediately (42 replies
+         * against 0). NAV-TIM-TP, the same bytes under class 0x01, is never
+         * answered on this part at all, so it is polled too rather than assumed.
+         *
+         * A poll is asked for once a second because the rate is not honoured
+         * even when the message does flow. Sixteen bytes back; the reply arrives
+         * as a normal frame and lands in onNavTimTp. The consequence worth
+         * knowing: the pulse statement and qErr are available in the mode that
+         * is *worse* for timing, and absent in the mode that is better. */
         const int64_t nowUs = esp_timer_get_time();
+        if (m_timTpCfg == 1 && nowUs - m_timTpPolledUs >= 1000000) {
+            m_timTpPolledUs = nowUs;
+            sendUbx(0x0D, 0x01, nullptr, 0);
+            sendUbx(0x01, 0x27, nullptr, 0);
+        }
+
         /* The scan used to run only until the first frame of the boot, so a rate
          * set from the bridge -- or by anything else that moved the module --
          * wedged the line until the next power cycle. Silence now re-arms it. A
@@ -1670,7 +1690,13 @@ void GpsTime::configureModule()
      * than two: "accepted" and "on the wire" are not the same thing. */
     const int8_t tos = sendAndWait(0x06, 0x01, kTimTosEnable, sizeof(kTimTosEnable));
     m_tosCfg = tos == 1 ? 1 : tos == 0 ? 2 : 0;
+    /* Rate zero, then poll it: see the poll in task(). The rate is still asked
+     * for, because a module that honours it saves the poll. */
     r = sendAndWait(0x06, 0x01, kTimTpEnable, sizeof(kTimTpEnable));
+    /* Armed whether or not it was acknowledged: the answer to the enable has
+     * been everything from an ACK to nothing at all on this module, and a poll
+     * is the same request with no rate attached. */
+    m_timTpCfg   = 1;
     m_timTpAcked = r == 1;
     m_timTpNaked = r == 0;
     if (r == 0) {
@@ -1903,6 +1929,14 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     } else if (cls == 0x0D && id == 0x12) { /* UBX-TIM-TOS */
         onTimTos(frame);
     } else if ((cls == 0x0D && id == 0x01) || (cls == 0x01 && id == 0x27)) {
+        /* Counted apart: the two spellings are the same sixteen bytes, and
+         * which one a module answers is the whole question on a part that has
+         * gone quiet on both rates. */
+        if (cls == 0x0D) {
+            ++m_timTpTimN;
+        } else {
+            ++m_timTpNavN;
+        }
         /* TIM-TP, and the NAV spelling of it, in case another module answers
          * only that one. Same payload and same handler either way. */
         onNavTimTp(frame);
@@ -3014,6 +3048,8 @@ GpsTime::Status GpsTime::status() const
     st.tosUtcOffsetNs    = m_tosUtcOffset;
     st.tosUtcUncNs       = m_tosUtcUnc;
     st.tosCfg            = static_cast<uint8_t>(m_tosCfg);
+    st.timTpTimN         = m_timTpTimN;
+    st.timTpNavN         = m_timTpNavN;
     st.tp5Rejected       = m_tp5Naked;
     st.timTpRejected     = m_timTpNaked;
     st.timTpAcked        = m_timTpAcked;

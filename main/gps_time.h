@@ -182,6 +182,8 @@ public:
         int32_t  tosUtcOffsetNs = 0;
         uint32_t tosUtcUncNs    = 0;
         uint8_t  tosCfg         = 0;
+        uint32_t timTpTimN      = 0; /* replies to the TIM spelling */
+        uint32_t timTpNavN      = 0; /* replies to the NAV spelling */
 
         /* What the receiver says it is, from UBX-MON-VER, and which of this
          * firmware's two configuration messages it refused. An empty moduleId
@@ -752,7 +754,11 @@ private:
     int32_t    m_tosUtcOffset      = 0;
     uint32_t   m_tosUtcUnc         = 0;
     uint8_t    m_tosCfg            = 0;
+    uint8_t    m_timTpCfg          = 0;
+    int64_t    m_timTpPolledUs     = 0;
     uint32_t   m_tosCount          = 0;
+    uint32_t   m_timTpTimN         = 0;
+    uint32_t   m_timTpNavN         = 0;
     bool       m_tosLogged         = false;
     uint16_t   m_adevN             = 0;
     uint32_t   m_secFrames         = 0; /* frames in the current second */
