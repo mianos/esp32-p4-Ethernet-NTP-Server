@@ -56,7 +56,7 @@ PRUNE_S = 3600.0
 # reply is reused for LONG_CACHE_S rather than recomputed per view.
 LONG_BUCKETS = 600
 LONG_CACHE_S = 30.0
-LONG_SPANS = (3600, 21600, 86400, 604800)
+LONG_SPANS = (300, 3600, 21600, 86400, 604800)
 
 # gnssId as the receiver numbers it. 255 is the receiver's "no slot" value,
 # which shows up on the GLONASS rows here.

@@ -173,13 +173,14 @@
 
   <div>
     <div class="panel">
-      <h2>Stability <span class="muted" id="adevnote"></span></h2>
+      <h2>Stability, firmware window <span class="muted" id="adevnote"></span></h2>
       <div class="strip" id="tiestrip"></div>
       <div id="adevchart" style="margin-top:10px"></div>
-      <div class="foot" style="margin-top:6px">overlapping Allan deviation over the
-        300 s rate window: ppb against averaging time, log-log. Down and to the
-        right is better; a rising tail is drift, and points short of the window
-        are withheld.</div>
+      <div class="foot" style="margin-top:6px">The box's own ADEV over its 300 s
+        rate window, as it computes it: ppb against averaging time, log-log. Down
+        and to the right is better; a rising tail is drift, and points short of
+        the window are withheld. The same octaves from our own rows are in Long
+        term at 5 min, so the two disagreeing is a bug in one of them.</div>
     </div>
 
     <div class="panel">
@@ -669,7 +670,7 @@ function drawAdev(values) {
  * one draws the firmware's live octaves over its 300 s fit, this one draws
  * whatever span is selected out of SQLite, and conflating them would let a
  * 7-day view look like a live measurement. */
-let longSpan = 3600;
+let longSpan = 300;
 
 function longChart(host, points, key, unit, axis) {
   host.replaceChildren();
@@ -756,7 +757,7 @@ async function renderLong() {
     const response = await fetch(`/api/long?span=${longSpan}`);
     payload = await response.json();
   } catch { return; }
-  const label = { 3600: '1 h', 21600: '6 h', 86400: '24 h', 604800: '7 d' }[longSpan] || `${longSpan} s`;
+  const label = { 300: '5 min', 3600: '1 h', 21600: '6 h', 86400: '24 h', 604800: '7 d' }[longSpan] || `${longSpan} s`;
   $('longnote').textContent = `last ${label}, ${payload.rows ?? 0} samples`;
   longChart($('longoff'), payload.series || [], 'off', 'us', 'offset, us (band = min..max)');
   longChart($('longrate'), payload.series || [], 'rate', 'ppm', 'servo rate, ppm (band = min..max)');
@@ -766,7 +767,7 @@ async function renderLong() {
 function buildSpans() {
   const host = $('longspans');
   host.replaceChildren();
-  for (const [span, label] of [[3600, '1 h'], [21600, '6 h'], [86400, '24 h'], [604800, '7 d']]) {
+  for (const [span, label] of [[300, '5 min'], [3600, '1 h'], [21600, '6 h'], [86400, '24 h'], [604800, '7 d']]) {
     const button = document.createElement('button');
     button.textContent = label;
     button.className = span === longSpan ? 'on' : '';
