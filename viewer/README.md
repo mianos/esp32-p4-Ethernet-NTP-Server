@@ -84,7 +84,8 @@ network, so the poller shells out to `nc` and the viewer keeps working.
 
 The sparkline keeps 300 s, which is what the firmware's own 300 s fit is over
 and therefore the most the live page can honestly draw. Anything longer needs
-storage, so the poller also appends one row a second to SQLite: `rate_ppm`,
+storage, so the poller also appends a row per poll to SQLite (default 2 s):
+`rate_ppm`,
 `offset_us`, `dispersion_us`, `timtp_flags`, fix, satellites and the last
 holdover. A failed poll writes a **gap row** rather than nothing, because
 interpolating across an outage invents stability at the longest averaging
