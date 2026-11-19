@@ -460,6 +460,21 @@ public:
      * and pays for them only on the one endpoint that wants them. */
     uint8_t copySats(Sat *out, uint8_t max) const;
 
+    /* The scalars a reply needs and nothing else. status() assembles nine
+     * std::strings for the HTTP side; the responder was paying for all of them
+     * between its two stamps, which measured 250 us of allocation inside the
+     * T2..T3 window. Same gate logic, evaluated here rather than copied. */
+    struct ReplyFacts {
+        bool     locked       = false;
+        uint8_t  stratum      = 16;
+        uint32_t refId        = 0;
+        time_t   lastSync     = 0;
+        uint8_t  leap         = 0;
+        uint32_t rootDelayNs  = 0;
+        uint32_t dispersionNs = 0;
+    };
+    ReplyFacts replyFacts() const;
+
     /* The anchor plus elapsed monotonic time. False when no edge has been
      * paired with a NAV-PVT yet, which is what the reference turns into
      * "not locked". */
@@ -630,6 +645,25 @@ private:
 
     /* Drop the rate fit and seed it again from the next edge. */
     void resetRateWindow();
+
+    /* Everything the lock decision depends on, so that status() and
+     * replyFacts() can share one implementation of it -- including the
+     * per-edge debounce, which must advance once per edge whichever caller
+     * arrives first. */
+    struct LockInputs {
+        bool     anchored   = false;
+        bool     timeValid  = false;
+        uint8_t  fixType    = 0;
+        int64_t  ppsAgeUs   = -1;
+        bool     trusted    = true;
+        int64_t  offsetNs   = 0;
+        bool     rateKnown  = false;
+        double   tieMaxNs   = 0;
+        uint8_t  jamState   = 0;
+        uint32_t ppsCount   = 0;
+        int64_t  lockWindowUs = 0;
+    };
+    bool evaluateLock(const LockInputs &in) const;
 
     /* The stated error budget, in ns. rootDelayNs() is the measurement path --
      * the named interrupt latency plus half the receiver's own pulse

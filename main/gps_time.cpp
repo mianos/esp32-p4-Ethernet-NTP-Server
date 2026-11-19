@@ -111,6 +111,17 @@ constexpr int64_t kHoldoverWindowUs = 600000000;
  * stays a named constant rather than a fiction of zero. */
 constexpr int64_t kIsrLatencyNs = 2000;
 
+/* The receive side of the same budget, and unlike the pulse it is named rather
+ * than measured. T2 is taken after recvfrom() returns -- lwIP has no
+ * SO_TIMESTAMP -- so the scheduler wake, the syscall and the copy all sit
+ * between the datagram landing and the stamp: tens of microseconds, halved into
+ * what clients are told. (Baumart's server names 1 ms for the same thing over
+ * SPI polled at 1 kHz; the P4 has no SPI in the path and wakes the task
+ * directly.) 50 us is the honest order of it and deliberately generous: the
+ * arrival stamp is the largest unmeasured term left, and the one hardware
+ * stamping would remove. */
+constexpr int64_t kReceiveLagNs = 50000;
+
 /* Bounds on what TIM-TP may claim, so a nonsense frame cannot turn into a
  * 10 ms root delay in an answer to a client: a receiver that knows its pulse
  * worse than 5 us is not doing this job, and a spread wider than 20 us is a load
@@ -3117,10 +3128,12 @@ void GpsTime::anchor(time_t second)
 
 int64_t GpsTime::rootDelayNs() const
 {
-    /* The named interrupt latency, plus half the receiver's stated pulse
-     * quantisation: half because the sawtooth is uniform over the step and a
-     * bound is about the worst case from the middle of it. */
-    return kIsrLatencyNs + (m_qErrValid ? m_qErrNs / 2 : 0);
+    /* Three terms, all of them about where the two stamps come from: the
+     * interrupt latency of the pulse capture, the lag of the receive stamp
+     * behind the datagram, and half the receiver's stated pulse quantisation --
+     * half because the sawtooth is uniform over the step and a bound is about
+     * the worst case from the middle of it. */
+    return kIsrLatencyNs + kReceiveLagNs + (m_qErrValid ? m_qErrNs / 2 : 0);
 }
 
 int64_t GpsTime::unobservedNs() const
@@ -3519,6 +3532,62 @@ uint8_t GpsTime::copySats(Sat *out, uint8_t max) const
     return n;
 }
 
+bool GpsTime::evaluateLock(const LockInputs &in) const
+{
+    /* Lock needs all three: a fix to trust the date, a valid NAV-PVT to know
+     * which second, and an edge recent enough that the clock is still being
+     * corrected. Fix type 2 is the floor -- "time-only" (5) dates the second but
+     * does not put the receiver anywhere, and this reference does not want to
+     * explain that difference in its stratum. */
+    if (!(in.anchored && in.timeValid && in.fixType >= 2 && in.ppsAgeUs >= 0 &&
+          in.ppsAgeUs < in.lockWindowUs)) {
+        return false;
+    }
+
+    /* Age is not enough on its own: it says an edge arrived, not that the clock
+     * is being held where it belongs. Further tests, each of which demotes to
+     * stratum 16 rather than serving on a claim that has stopped being true:
+     *
+     *  - the newest edge passed the trust test. A pulse that was corrupt, or a
+     *    second that did not advance, means this second's anchor is a guess;
+     *  - the receiver is not reporting critical jamming. Not gated on freshness:
+     *    a jammed front end can hold a fix and keep emitting a pulse while the
+     *    solution underneath it drifts, so the pulse still looks regular. MON-HW
+     *    carries the state and this module does not send it, so on this board
+     *    the test is dormant -- taken from Baumart's server, which demotes on it
+     *    unconditionally;
+     *  - while the edge is fresh, the phase sits inside the band. A servo still
+     *    ringing out from a step has edges arriving perfectly and an offset in
+     *    the hundreds of milliseconds;
+     *  - while the edge is fresh and a rate is known, the fit's worst residual
+     *    is inside the jitter bound. That is the slope test: a window assembled
+     *    across a fault fits a line through noise, and the residual is what
+     *    gives it away. Skipped in a holdover, where the phase is not measured
+     *    at all and the residual is by definition the gap.
+     *
+     * The offset and residual tests wait until a rate exists, so the first
+     * minute still locks on a fresh, trusted edge as it always did. */
+    const bool fresh = in.ppsAgeUs <= kLockWindowUs;
+    const bool bad   = !in.trusted || in.jamState == 3 ||
+                     (fresh && (in.offsetNs > kLockOffsetNs || in.offsetNs < -kLockOffsetNs)) ||
+                     (fresh && in.rateKnown && in.tieMaxNs > kLockTieMaxNs);
+
+    /* Debounced per edge, not per call: this runs on every reply and every
+     * health poll, so a counter advanced per call would saturate inside a
+     * second. m_gateLastPps makes it one vote per edge. A single glitched pulse,
+     * or one sample outside the band on its way back from a step, is then not
+     * worth a demotion and a relock line -- three consecutive seconds is. */
+    uint32_t badFor = 0;
+    portENTER_CRITICAL(&m_mux);
+    if (m_gateLastPps != in.ppsCount) {
+        m_gateLastPps = in.ppsCount;
+        m_gateBad     = bad ? m_gateBad + 1 : 0;
+    }
+    badFor = m_gateBad;
+    portEXIT_CRITICAL(&m_mux);
+    return badFor < kGateStreak;
+}
+
 GpsTime::Status GpsTime::status() const
 {
     Status   st;
@@ -3786,55 +3855,22 @@ GpsTime::Status GpsTime::status() const
     st.lockWindowUs = (rateKnown && st.timeValid && st.fixType >= 2) ? kHoldoverWindowUs
                                                                     : kLockWindowUs;
 
-    /* Lock needs all three: a fix to trust the date, a valid NAV-PVT to know
-     * which second, and an edge recent enough that the clock is still being
-     * corrected. Fix type 2 is the floor -- "time-only" (5) dates the second but
-     * does not put the receiver anywhere, and this reference does not want to
-     * explain that difference in its stratum. */
-    st.locked = st.anchored && st.timeValid && st.fixType >= 2 && st.ppsAgeUs >= 0 &&
-                st.ppsAgeUs < st.lockWindowUs;
-
-    /* Age is not enough on its own: it says an edge arrived, not that the clock
-     * is being held where it belongs. Three further tests, and each of them
-     * demotes to stratum 16 rather than serving on a claim that has stopped
-     * being true:
-     *
-     *  - the newest edge passed the trust test. A pulse that was corrupt, or a
-     *    second that did not advance, means this second's anchor is a guess;
-     *  - while the edge is fresh, the phase sits inside the band. A servo still
-     *    ringing out from a step has edges arriving perfectly and an offset in
-     *    the hundreds of milliseconds;
-     *  - while the edge is fresh and a rate is known, the fit's worst residual
-     *    is inside the jitter bound. That is the slope test: a window assembled
-     *    across a fault fits a line through noise, and the residual is what
-     *    gives it away. It is skipped in a holdover, where the phase is not
-     *    measured at all and the residual is by definition the gap.
-     *
-     * The offset and residual tests are skipped until a rate exists, so the
-     * first minute still locks on a fresh, trusted edge as it always did. */
-    if (st.locked) {
-        const bool fresh = st.ppsAgeUs <= kLockWindowUs;
-        const bool bad   = !st.lastEdgeTrusted ||
-                         (fresh && (st.offsetNs > kLockOffsetNs || st.offsetNs < -kLockOffsetNs)) ||
-                         (fresh && rateKnown && st.tieMaxNs > kLockTieMaxNs);
-
-        /* Debounced per edge, not per call: status() runs on every reply and
-         * every health poll, so a counter advanced here would saturate inside
-         * one second. m_gateLastPps makes it one vote per edge. A single
-         * glitched pulse, or one sample outside the band on its way back from a
-         * step, is then not worth a demotion and a relock line -- three
-         * consecutive seconds of it is. */
-        portENTER_CRITICAL(&m_mux);
-        if (m_gateLastPps != st.ppsCount) {
-            m_gateLastPps = st.ppsCount;
-            m_gateBad     = bad ? m_gateBad + 1 : 0;
-        }
-        const uint32_t badFor = m_gateBad;
-        portEXIT_CRITICAL(&m_mux);
-        if (badFor >= kGateStreak) {
-            st.locked = false;
-        }
-    }
+    /* The gate itself, and why each test is there, lives in evaluateLock(); it
+     * carries the per-edge debounce too, which is why replyFacts() shares it
+     * rather than repeating the predicates. */
+    LockInputs in;
+    in.anchored     = st.anchored;
+    in.timeValid    = st.timeValid;
+    in.fixType      = st.fixType;
+    in.ppsAgeUs     = st.ppsAgeUs;
+    in.trusted      = st.lastEdgeTrusted;
+    in.offsetNs     = st.offsetNs;
+    in.rateKnown    = rateKnown;
+    in.tieMaxNs     = st.tieMaxNs;
+    in.jamState     = st.jamState;
+    in.ppsCount     = st.ppsCount;
+    in.lockWindowUs = st.lockWindowUs;
+    st.locked       = evaluateLock(in);
 
     if (st.locked) {
         /* What this reference states about itself, and where each term comes
@@ -4069,44 +4105,69 @@ void GpsTime::logLockChange()
     }
 }
 
-namespace {
+GpsTime::ReplyFacts GpsTime::replyFacts() const
+{
+    ReplyFacts rf;
+    LockInputs in;
 
-constexpr uint8_t kStratumGps = 1;
+    portENTER_CRITICAL(&m_mux);
+    in.anchored  = m_anchorValid;
+    in.timeValid = m_timeValid;
+    in.fixType   = m_fixType;
+    in.ppsAgeUs  = m_ppsCount == 0 ? -1 : esp_timer_get_time() - m_ppsMonoUs;
+    in.trusted   = m_lastEdgeTrusted;
+    in.offsetNs  = m_offsetNs;
+    in.rateKnown = m_rateSamples >= kRateMinSamples;
+    in.tieMaxNs  = m_tieMaxNs;
+    in.jamState  = m_jamState;
+    in.ppsCount  = m_ppsCount;
+    rf.lastSync  = m_lastFix;
+    portEXIT_CRITICAL(&m_mux);
+
+    in.lockWindowUs = (in.rateKnown && in.timeValid && in.fixType >= 2) ? kHoldoverWindowUs
+                                                                      : kLockWindowUs;
+    rf.locked       = evaluateLock(in);
+    rf.stratum      = rf.locked ? 1 : 16;
+    /* "GPS" while it is a stratum-1 reference, "INIT" once it is not: a client
+     * reading stratum 16 needs the refid to look like a refusal, not a
+     * reference. */
+    rf.refId = rf.locked ? kRefIdGps : kRefIdInit;
+    /* The receiver's own leap notice, straight into the packet: only it knows
+     * whether the end of the UTC day has 59, 60 or 61 seconds. */
+    rf.leap = leapIndicator();
+    if (rf.locked) {
+        const int64_t budget = dispersionNs(in.ppsAgeUs, unobservedNs());
+        if (budget > 0) {
+            rf.rootDelayNs  = static_cast<uint32_t>(rootDelayNs());
+            rf.dispersionNs = static_cast<uint32_t>(budget);
+        }
+    }
+    return rf;
+}
+
+namespace {
 
 /* The GPS as the responder sees it. Stateless -- everything it answers comes
  * from the GpsTime singleton, which is older than any responder task. */
 class GpsTimeRef : public TimeRef {
 public:
+    /* replyFacts(), not status(): status() assembles nine std::strings for the
+     * HTTP side, and the responder was paying for every one of them between its
+     * two stamps -- 250 us of allocation, measured, inside the window that
+     * decides the T2/T3 pair. The budget's terms are the same ones status()
+     * uses. */
     TimeReference reference() const override
     {
-        GpsTime             &gps = GpsTime::instance();
-        const GpsTime::Status st = gps.status();
+        const GpsTime::ReplyFacts rf = GpsTime::instance().replyFacts();
 
         TimeReference ref;
-        ref.lastSync = st.lastFix;
-        ref.locked   = st.locked;
-        ref.stratum  = st.locked ? kStratumGps : 16;
-        /* "GPS" while it is a stratum-1 reference, "INIT" once it is not -- for
-         * the same reason the upstream ref does it: a client reading stratum 16
-         * needs the refid to look like a refusal, not like a reference. */
-        ref.refId = st.locked ? kRefIdGps : kRefIdInit;
-
-        /* The receiver's own leap notice, straight into the packet: only it
-         * knows whether the end of the UTC day has 59, 60 or 61 seconds. */
-        ref.leap = gps.leapIndicator();
-
-        /* And its own error budget, both halves of it. Root delay used to be
-         * zero here on the grounds that the reference is wired rather than
-         * networked -- an assumption, and the one NAV-TIM-TP exists to replace.
-         * status() now fills it from the interrupt's named latency and half the
-         * receiver's stated pulse quantisation, and the dispersion from that
-         * plus the jitter actually observed. While it is not locked there is no
-         * budget to state, so both stay zero and the responder falls back to its
-         * own ageing model. */
-        if (st.dispersionNs > 0) {
-            ref.rootDelayNs  = static_cast<uint32_t>(st.rootDelayNs);
-            ref.dispersionNs = static_cast<uint32_t>(st.dispersionNs);
-        }
+        ref.lastSync     = rf.lastSync;
+        ref.locked       = rf.locked;
+        ref.stratum      = rf.stratum;
+        ref.refId        = rf.refId;
+        ref.leap         = rf.leap;
+        ref.rootDelayNs  = rf.rootDelayNs;
+        ref.dispersionNs = rf.dispersionNs;
         return ref;
     }
 
