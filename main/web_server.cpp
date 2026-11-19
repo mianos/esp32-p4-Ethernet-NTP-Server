@@ -9,12 +9,14 @@
 
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "eth_link.h"
 #include "gps_time.h"
 #include "net_state.h"
 #include "net_log.h"
@@ -156,6 +158,7 @@ void NtpWebServer::register_routes()
         {"/gps/samples",  HTTP_GET,  gps_samples_get_handler},
         {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
         {"/gps/baud",     HTTP_POST, gps_baud_post_handler},
+        {"/eth/restart",  HTTP_POST, eth_restart_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
         {"/firmware",     HTTP_POST, firmware_post_handler},
     };
@@ -365,7 +368,7 @@ esp_err_t NtpWebServer::config_post_handler(httpd_req_t *req)
     /* Shared helper: rejects an empty, oversized (>4 KB) or non-object body
      * with the JSON error shape already sent, and parses it otherwise. */
     JsonWrapper doc;
-    if (!readJsonBody(req, doc)) {
+    if (!readJsonBodyTimed(req, doc)) {
         return ESP_FAIL;
     }
 
@@ -479,7 +482,7 @@ esp_err_t NtpWebServer::gps_pps_post_handler(httpd_req_t *req)
      * Nothing else changes, and /healthz reports the time left, so a reader can
      * tell a test from a fault. */
     JsonWrapper doc;
-    if (!readJsonBody(req, doc)) {
+    if (!readJsonBodyTimed(req, doc)) {
         return ESP_FAIL;
     }
 
@@ -887,7 +890,7 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
      * module was last left set to. The C/N0 either side of the change is the
      * comparison; gps_cn0_* reports it and nothing here interprets it. */
     JsonWrapper doc;
-    if (!readJsonBody(req, doc)) {
+    if (!readJsonBodyTimed(req, doc)) {
         return ESP_FAIL;
     }
 
@@ -994,7 +997,7 @@ esp_err_t NtpWebServer::gps_gnss_post_handler(httpd_req_t *req)
      * raw mask is accepted too, for anything neither name covers, and a mask
      * the receiver refuses is reported back rather than silently kept. */
     JsonWrapper doc;
-    if (!readJsonBody(req, doc)) {
+    if (!readJsonBodyTimed(req, doc)) {
         return ESP_FAIL;
     }
 
@@ -1038,7 +1041,7 @@ esp_err_t NtpWebServer::gps_baud_post_handler(httpd_req_t *req)
      * for that path and the way out of a line that has been desynchronised by
      * something that was not this firmware. */
     JsonWrapper doc;
-    if (!readJsonBody(req, doc)) {
+    if (!readJsonBodyTimed(req, doc)) {
         return ESP_FAIL;
     }
     double baud = 0;
@@ -1132,7 +1135,7 @@ esp_err_t NtpWebServer::gps_survey_post_handler(httpd_req_t *req)
      * -- and while it runs the position is not held, which is worse than the
      * moving mode it replaced. */
     JsonWrapper doc;
-    if (!readJsonBody(req, doc)) {
+    if (!readJsonBodyTimed(req, doc)) {
         return ESP_FAIL;
     }
 
@@ -1239,6 +1242,87 @@ esp_err_t NtpWebServer::firmware_get_handler(httpd_req_t *req)
  * handshake in main.cpp is for -- if it never gets a lease, the bootloader
  * returns to the slot that worked. Unauthenticated, like every endpoint here:
  * this firmware assumes a trusted LAN. */
+bool NtpWebServer::readJsonBodyTimed(httpd_req_t *req, JsonWrapper &out)
+{
+    /* Both budgets are about a caller that has stopped sending, not about a slow
+     * one. They are only evaluated when httpd_req_recv() returns a timeout, so
+     * the socket's own recv_wait_timeout (5 s here) is their granularity: an
+     * idle budget below that would never be reached before the total one, and
+     * the observed abandonment is the first multiple of the socket timeout past
+     * either. Six seconds idle and ten total therefore mean "gone" is noticed at
+     * ten, and a 4 kB body over a congested segment still fits. */
+    constexpr int64_t kBodyIdleUs  = 6000000;
+    constexpr int64_t kBodyTotalUs = 10000000;
+    constexpr size_t  kBodyMax     = 4096;
+
+    if (req->content_len <= 0) {
+        return sendJsonError(req, 400, "JSON body required") == ESP_OK;
+    }
+    if (static_cast<size_t>(req->content_len) > kBodyMax) {
+        return sendJsonError(req, 413, "request body too large") == ESP_OK;
+    }
+
+    std::string body(static_cast<size_t>(req->content_len), '\0');
+    const int64_t started = esp_timer_get_time();
+    int64_t       last    = started;
+    size_t        got     = 0;
+    while (got < body.size()) {
+        const int r = httpd_req_recv(req, body.data() + got, body.size() - got);
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            const int64_t nowUs = esp_timer_get_time();
+            if (nowUs - last > kBodyIdleUs || nowUs - started > kBodyTotalUs) {
+                /* The rest of the body is still in the socket; say 408 and let
+                 * the server close rather than draining bytes nobody wants. */
+                ESP_LOGW(TAG, "body stalled at %zu/%zu bytes, giving up",
+                         got, body.size());
+                return sendJsonError(req, 408, "request body stalled") == ESP_OK;
+            }
+            continue;
+        }
+        if (r <= 0) {
+            return sendJsonError(req, 400, "request body truncated") == ESP_OK;
+        }
+        got  += static_cast<size_t>(r);
+        last  = esp_timer_get_time();
+    }
+
+    /* Objectness is tested on a throwaway parse because JsonWrapper has no
+     * predicate for it, and a bare array would otherwise reach handlers that
+     * only ever GetField(). */
+    const cJSON *parsed = cJSON_Parse(body.c_str());
+    const bool   isObject = parsed != nullptr && cJSON_IsObject(parsed);
+    cJSON_Delete(const_cast<cJSON *>(parsed));
+    if (!isObject) {
+        return sendJsonError(req, 400, "invalid JSON (expected an object)") == ESP_OK;
+    }
+    out = JsonWrapper::Parse(body);
+    return true;
+}
+
+esp_err_t NtpWebServer::eth_restart_post_handler(httpd_req_t *req)
+{
+    /* The cable is usually out of reach of whoever is looking at this page, so
+     * the wedge recovery needs a way to be proved without unplugging anything.
+     *
+     * The reply goes first and the MAC goes down a moment later: written the
+     * other way round, the JSON would be racing the PHY into a stop. */
+    JsonWrapper resp;
+    resp.AddItem("restarts_so_far", static_cast<double>(EthernetLink::instance().restarts()));
+    resp.AddItem("down_ms", 100.0);
+    const esp_err_t err = sendJson(req, resp, 200);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* Long enough for the datagram above to leave the driver, short enough that
+     * the caller is still holding the connection when the link returns. */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    const esp_err_t restartErr = EthernetLink::instance().restart("http hook");
+    ESP_LOGW(TAG, "POST /eth/restart from %s: %s", callerAddress(req).c_str(),
+             esp_err_to_name(restartErr));
+    return ESP_OK;
+}
+
 esp_err_t NtpWebServer::firmware_post_handler(httpd_req_t *req)
 {
     if (req->content_len <= 0) {

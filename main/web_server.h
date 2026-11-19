@@ -62,8 +62,17 @@ private:
     static esp_err_t gps_samples_get_handler(httpd_req_t *req);
     static esp_err_t gps_reset_post_handler(httpd_req_t *req);
     static esp_err_t gps_baud_post_handler(httpd_req_t *req);
+    static esp_err_t eth_restart_post_handler(httpd_req_t *req);
     static esp_err_t firmware_get_handler(httpd_req_t *req);
     static esp_err_t firmware_post_handler(httpd_req_t *req);
+
+    /* Read a JSON body with the component's size cap plus a deadline. The
+     * inherited readJsonBody() loops for ever on HTTPD_SOCK_ERR_TIMEOUT, so a
+     * client that opens a POST and then dribbles holds one of the server's
+     * seven handler slots until it gives up -- and nothing on this server
+     * times a peer out. Same checks, same 413s, but abandoned after
+     * kBodyIdleUs without progress or kBodyTotalUs overall. */
+    static bool readJsonBodyTimed(httpd_req_t *req, JsonWrapper &out);
 
     /* Point the DHCP client's option-12 name at a renamed device. */
     static void apply_hostname(const std::string &hostname);
