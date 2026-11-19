@@ -814,16 +814,16 @@ def build_long(span: int) -> dict[str, Any]:
     since = int(time.time() - span)
     db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     rows = db.execute(
-        "SELECT epoch, offset_ns, rate_ppm FROM samples"
+        "SELECT epoch, offset_ns, rate_ppm, dispersion_ns FROM samples"
         " WHERE kind = 0 AND epoch >= ? ORDER BY epoch", (since,)
     ).fetchall()
     db.close()
 
     width = max(1, span // LONG_BUCKETS)
-    buckets: dict[int, list[tuple[int, float, float]]] = {}
-    for epoch, offset, rate in rows:
+    buckets: dict[int, list[tuple[int, float, float, int | None]]] = {}
+    for epoch, offset, rate, disp in rows:
         buckets.setdefault((epoch - since) // width, []).append(
-            (epoch, offset / 1000.0, rate))
+            (epoch, offset / 1000.0, rate, disp))
 
     series = []
     for key in sorted(buckets):
@@ -835,12 +835,17 @@ def build_long(span: int) -> dict[str, Any]:
                 point[name] = round(sum(values) / len(values), 3)
                 point[f"{name}lo"] = round(min(values), 3)
                 point[f"{name}hi"] = round(max(values), 3)
+        # The bound over the bucket, as the worst it reached: this is a ceiling,
+        # so the mean would understate what the seconds in it were promised.
+        bounds = [g[3] for g in group if g[3] is not None]
+        if bounds:
+            point["disp"] = max(bounds)
         series.append(point)
 
     # One tau per octave, out to an eighth of the span: past that there are too
     # few independent windows for the answer to mean anything.
     deviation = []
-    pairs = [(float(epoch), float(rate)) for epoch, _, rate in rows if rate is not None]
+    pairs = [(float(epoch), float(rate)) for epoch, _, rate, _ in rows if rate is not None]
     parts = analysis.runs(pairs)
     tau0 = analysis.sample_interval(pairs)
     if parts and tau0 > 0:
