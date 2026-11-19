@@ -99,7 +99,8 @@ class Recorder:
             "CREATE TABLE IF NOT EXISTS samples ("
             " epoch INTEGER PRIMARY KEY, boot INTEGER, seq INTEGER,"
             " kind INTEGER NOT NULL, offset_ns INTEGER,"
-            " rate_ppm REAL, jitter_ns INTEGER, flags INTEGER, sats INTEGER)"
+            " rate_ppm REAL, jitter_ns INTEGER, flags INTEGER, sats INTEGER,"
+            " dispersion_ns INTEGER)"
         )
         # Our own observations, not the box's: the receiver statistics are a
         # reading taken at poll time and have no epoch of their own.
@@ -114,6 +115,11 @@ class Recorder:
         for column in ("noise_dbm", "agc", "cn0_mean", "cn0_used"):
             if column not in have:
                 self.db.execute(f"ALTER TABLE samples ADD COLUMN {column} REAL")
+        # The bound the box was stating for that second, which is what the
+        # offset has to be read against -- an excursion inside a wide bound is
+        # the clock being honest, the same excursion inside a narrow one is not.
+        if "dispersion_ns" not in have:
+            self.db.execute("ALTER TABLE samples ADD COLUMN dispersion_ns INTEGER")
 
     def _prune(self) -> None:
         if time.time() < self.next_prune or self.db is None:
@@ -133,8 +139,10 @@ class Recorder:
             return
         self.db.execute(
             "INSERT OR IGNORE INTO samples"
-            " (epoch, boot, seq, kind, offset_ns, rate_ppm, jitter_ns, flags, sats)"
-            " VALUES (?,?,?,?,?,?,?,?,?)", (epoch,) + row[:4] + (row[4] / 1000.0,) + row[5:])
+            " (epoch, boot, seq, kind, offset_ns, rate_ppm, jitter_ns, flags, sats,"
+            "  dispersion_ns)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (epoch,) + row[:4] + (row[4] / 1000.0,) + row[5:])
         self._prune()
 
     def gap(self, first_epoch: int, count: int) -> None:
@@ -249,10 +257,14 @@ class Poller:
             lost = int(page.get("lost") or 0)
             if lost and rows:
                 self.recorder.gap(int(rows[0][1]) - lost, lost)
-            for seq, epoch, offset, rate, jitter, flags, sats, kind in rows:
+            for record in rows:
+                # Nine fields since the bound was recorded; eight from a box
+                # that predates it, so the tail is read by index.
+                seq, epoch, offset, rate, jitter, flags, sats, kind = record[:8]
+                disp = record[8] if len(record) > 8 else None
                 self.recorder.put(epoch, (self.boot, seq, kind,
                                           offset if kind == 0 else None,
-                                          rate, jitter, flags, sats))
+                                          rate, jitter, flags, sats, disp))
             # Advance to the last seq actually handed over, not to the ring's
             # end: a capped page would otherwise jump the cursor past every row
             # it did not carry.
