@@ -3,6 +3,10 @@ sdkconfig
 sdkconfig.old
 managed_components/
 
+# python bytecode from the tools
+__pycache__/
+*.pyc
+
 # downloaded reference material
 docs/demos.zip
 docs/demos_eth/

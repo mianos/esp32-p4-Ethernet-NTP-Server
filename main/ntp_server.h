@@ -32,6 +32,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "ntp_control.h"
 #include "time_ref.h"
 
 /* The upstream SNTP clock as a TimeRef. Locked means the clock was set from an
@@ -98,6 +99,10 @@ private:
 
     /* Task body: receive, decide, answer. Exits when m_running goes false. */
     void serveLoop();
+
+    /* The device side of a mode-6 reply: which reference is serving, what it
+     * claims, and the counters. */
+    void fillControlFacts(ControlFacts &facts, const TimeReference &ref) const;
     static void taskEntry(void *arg);
 
     std::unique_ptr<TimeRef>   m_ref;
@@ -106,6 +111,7 @@ private:
     std::atomic<uint32_t>      m_answered{0};
     std::atomic<uint32_t>      m_kod{0};
     std::atomic<uint32_t>      m_dropped{0};
+    std::atomic<uint32_t>      m_control{0};
     std::atomic<uint32_t>      m_ratePerMin{0};
     std::atomic<int64_t>       m_lastServedUs{-1};
     std::atomic<uint8_t>       m_clients{0};

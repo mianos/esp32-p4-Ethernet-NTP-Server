@@ -407,6 +407,9 @@ httpd's built-in plain-text page.
 | GET    | `/firmware`     | build + slot info for the running image          |
 | POST   | `/firmware`     | write the body into the inactive OTA slot, reboot into it |
 
+UDP/123 answers NTPv3/v4 client requests and read-only mode 6 control queries
+([`ntpq`](#control-queries-ntpq)).
+
 `/healthz` on this unit:
 
 ```console
@@ -1400,6 +1403,43 @@ from one dual-stack socket: `AF_INET6`, `IPV6_V6ONLY=0`, bound to `::`, exactly
 as [IPv6](#ipv6) recommended before it existed. It starts on the first DHCP
 lease, next to the HTTP server, and serves the clock whichever source above set —
 `stratum 3` from the upstream SNTP client, `stratum 1` from the GPS.
+
+### Control queries (`ntpq`)
+
+The same socket answers NTP mode 6, the read-only half of
+[RFC 9327](https://www.rfc-editor.org/rfc/rfc9327.html): `READSTAT`, `READVAR`,
+and `READCLOCK`. `WRITEVAR` is refused rather than half-applied, because a write
+here would only duplicate what `POST /config` already owns.
+
+That means the standard tool works against it, which is the point — a server
+that ignores `ntpq` looks broken to anyone whose first move is to run it:
+
+```console
+$ ntpq -p 192.0.2.20
+     remote           refid      st t when poll reach   delay   offset   jitter
+==============================================================================
+*GPS(0)          .GPS.            1 l    -   16  1567   0.0520   0.0146   0.0004
+```
+
+There is no limit on these: one 12-byte query and a few header bytes gets up to
+about three datagrams and a kilobyte back, which is the amplification
+[RFC 9327](https://www.rfc-editor.org/rfc/rfc9327.html) warns about. On a LAN it
+is not worth metering; if the socket is ever forwarded, it is the thing to rate
+limit first.
+
+The row is the reference that is serving, at association id 1: the receiver
+posing as the reference clock ntpd would have (`127.127.20.0`, `srcddr` and a
+`"GPS(0)"` hostname), or the upstream's own address while a
+[fallback](#fallback-when-the-receiver-stops) is running. There is one
+association and no selection algorithm, so one row is the whole truth. An
+unlocked clock sets its status word's reach bit clear and `ntpq -p` shows it as
+an unreachable peer with stratum 16, exactly as it should.
+
+`ntpq -c rv`, `-c sysinfo`, `-c sysstats` and `-c assoc` all answer from the
+same counters `/healthz` publishes; a variable this device does not have is
+answered with the protocol's "unknown variable" error rather than silence, so
+the client retries one at a time and carries on past the gap. A reply longer
+than one datagram is split and marked, which is what `sysstats` needs.
 
 The design is one seam wide. A reply builder that knows the protocol, and a
 `TimeRef` that knows where the time came from — `reference()` (stratum, refid,

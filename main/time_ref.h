@@ -24,6 +24,7 @@
 #pragma once
 
 #include <cstdint>
+#include <format>
 #include <ctime>
 #include <string>
 
@@ -56,6 +57,31 @@ struct TimeReference {
  * sent with was not a mistake. */
 constexpr uint32_t kRefIdInit =
     (static_cast<uint32_t>('I') << 24) | ('N' << 16) | ('I' << 8) | 'T';
+
+/* The refid field is four bytes that mean different things depending on the
+ * stratum: text ("GPS", "INIT", "RATE") at stratum 1 and for the kiss codes,
+ * an IPv4 address above stratum 1 (RFC 5905 section 7.3). Print whichever it
+ * is -- a hexadecimal blob answers none of the questions asked of it. */
+inline std::string refIdText(uint32_t refId, uint8_t stratum)
+{
+    char bytes[4];
+    for (int i = 0; i < 4; ++i) {
+        bytes[i] = static_cast<char>((refId >> (24 - 8 * i)) & 0xFF);
+    }
+
+    if (stratum <= 1 || stratum >= 16) {
+        std::string text(bytes, sizeof(bytes));
+        while (!text.empty() && text.back() == '\0') {
+            text.pop_back();
+        }
+        return text;
+    }
+
+    return std::format("{}.{}.{}.{}", static_cast<uint8_t>(bytes[0]),
+                       static_cast<uint8_t>(bytes[1]),
+                       static_cast<uint8_t>(bytes[2]),
+                       static_cast<uint8_t>(bytes[3]));
+}
 
 /* Where the time comes from. Two implementations: the upstream SNTP clock
  * (ntp_server.cpp) and the GPS with its PPS line (gps_time.cpp). */

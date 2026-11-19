@@ -1,6 +1,7 @@
 #include "ntp_server.h"
 
 #include "clock_source.h"
+#include "ntp_control.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <string>
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -31,12 +33,15 @@ constexpr int          kPort             = 123;
 constexpr size_t       kPacketBytes      = 48;   /* NTPv4 header, no MAC */
 constexpr uint32_t     kReceiveTimeoutMs = 1000; /* how often the task looks up */
 constexpr uint32_t     kReportEveryMs    = 60000;
-/* 8192, not 4096: every request copies a GpsTime::Status by value (the
+/* 12288, not 4096: every request copies a GpsTime::Status by value (the
  * reference's error budget and lock state come out of it) and status() parses
  * the antenna delay with from_chars<double>, whose fast_float path alone is
  * several hundred bytes. At 4096 the stack-protector tripped inside
- * from_chars within a minute of the first client, and the board rolled back. */
-constexpr int          kTaskStack        = 8192;
+ * from_chars within a minute of the first client, and the board rolled back.
+ * The control path then added a 483-octet request buffer and a reply buffer of
+ * up to 1295 (a long variable list in one piece), which is where the rest of
+ * the headroom went. */
+constexpr int          kTaskStack        = 12288;
 /* Above the status logger and just under lwIP (18): a woken responder should
  * preempt now rather than at the next scheduling point. It runs for
  * microseconds per packet, so nothing is starved by it. */
@@ -52,8 +57,9 @@ constexpr size_t       kTransmitOffset = 40;
 /* Seconds between 1900-01-01 and 1970-01-01. */
 constexpr uint32_t kNtpUnixDelta = 2208988800u;
 
-constexpr uint8_t kModeClient = 3; /* the only mode this device answers */
-constexpr uint8_t kModeServer = 4;
+constexpr uint8_t kModeClient   = 3; /* the only data mode this device answers */
+constexpr uint8_t kModeServer   = 4;
+constexpr uint8_t kModeControl  = 6; /* ntpq: read-only, see ntp_control.cpp */
 
 constexpr uint8_t kStratumUnlocked = 16; /* "unsynchronised": ignore this server */
 constexpr uint8_t kLeapNoWarning   = 0;
@@ -307,11 +313,12 @@ struct Request {
     uint8_t transmit[kStampBytes] = {};
 };
 
-/* Worth answering at all? Long enough to hold a header, a version both ends
- * speak, and in client mode. Replying to a mode 4 packet is how you build an
- * infinite conversation between two servers, and mode 6/7 is control traffic
- * this device has no keys for, so both are silence. Extension fields past byte
- * 48 are ignored and never echoed. */
+/* Worth answering as a data request? Long enough to hold a header, a version
+ * both ends speak, and in client mode. Replying to a mode 4 packet is how you
+ * build an infinite conversation between two servers, so mode 4 is silence --
+ * as is mode 7, the remote facility, which has nothing here to configure. Mode
+ * 6 never reaches this: it is read-only control traffic and ntp_control.cpp
+ * answers it. Extension fields past byte 48 are ignored and never echoed. */
 bool parseRequest(const uint8_t *packet, int len, Request &req)
 {
     if (len < static_cast<int>(kPacketBytes)) {
@@ -466,6 +473,29 @@ private:
 
 }  // namespace
 
+/* Is the upstream the one serving? One predicate, because the reply and the
+ * control view must not be able to disagree about who the reference is.
+ *
+ * Under "auto" the receiver is served for as long as it still claims something
+ * worth serving -- locked, or holding over on its fitted rate, which is what its
+ * own reference reports -- and the upstream takes the reply only once the client
+ * has actually synced. While neither holds, the receiver answers stratum 16,
+ * which is honest and is the same reply it gives with no upstream at all. */
+bool servingUpstream()
+{
+    switch (Settings::instance().timeSource()) {
+    case Settings::TimeSource::Gps:
+        return false;
+    case Settings::TimeSource::Auto:
+        return ClockSource::instance().owner() == ClockOwner::Upstream;
+    case Settings::TimeSource::Dhcp:
+    case Settings::TimeSource::Static:
+    case Settings::TimeSource::Off:
+        return true;
+    }
+    return true;
+}
+
 /* Which reference is served is a setting, and a setting can change while the
  * responder is running (POST /config); swapping the TimeRef the serving task is
  * using would hand it a dangling pointer. So the object it holds never changes:
@@ -484,28 +514,7 @@ private:
     {
         static const std::unique_ptr<TimeRef> upstream = makeUpstreamTimeRef();
         static const std::unique_ptr<TimeRef> gps      = makeGpsTimeRef();
-
-        switch (Settings::instance().timeSource()) {
-        case Settings::TimeSource::Gps:
-            return *gps;
-        case Settings::TimeSource::Auto:
-            break;
-        case Settings::TimeSource::Dhcp:
-        case Settings::TimeSource::Static:
-        case Settings::TimeSource::Off:
-            return *upstream;
-        }
-
-        /* "auto": the receiver is served for as long as it is still claiming
-         * something worth serving -- locked, or holding over on its fitted rate,
-         * which is what the receiver's own reference reports -- and the
-         * upstream takes the reply only once the client has actually synced.
-         * While neither holds, the receiver answers stratum 16, which is the
-         * honest reply and the same one it gives today. */
-        if (ClockSource::instance().owner() != ClockOwner::Upstream) {
-            return *gps;
-        }
-        return *upstream;
+        return servingUpstream() ? *upstream : *gps;
     }
 };
 
@@ -684,6 +693,45 @@ NtpServer::RootFigures NtpServer::wireRootFigures() const
     return {uncertainty.delayS * 1e6, uncertainty.dispersionS * 1e6};
 }
 
+void NtpServer::fillControlFacts(ControlFacts &facts, const TimeReference &ref) const
+{
+    facts.upstream = servingUpstream();
+    if (facts.upstream) {
+        if (const std::optional<std::string> name = NtpTime::instance().upstreamName()) {
+            facts.peer = *name;
+        }
+    } else {
+        /* The address a reference clock has in ntpd. ntpq prints it as the
+         * remote, and sys.peeradr names it. */
+        facts.peer = "127.127.20.0";
+    }
+    facts.leap     = ref.leap;
+    facts.locked   = ref.locked;
+    facts.stratum  = ref.stratum;
+    facts.refId    = ref.refId;
+    facts.lastSync = ref.lastSync;
+
+    /* The same two figures the reply carries, so a client reading either gets
+     * one answer rather than two. */
+    const RootUncertainty uncertainty = rootUncertainty(ref, std::time(nullptr));
+    facts.rootDelayNs  = static_cast<int64_t>(uncertainty.delayS * 1e9);
+    facts.dispersionNs = static_cast<int64_t>(uncertainty.dispersionS * 1e9);
+
+    const GpsTime::Status gps = GpsTime::instance().status();
+    facts.jitterNs = gps.jitterNs;
+    facts.offsetNs = gps.offsetNs;
+
+    facts.answered        = m_answered.load(std::memory_order_relaxed);
+    facts.kod             = m_kod.load(std::memory_order_relaxed);
+    facts.dropped         = m_dropped.load(std::memory_order_relaxed);
+    facts.requests        = facts.answered + facts.kod + facts.dropped;
+    facts.controlRequests = m_control.load(std::memory_order_relaxed);
+    facts.uptimeS         = esp_timer_get_time() / 1000000;
+    if (const esp_app_desc_t *desc = esp_app_get_description()) {
+        facts.version = desc->version;
+    }
+}
+
 void NtpServer::serveLoop()
 {
     /* This task's socket, taken by value: the member may be replaced by a
@@ -740,8 +788,11 @@ void NtpServer::serveLoop()
         socklen_t        fromLen = sizeof(from);
 
         /* Room for extension fields, so a long request is still parsed from its
-         * first 48 bytes instead of being dropped as unrecognised. */
-        uint8_t   packet[kPacketBytes * 2] = {};
+         * first 48 bytes instead of being dropped as unrecognised -- and for a
+         * whole control request, which is a header plus up to 468 octets of
+         * variable names. Truncating one of those makes its last name partial,
+         * and a partial name is an unknown variable. */
+        uint8_t   packet[12 + kControlChunk + 3] = {};
         const int len = recvfrom(sock, packet, sizeof(packet), 0,
                                  reinterpret_cast<sockaddr *>(&from), &fromLen);
 
@@ -757,6 +808,40 @@ void NtpServer::serveLoop()
             /* The 1 s timeout is the normal way round this loop. */
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 ESP_LOGW(TAG, "recvfrom: errno %d", errno);
+            }
+        } else if ((packet[0] & 0x07) == kModeControl) {
+            /* Control messages share the socket but not the protocol, and are
+             * answered ahead of the client path and outside the rate limiter:
+             * one ntpq -p run is three packets, and a KoD is not a shape it
+             * expects for a control query. Read-only, so metering them buys
+             * little. */
+            const TimeReference ref = m_ref->reference();
+            ControlFacts        facts;
+            fillControlFacts(facts, ref);
+            m_control.fetch_add(1, std::memory_order_relaxed);
+
+            /* A long variable list is split; the client reassembles by offset
+             * and gives up on holes, so the fragments go out back to back. */
+            uint8_t  control[kControlReplyBytes] = {};
+            uint16_t total                       = 0;
+            uint16_t offset                      = 0;
+            for (int fragment = 0; fragment < 8; ++fragment) {
+                const size_t controlLen =
+                    buildControlReply(control, sizeof(control), packet, static_cast<size_t>(len),
+                                      facts, offset, total);
+                if (controlLen == 0 ||
+                    sendto(sock, control, controlLen, 0,
+                           reinterpret_cast<const sockaddr *>(&from), fromLen) < 0) {
+                    if (controlLen != 0) {
+                        ESP_LOGW(TAG, "sendto (control): errno %d", errno);
+                    }
+                    break;
+                }
+                offset = static_cast<uint16_t>(
+                    offset + std::min<size_t>(kControlChunk, total - offset));
+                if (offset >= total) {
+                    break;
+                }
             }
         } else {
             Request req;

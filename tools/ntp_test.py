@@ -8,6 +8,10 @@ sntp/chrony tell you whether a *client* accepts the server; this tells you what
 is on the wire, including the packets a real client never sends. It needs no
 dependencies beyond python3.
 
+The last section asks the mode 6 control interface what the server thinks of
+itself, and checks the reply against RFC 9327's framing (sequence and associd
+echoed, count honoured, datagram padded) rather than just eyeballing it.
+
 One warning that will otherwise look like a bug: the burst section deliberately
 trips the rate limiter for your address (a 16-packet burst, then 1 packet per
 2 s). Run this script no more often than about once a minute, and avoid running
@@ -15,6 +19,7 @@ trips the rate limiter for your address (a 16-packet burst, then 1 packet per
 back-to-back runs answer with a RATE kiss-of-death and then silence for a second.
 """
 import argparse
+import random
 import socket
 import struct
 import sys
@@ -104,7 +109,122 @@ def main():
     time.sleep(2.5)
     show("mode 3, vn 4", ask(args.host, request(), timeout=2.0))
 
+    control_section(args.host)
+
     return 0
+
+
+def control(host, opcode, associd=0, data=b"", sequence=None):
+    """A mode 6 request: header, then the data field, padded to 4 octets."""
+    if sequence is None:
+        sequence = random.getrandbits(15) | 1
+    hdr = bytearray(12)
+    hdr[0] = (4 << 3) | 6
+    hdr[1] = opcode
+    struct.pack_into(">H", hdr, 2, sequence)
+    struct.pack_into(">H", hdr, 6, associd)
+    struct.pack_into(">H", hdr, 10, len(data))
+    payload = bytes(hdr) + data
+    payload += b"\x00" * (-len(payload) % 4)
+    return payload, sequence
+
+
+def mode6(host, opcode, associd=0, data=b"", label=""):
+    """Send a control request and check the reply honours the protocol."""
+    payload, sequence = control(host, opcode, associd, data)
+    reply = ask(host, payload, timeout=2.0)
+    if reply is None:
+        print(f"{label:<34} NO REPLY")
+        return None
+    mode = reply[0] & 7
+    r_bit = bool(reply[1] & 0x80)
+    e_bit = bool(reply[1] & 0x40)
+    echoed_seq = struct.unpack_from(">H", reply, 2)[0]
+    echoed_assoc = struct.unpack_from(">H", reply, 6)[0]
+    count = struct.unpack_from(">H", reply, 10)[0]
+    ok_shape = (mode == 6 and r_bit and echoed_seq == sequence and
+                echoed_assoc == associd and len(reply) % 4 == 0 and
+                len(reply) >= 12 + count and (12 + count + 3) // 4 * 4 == len(reply))
+    print(f"{label:<34} len={len(reply)} mode={mode} R={int(r_bit)} E={int(e_bit)} "
+          f"seq_ok={echoed_seq == sequence} assoc={echoed_assoc} count={count} "
+          f"padded={len(reply) % 4 == 0} shape_ok={ok_shape}")
+    return reply
+
+
+def fields(reply):
+    """The reply's data field as a dict, split the way ntpq splits it."""
+    count = struct.unpack_from(">H", reply, 10)[0]
+    text = reply[12:12 + count].decode("ascii", "replace")
+    pairs = {}
+    for item in text.split(","):
+        if "=" in item:
+            key, value = item.split("=", 1)
+            pairs[key.strip()] = value.strip()
+    return pairs
+
+
+def control_section(host):
+    print("\n== mode 6 (ntpq) ==")
+
+    reply = mode6(host, 2, 0, label="readvar, system")
+    if reply is not None and not reply[1] & 0x40:
+        got = fields(reply)
+        print(f"  stratum={got.get('stratum')} refid={got.get('refid')} "
+              f"rootdisp={got.get('rootdisp')} leap={got.get('leap')} "
+              f"jitter={got.get('sys_jitter')} vars={len(got)}")
+        print(f"  status={struct.unpack_from('>H', reply, 4)[0]:04x} "
+              f"(LI/source/event of the system status word)")
+        missing = [k for k in ("stratum", "refid", "rootdisp", "reftime") if k not in got]
+        print(f"  expected stratum 1 or 3 with a refid; missing={missing}")
+
+    reply = mode6(host, 2, 1, label="readvar, association 1")
+    if reply is not None and not reply[1] & 0x40:
+        got = fields(reply)
+        print(f"  srcadr={got.get('srcadr')} srchost={got.get('srchost')} "
+              f"stratum={got.get('stratum')} reach={got.get('reach')} "
+              f"hmode={got.get('hmode')}")
+        selection = " x.-+#*o"[struct.unpack_from(">H", reply, 4)[0] >> 8 & 0x7]
+        print(f"  selection char {selection!r} (must be '*' while locked, and the "
+              f"status must carry conf|reach)")
+
+    reply = mode6(host, 1, 0, label="readstat")
+    if reply is not None and not reply[1] & 0x40:
+        count = struct.unpack_from(">H", reply, 10)[0]
+        rows = [struct.unpack_from(">HH", reply, 12 + 4 * i) for i in range(count // 4)]
+        print(f"  associations={rows} (one row, associd 1, status high byte 0x96 while locked)")
+
+    reply = mode6(host, 2, 0, b"stratum,refid", label="readvar, named subset")
+    if reply is not None:
+        print(f"  returned={sorted(fields(reply))} (must be exactly the two named)")
+
+    # A client that leaves the count at zero but sends names means all of them,
+    # not none: answering the whole document here would hide the omission.
+    payload, sequence = control(host, 2, 0, b"stratum,refid")
+    payload = payload[:10] + b"\x00\x00" + payload[12:]
+    reply = ask(host, payload, timeout=2.0)
+    if reply is None:
+        print(f"{'readvar, count 0':<34} NO REPLY")
+    else:
+        print(f"{'readvar, count 0':<34} E={int(bool(reply[1] & 0x40))} "
+              f"returned={sorted(fields(reply))} (must still be the two named)")
+
+    reply = mode6(host, 2, 99, label="readvar, bad association")
+    if reply is not None:
+        print(f"  status={struct.unpack_from('>H', reply, 4)[0]:04x} "
+              f"(expected 0x0400 = bad association, E set)")
+
+    reply = mode6(host, 3, 0, label="writevar, refused")
+    if reply is not None:
+        print(f"  status={struct.unpack_from('>H', reply, 4)[0]:04x} "
+              f"(expected 0x0100 = permission denied, E set)")
+
+    reply = mode6(host, 30, 0, label="opcode 30, reserved")
+    if reply is not None:
+        print(f"  status={struct.unpack_from('>H', reply, 4)[0]:04x} "
+              f"(expected 0x0300 = bad opcode, E set)")
+
+    print("\n  now the real client, if it is installed:")
+    print(f"    ntpq -p {host} ; ntpq -c rv {host} ; ntpq -c sysstats {host}")
 
 
 if __name__ == "__main__":
