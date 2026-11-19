@@ -275,6 +275,14 @@ public:
         int64_t  rfAgeUs      = -1;
         uint8_t  rfCfg        = 0;
         /* Worst and RMS phase excursion in the fit window, nanoseconds. */
+        /* How long after the edge the frame that dated it arrived, at the last
+         * accepted pair, and the high-water since boot. This is the margin the
+         * pairing window is actually spending; pairAgeMaxUs is the figure,
+         * because a mean hides the tail that decides whether a sentence could
+         * pair with the wrong edge. pairAgeS is how old the measurement is. */
+        int64_t  pairAgeUs    = 0;
+        int64_t  pairAgeMaxUs = 0;
+        double   pairAgeS     = -1;
         double   tieMaxNs     = 0;
         double   tieRmsNs     = 0;
         /* Overlapping Allan deviation in ppb (nanoseconds per second), octave
@@ -834,6 +842,9 @@ private:
      * on the host before it was believed. Relative, the numbers are seconds and
      * the arithmetic is exact. Static, because 300 doubles does not belong on
      * the GPS task's stack. */
+    int64_t    m_pairAgeUs         = 0;
+    int64_t    m_pairAgeMaxUs      = 0;
+    int64_t    m_pairAgeAtUs       = 0;
     double     m_tieMaxNs          = 0;
     double     m_tieRmsNs          = 0;
     int64_t    m_pulseOffsetNs     = 0; /* where TIM-TP says the pulse sits */

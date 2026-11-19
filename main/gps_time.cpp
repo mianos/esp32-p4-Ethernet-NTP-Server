@@ -2968,6 +2968,19 @@ void GpsTime::anchor(time_t second)
 
     m_pairedCount = ppsCount;
 
+    /* Accepted, so this is a real measurement of the sentence latency rather
+     * than of a sentence that arrived too late to trust. Recorded here and not
+     * in the ISR: it is a property of the pairing, and the pairing is what the
+     * window above bounds. */
+    {
+        const int64_t atUs = esp_timer_get_time();
+        portENTER_CRITICAL(&m_mux);
+        m_pairAgeUs    = ageUs;
+        m_pairAgeMaxUs = ageUs > m_pairAgeMaxUs ? ageUs : m_pairAgeMaxUs;
+        m_pairAgeAtUs  = atUs;
+        portEXIT_CRITICAL(&m_mux);
+    }
+
     /* What the servo predicted for this instant before it knew. Across an
      * ordinary second this is a check on the rate; across a holdover it is the
      * error a client was served while the edge was missing, and the only
@@ -3467,6 +3480,7 @@ GpsTime::Status GpsTime::status() const
     int64_t  ppsMonoUs     = 0;
     int64_t  suppressUntil = 0;
     int64_t  navSatAtUs    = 0;
+    int64_t  pairAgeAtUs   = 0;
     int64_t  monHwAtUs     = 0;
     int64_t  dopAtUs       = 0;
     int64_t  clockAtUs     = 0;
@@ -3514,6 +3528,9 @@ GpsTime::Status GpsTime::status() const
     st.qErrNs            = m_qErrNs;
     st.qErrValid         = m_qErrValid;
     st.jitterNs          = m_jitterNs;
+    st.pairAgeUs         = m_pairAgeUs;
+    st.pairAgeMaxUs      = m_pairAgeMaxUs;
+    pairAgeAtUs          = m_pairAgeAtUs;
     st.pulseOnSecond     = m_pulseOnSecond;
     st.pulseOffsetNs     = m_pulseOffsetNs;
     st.pvtNanoNs         = m_pvtNanoNs;
@@ -3715,6 +3732,7 @@ GpsTime::Status GpsTime::status() const
         st.ioAgeUs = nowUs - ioAtUs;
     }
 
+    st.pairAgeS = pairAgeAtUs != 0 ? static_cast<double>(nowUs - pairAgeAtUs) / 1e6 : -1;
     st.rateKnown = st.rateSamples >= kRateMinSamples;
 
     /* Two windows, and the difference between them is the servo. Without a rate

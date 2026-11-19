@@ -630,6 +630,17 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
      * (this one does). qErr and onSecond genuinely need TIM-TP; the jitter does
      * not, so it stands alone. */
     doc.AddItem("tp_jitter_ns", static_cast<double>(gps.jitterNs));
+    /* How long after the edge the frame that dates it arrived. This is the
+     * margin the pairing window is spending: a max far below it means the
+     * window can be tightened, and a max approaching it means the window is
+     * already the limit and a late sentence is the fault to chase. The max is
+     * the number to read -- a mean hides the tail that decides whether a
+     * sentence could pair with the wrong edge. */
+    if (gps.pairAgeS >= 0) {
+        doc.AddItem("pair_age_us", static_cast<double>(gps.pairAgeUs));
+        doc.AddItem("pair_age_max_us", static_cast<double>(gps.pairAgeMaxUs));
+        doc.AddItem("pair_age_s", gps.pairAgeS);
+    }
     if (gps.tosCfg != 0) {
         doc.AddItem("tos_cfg", gps.tosCfg == 1 ? "accepted" : "rejected");
     }
