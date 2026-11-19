@@ -37,8 +37,10 @@ constexpr int64_t kMaxNs = 5000000;
 constexpr double kAlpha = 0.25;
 
 /* How long one probe waits before giving up. */
-/* Somewhere nothing listens; the ICMP that follows is ignored. */
-constexpr uint16_t kProbePort = 9;
+/* The probe socket's own port, so the datagram is delivered to a bound socket the
+ * way a reply is. Sending to a dead port instead works, but the ICMP that comes
+ * back is handled inside the same call and inflates the figure. */
+constexpr uint16_t kProbePort = 0; /* 0 = let lwIP pick */
 
 constexpr int kTaskStack  = 4096;
 constexpr int kTaskPrio   = 4; /* below the responder and the status logger */
@@ -102,9 +104,10 @@ int64_t TxLag::probe()
         return -1;
     }
 
-    /* Our own address, so the datagram traverses the stack and the driver the
-     * way a reply does. Nobody listens on this port; the ICMP that comes back
-     * is ignored. */
+    /* Our own address and our own bound port, so the datagram traverses the
+     * stack and the driver the way a reply does, and is delivered rather than
+     * refused. Whether it is read does not matter: the interval ends when the
+     * call returns. */
     esp_netif_ip_info_t ip = {};
     if (esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.ip.addr == 0) {
         return -1;
@@ -119,9 +122,18 @@ int64_t TxLag::probe()
     to.sin_family         = AF_INET;
     to.sin_port           = htons(kProbePort);
     to.sin_addr.s_addr    = ip.ip.addr;
+    if (bind(sock, reinterpret_cast<const sockaddr *>(&to), sizeof(to)) != 0) {
+        close(sock);
+        return -1;
+    }
+    socklen_t toLen = sizeof(to);
+    if (getsockname(sock, reinterpret_cast<sockaddr *>(&to), &toLen) != 0) {
+        close(sock);
+        return -1;
+    }
 
     uint8_t  payload[kProbeBytes] = {};
-    int64_t  result               = -1;
+    int64_t result = -1;
 
     /* The quantity that matters is how long *after the stamp* the datagram is
      * still inside the stack, because that is how early the stamp is. sendto()

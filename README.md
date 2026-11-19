@@ -1431,13 +1431,20 @@ signs, so one measurement serves both and a client's offset is not left carrying
 the difference between two guesses. `kReceiveLagNs` is now only the floor used
 before the first sample.
 
-The figure was chosen by A/B, not by argument. `POST /ntp/txlag {"enabled":false}`
-turns it off at runtime, and twenty `sntp` samples either side, interleaved
-across four rounds on one boot, moved the client's offset by **+161 µs for a
-323 µs correction — exactly L/2 at 16σ** — from −157 µs uncorrected to +4 µs
-with it. A first version probed a self-send and half round trip instead; that
-read about 1.5x high because it measures two stack traversals where a reply does
-one, and it left the offset at +18 µs.
+`POST /ntp/txlag {"enabled":false}` turns it off at runtime, which is how the
+figure was chosen and how it can be re-derived on another network. Five boots,
+interleaved A/B samples either side, twenty to thirty each: uncorrected the
+client's offset sat at −157, −223 and −164 µs, corrected it was +4, −32 and −72.
+The shift tracks L/2 as the arithmetic predicts (161 µs for a 323 µs
+correction, 191 for 281, 92 for 281), at 4 to 16 sigma.
+
+So it works, and it is an estimator rather than a calibration: half a `sendto`
+is a lower bound on the real path, because the driver and the wire happen after
+the call returns, and how much it under-reads varies with the switch, the client
+and the load on the host. Expect a few tens of microseconds residual, not zero,
+and expect it to differ between boots. A first version probed a self-send and
+half round trip instead; that read about 1.5x high, since it measures two stack
+traversals where a reply does one.
 
 The cost is the mirror image: a client's *delay* falls by the same amount, from
 about 500 µs to about 100 µs here, because the delay formula assumes `t2..t3`
