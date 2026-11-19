@@ -249,11 +249,16 @@ class Poller:
                 self.recorder.put(epoch, (self.boot, seq, kind,
                                           offset if kind == 0 else None,
                                           rate, jitter, flags, sats))
+            # Advance to the last seq actually handed over, not to the ring's
+            # end: a capped page would otherwise jump the cursor past every row
+            # it did not carry.
             last = int(page.get("lastSeq") or 0)
-            if not rows or cursor >= last:
+            if not rows:
                 break
-            cursor = last
+            cursor = int(rows[-1][0])
             self.recorder.set_cursor(cursor)
+            if len(rows) < 120 or cursor >= last:
+                break
 
     async def once(self) -> None:
         self.polls += 1
