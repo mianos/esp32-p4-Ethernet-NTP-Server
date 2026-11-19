@@ -81,6 +81,7 @@
 #include <memory>
 #include <string>
 
+#include "driver/mcpwm_cap.h"
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
@@ -576,6 +577,14 @@ private:
     GpsTime() = default;
 
     static void ppsIsr(void *arg);
+    static bool IRAM_ATTR ppsCapIsr(mcpwm_cap_channel_handle_t channel,
+                                    const mcpwm_capture_event_data_t *edge, void *arg);
+    /* Both edge paths end here: one from a plain interrupt stamp, one from the
+     * capture's latched tick. The gates are shared so the suppression hook and
+     * the spacing rule cannot be bypassed by one of them. */
+    void recordEdge(int64_t edgeNs);
+    esp_err_t beginCapture();
+    esp_err_t beginInterruptEdge();
     static void taskEntry(void *arg);
     static void bridgeTaskEntry(void *arg);
     void bridgeTask();
@@ -700,6 +709,21 @@ private:
      * through libatomic, and the section is a handful of instructions. Mutable
      * because status() and now() are const and still have to take it. */
     mutable portMUX_TYPE m_mux          = portMUX_INITIALIZER_UNLOCKED;
+    /* The capture timer's own counter, and when this handler last ran. The
+     * latter separates a real edge from the echo of our own software catch,
+     * which is how "now" is read in the same counter. */
+    mcpwm_cap_timer_handle_t   m_capTimer   = nullptr;
+    mcpwm_cap_channel_handle_t m_capChannel = nullptr;
+    int64_t                    m_lastEdgeUs = -1;
+    /* The capture timer's clock, in Hz, as reported by the driver. The APB
+     * is not the same speed on every part, so this is measured rather than
+     * assumed -- 80 MHz was assumed once and the clock stayed on time only
+     * because the servo absorbed a factor of two. */
+    uint32_t                   m_capHz      = 0;
+    /* The capture timer cannot be read, so a second free-running count in the
+     * same group supplies "now" with one register access. */
+    bool                       m_capNowValid = false;
+
     int64_t      m_ppsMonoUs    = 0;
     /* The same edge with the sub-microsecond part resolved from the cycle
      * counter. Only the rate fit reads it; everything that sets the clock or

@@ -20,6 +20,7 @@
 #include "hal/systimer_ll.h"
 #include "soc/systimer_struct.h"
 #include "esp_timer.h"
+#include "hal/mcpwm_ll.h"
 
 #include "clock_source.h"
 #include "tx_lag.h"
@@ -111,6 +112,42 @@ constexpr int64_t kHoldoverWindowUs = 600000000;
  * the half that actually hurts -- and the receiver's own statement about how
  * well it knows where the pulse is. Both are in the budget below; the mean
  * stays a named constant rather than a fiction of zero. */
+/* A real edge and the software catch that follows it are microseconds apart;
+ * two edges are not. */
+constexpr int64_t kSoftCatchWindowUs = 20;
+
+/* The most ticks the echo may be behind the edge before the difference is
+ * disbelieved, and the stamp falls back to the interrupt's own time. 16000
+ * ticks is 50 us even at the 320 MHz the fastest parts run, far beyond any echo
+ * and far inside the wrap. */
+/* Whether the PPS edge is taken by the capture peripheral or by a plain
+ * interrupt.
+ *
+ * Measured on this board, four ways, by the rate fit's own worst residual: the
+ * interrupt stamp 0.5-0.7 us, the capture stamping at ISR entry 1.5 us, the
+ * capture with a software-catch sub-microsecond part 4.3 us, and with a group
+ * timer as the "now" end 5.1 us. The capture is not currently worth it here.
+ *
+ * The reason is the "now" end. A capture has no readable counter of its own, so
+ * the interval from the edge has to be measured out of band -- by catching the
+ * same counter again, or by a second counter that may not even run at the same
+ * rate -- and both of those jitter by more than the interrupt latency the
+ * capture removes. The edge *is* latched perfectly; it is the arithmetic that
+ * cannot reach it.
+ *
+ * What would change the answer: a MAC that stamps the frame itself (the 1588
+ * unit on this part), where "now" is hardware and the capture's own resolution
+ * finally counts. The code is kept, and switching this on is one line.
+ */
+constexpr bool kCaptureEdge = false;
+
+constexpr int32_t kMaxCatchTicks = 16000;
+
+/* The MCPWM group this uses, and the PWM timer inside it that only ever counts:
+ * the capture timer offers nothing readable. */
+constexpr int kCapGroup    = 0;
+constexpr int kCapNowTimer = 0;
+
 constexpr int64_t kIsrLatencyNs = 2000;
 
 /* The receive side of the same budget, and unlike the pulse it is named rather
@@ -968,6 +1005,27 @@ void GpsTime::bridgeTask()
     }
 }
 
+void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
+{
+    const int64_t nowUs = edgeNs / 1000;
+
+    portENTER_CRITICAL_ISR(&m_mux);
+    /* The POST /gps/pps hook swallows the edge here rather than further up, so
+     * what it produces is the real holdover code path and not an imitation of
+     * it. One extra comparison, against a word that is zero unless somebody
+     * asked for the test. */
+    if (nowUs >= m_ppsSuppressUntilUs &&
+        (m_ppsCount == 0 || nowUs - m_ppsMonoUs >= kMinEdgeSpacingUs)) {
+        m_ppsMonoUs = nowUs;
+        m_ppsMonoNs = edgeNs;
+        ++m_ppsCount;
+    }
+    portEXIT_CRITICAL_ISR(&m_mux);
+}
+
+/* The fallback edge handler, used only if the capture timer cannot be set up.
+ * Stamps with esp_timer at whole-microsecond resolution, so the residual
+ * carries the interrupt latency. */
 void IRAM_ATTR GpsTime::ppsIsr(void *arg)
 {
     auto *self = static_cast<GpsTime *>(arg);
@@ -975,43 +1033,173 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
      * lets this handler be an IRAM interrupt: an OTA write disables the flash
      * cache for milliseconds at a time, and an edge landing in that window must
      * not be a crash. */
-    /* The edge is stamped with esp_timer, whole microseconds.
-     *
-     * A finer stamp was tried twice and both drift: the CPU cycle counter is not
-     * locked to esp_timer's timebase, and neither is the systimer's raw count --
-     * measured, systimer-derived microseconds disagree with
-     * esp_timer_get_time() by tens of milliseconds and the difference keeps
-     * moving (tick_us_delta), so a raw count has no fixed relationship to where
-     * esp_timer's microsecond starts. The remainder inside a microsecond is
-     * therefore a ramp, not a fraction, and it makes the residual worse than the
-     * quantisation it was meant to beat.
-     *
-     * So the stamp stays whole microseconds and the rate fit keeps its
-     * nanosecond field, waiting for a source that shares esp_timer's phase.
-     * ticks_per_us and tick_us_delta are reported for whoever picks it up. */
-    const int64_t nowUs = esp_timer_get_time();
+    self->recordEdge(esp_timer_get_time() * 1000);
+}
 
-    portENTER_CRITICAL_ISR(&self->m_mux);
-    /* The POST /gps/pps hook swallows the edge here rather than further up, so
-     * what it produces is the real holdover code path and not an imitation of
-     * it. One extra comparison, against a word that is zero unless somebody
-     * asked for the test. */
-    if (nowUs >= self->m_ppsSuppressUntilUs &&
-        (self->m_ppsCount == 0 || nowUs - self->m_ppsMonoUs >= kMinEdgeSpacingUs)) {
-        self->m_ppsMonoUs = nowUs;
-        /* The stamp the rate fit sees. Phase is only meaningful once it has
-         * been calibrated; until then this stays the plain microsecond and the
-         * residual degrades to what it was. */
-        self->m_ppsMonoNs = nowUs * 1000;
-        ++self->m_ppsCount;
+/* The edge as the capture peripheral latched it.
+ *
+ * The tick is latched by hardware at the edge, so no interrupt latency is in
+ * the stamp. What is *not* available is a way to read the counter, so the
+ * "now" end of the difference is taken by catching the same counter from
+ * software and reading that latch. The interval between the two is a few ticks,
+ * which is why the sub-microsecond part is finally real: the arithmetic happens
+ * in esp_timer's own domain (now minus the elapsed ticks), not against a
+ * foreign timebase. That is the difference from the two earlier attempts the
+ * old comment describes -- neither systimer's raw count nor the CPU cycle
+ * counter shares esp_timer's phase, but this does, because "now" is esp_timer.
+ */
+bool IRAM_ATTR GpsTime::ppsCapIsr(mcpwm_cap_channel_handle_t, const mcpwm_capture_event_data_t *edge,
+                                  void *arg)
+{
+    auto *self = static_cast<GpsTime *>(arg);
+    const int64_t atUs = esp_timer_get_time();
+
+    /* The software catch below runs this handler again a tick or two later.
+     * Real edges are a second apart, so anything this close is that echo. */
+    if (self->m_lastEdgeUs >= 0 && atUs - self->m_lastEdgeUs < kSoftCatchWindowUs) {
+        return false;
     }
-    portEXIT_CRITICAL_ISR(&self->m_mux);
+    self->m_lastEdgeUs = atUs;
 
+    int64_t edgeNs = atUs * 1000;
+    if (self->m_capNowValid && self->m_capHz != 0) {
+        /* Wrap-safe: one counter, one signed difference. */
+        const uint32_t now =
+            mcpwm_ll_timer_get_count_value(MCPWM_LL_GET_HW(kCapGroup), kCapNowTimer);
+        const int32_t ticks = static_cast<int32_t>(now - edge->cap_value);
+        if (ticks >= 0 && ticks <= kMaxCatchTicks) {
+            edgeNs -= static_cast<int64_t>(ticks) * 1000000000LL / self->m_capHz;
+        }
+    }
+
+    self->recordEdge(edgeNs);
+    return false;
 }
 
 void GpsTime::taskEntry(void *arg)
 {
     static_cast<GpsTime *>(arg)->task();
+}
+
+/* The fallback: a GPIO interrupt that stamps on entry. Level 3, above the UART\'s
+ * level 1 and the Ethernet\'s, so the edge nests over a serial or MAC handler
+ * already running instead of waiting for it, and IRAM so it survives the flash
+ * cache going away under an OTA write. Neither comes free: at level 3 the
+ * handler may only use what is safe there. */
+esp_err_t GpsTime::beginInterruptEdge()
+{
+    esp_err_t err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3);
+    if (err == ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "GPIO ISR service already installed: the PPS handler may not be in IRAM");
+        err = ESP_OK;
+    }
+    if (err == ESP_OK) {
+        err = gpio_isr_handler_add(kPpsPin, &GpsTime::ppsIsr, this);
+    }
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "PPS edge: GPIO interrupt (stamp on entry, interrupt latency included)");
+    }
+    return err;
+}
+
+/* The edge is latched by the capture peripheral at the edge itself, so the
+ * stamp does not carry the interrupt latency, and the resolution is a tick of
+ * the 80 MHz APB clock. The ISR only publishes the already-latched value.
+ *
+ * MCPWM needs its interrupt handler and its control functions in IRAM for this
+ * to keep the old interrupt\'s property of running with the flash cache off
+ * (CONFIG_MCPWM_ISR_CACHE_SAFE and CONFIG_MCPWM_CTRL_FUNC_IN_IRAM, both pinned in
+ * sdkconfig.defaults), because the software catch used to read the counter is a
+ * control call.
+ */
+esp_err_t GpsTime::beginCapture()
+{
+    mcpwm_capture_timer_config_t timerConfig = {};
+    timerConfig.group_id                     = 0;
+    timerConfig.clk_src                      = MCPWM_CAPTURE_CLK_SRC_DEFAULT;
+    esp_err_t err = mcpwm_new_capture_timer(&timerConfig, &m_capTimer);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    mcpwm_capture_channel_config_t channelConfig = {};
+    channelConfig.gpio_num                       = kPpsPin;
+    channelConfig.prescale                       = 1;
+    channelConfig.flags.pos_edge                 = 1;
+    channelConfig.flags.neg_edge                 = 0;
+
+    err = mcpwm_new_capture_channel(m_capTimer, &channelConfig, &m_capChannel);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    mcpwm_capture_event_callbacks_t callbacks = {};
+    callbacks.on_cap                          = &GpsTime::ppsCapIsr;
+    err = mcpwm_capture_channel_register_event_callbacks(m_capChannel, &callbacks, this);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = mcpwm_capture_channel_enable(m_capChannel);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = mcpwm_capture_timer_enable(m_capTimer);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = mcpwm_capture_timer_start(m_capTimer);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* "Now" in the same clock. The capture timer has no readable counter, and
+     * the software catch that would supply one carries jitter: as measured it
+     * took the fit residual from 1.5 us to 4.3 us, worse than the latency the
+     * capture removes. A PWM timer in the same group counts from the same clock
+     * and costs one register read, so it is the "now" end -- after a check that
+     * the two really do count at one rate. */
+    mcpwm_ll_timer_set_count_mode(MCPWM_LL_GET_HW(kCapGroup), kCapNowTimer,
+                                 MCPWM_TIMER_COUNT_MODE_UP);
+    mcpwm_ll_timer_set_start_stop_command(MCPWM_LL_GET_HW(kCapGroup), kCapNowTimer,
+                                         MCPWM_TIMER_START_NO_STOP);
+
+    /* In Hz, not nanoseconds, and not the same on every part. */
+    err = mcpwm_capture_timer_get_resolution(m_capTimer, &m_capHz);
+    if (err != ESP_OK || m_capHz == 0) {
+        ESP_LOGW(TAG, "capture resolution unknown: the stamp falls back to the interrupt time");
+        m_capHz = 0;
+    } else {
+        ESP_LOGI(TAG, "PPS edge: MCPWM capture at %lu Hz (%.1f ns a tick, latched at the edge, "
+                      "no ISR latency)",
+                 static_cast<unsigned long>(m_capHz), 1e9 / static_cast<double>(m_capHz));
+    }
+
+    /* Rate check: both counters are sampled across 10 ms through the same
+     * jittery path, so jitter washes out and only a real clock difference shows.
+     * The sub-microsecond part is dropped if they disagree. */
+    uint32_t capFirst = 0, capLast = 0, nowFirst = 0, nowLast = 0;
+    bool     sampled  = false;
+    if (mcpwm_capture_channel_trigger_soft_catch(m_capChannel) == ESP_OK &&
+        mcpwm_capture_get_latched_value(m_capChannel, &capFirst) == ESP_OK) {
+        nowFirst = mcpwm_ll_timer_get_count_value(MCPWM_LL_GET_HW(kCapGroup), kCapNowTimer);
+        vTaskDelay(pdMS_TO_TICKS(10));
+        if (mcpwm_capture_channel_trigger_soft_catch(m_capChannel) == ESP_OK &&
+            mcpwm_capture_get_latched_value(m_capChannel, &capLast) == ESP_OK) {
+            nowLast = mcpwm_ll_timer_get_count_value(MCPWM_LL_GET_HW(kCapGroup), kCapNowTimer);
+            sampled = true;
+        }
+    }
+    if (sampled) {
+        const int32_t capRate = static_cast<int32_t>(capLast - capFirst);
+        const int32_t nowRate = static_cast<int32_t>(nowLast - nowFirst);
+        if (capRate > 0 && nowRate > 0) {
+            const double ratio = static_cast<double>(nowRate) / static_cast<double>(capRate);
+            m_capNowValid      = ratio > 0.99 && ratio < 1.01;
+            ESP_LOGI(TAG, "capture counter vs group timer: %.4f%s", ratio,
+                     m_capNowValid ? "" : " -- sub-microsecond stamp disabled");
+        }
+    }
+    return ESP_OK;
 }
 
 esp_err_t GpsTime::begin()
@@ -1057,24 +1245,17 @@ esp_err_t GpsTime::begin()
         return err;
     }
 
-    /* IRAM flag: see ppsIsr(). The service is process-wide, so a second install
-     * is not an error -- it means something else got here first, and the only
-     * consequence is where this handler ends up. */
-    /* Level 3, above the UART's level 1 and the Ethernet's, so the edge nests
-     * over a serial or MAC handler already running instead of waiting for it.
-     * ESP_INTR_FLAG_IRAM keeps it runnable with the flash cache off, which an
-     * OTA write does for milliseconds at a time. Neither comes free: at level 3
-     * the handler may only use what is safe there, which is why it is a timer
-     * read and two stores and nothing else. */
-    err = gpio_install_isr_service(ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_LEVEL3);
-    if (err == ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "GPIO ISR service already installed: the PPS handler may not be in IRAM");
-        err = ESP_OK;
-    }
-    if (err == ESP_OK) {
-        err = gpio_isr_handler_add(kPpsPin, &GpsTime::ppsIsr, this);    }
+    err = kCaptureEdge ? beginCapture() : ESP_ERR_NOT_SUPPORTED;
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "PPS interrupt on GPIO%d: %s", static_cast<int>(kPpsPin), esp_err_to_name(err));
+        /* The capture is how the edge is stamped without interrupt latency in
+         * it, but a plain GPIO interrupt is a working second best and it is not
+         * worth refusing to run over. */
+        ESP_LOGW(TAG, "MCPWM capture unavailable (%s): falling back to an interrupt stamp",
+                 esp_err_to_name(err));
+        err = beginInterruptEdge();
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "PPS edge on GPIO%d: %s", static_cast<int>(kPpsPin), esp_err_to_name(err));
         return err;
     }
 

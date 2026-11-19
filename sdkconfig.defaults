@@ -64,3 +64,8 @@ CONFIG_WEBSERVER_TASK_STACK_SIZE=12288
 # showed as a 10-second DHCP loop. 4 KB leaves room for the handlers and the
 # float parsing they do.
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
+
+# The PPS edge is a capture interrupt and must survive the flash cache
+# going away under an OTA write, as the old GPIO interrupt did.
+CONFIG_MCPWM_ISR_CACHE_SAFE=y
+CONFIG_MCPWM_CTRL_FUNC_IN_IRAM=y

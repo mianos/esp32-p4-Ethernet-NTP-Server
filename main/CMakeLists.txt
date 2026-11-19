@@ -2,7 +2,7 @@ idf_component_register(SRCS "clock_source.cpp" "eth_link.cpp" "gps_time.cpp" "ma
                        REQUIRES settingsbase webserver jsonwrapper nvsstoragemanager
                        PRIV_REQUIRES esp_eth esp_netif esp_http_server nvs_flash
                                      esp_app_format app_update esp_timer lwip
-                                     esp_driver_uart esp_driver_gpio
+                                     esp_driver_uart esp_driver_gpio esp_driver_mcpwm
                        INCLUDE_DIRS ".")
 
 # IDF's -Wall leaves these as warnings, and dead code then only surfaces when a

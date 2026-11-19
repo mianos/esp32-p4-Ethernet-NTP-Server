@@ -1463,6 +1463,35 @@ still early by whatever the probe could not see, which on a self-send is the
 PHY's serialisation. Hardware transmit stamping would make the whole correction
 unnecessary.
 
+### The PPS edge: a capture peripheral, off by default
+
+The edge is taken by a GPIO interrupt. MCPWM capture is implemented alongside it
+(`kCaptureEdge` in `gps_time.cpp`) and switched off, and the reason is worth
+recording rather than rediscovering.
+
+A capture latches the edge perfectly, in silicon, at 6.25 ns a tick on this part
+— and then there is no way to read the counter, so the interval from the edge to
+"now" has to be measured out of band. Both available ways of doing that (catching
+the same counter again, or running a second counter) jitter by more than the
+interrupt latency the capture removes. The edge is latched perfectly; the
+arithmetic cannot reach it.
+
+Four configurations, by the rate fit's own worst residual: interrupt stamp
+0.5–0.7 µs, capture stamping at ISR entry 1.5 µs, capture with the software-catch
+sub-microsecond part 4.3 µs, and with a group timer as the "now" end 5.1 µs. It
+is not a clean comparison — residuals differ by boot, and the same interrupt code
+has measured 0.5 and 3.4 µs on different boots — so treat the order as
+suggestive, not settled. Settling it needs an A/B within one boot, which needs
+the edge path switchable at runtime.
+
+What would change the answer is a MAC that stamps the frame itself, which this
+part has (the 1588 unit) and which is the next step anyway: there, "now" is
+hardware and the capture's resolution finally counts for something.
+
+Two things the work did fix regardless: the capture clock is read from the driver
+(160 MHz here) rather than assumed, and the sub-microsecond part is only enabled
+after both counters are measured to run at one rate.
+
 ### Control queries (`ntpq`)
 
 The same socket answers NTP mode 6, the read-only half of
