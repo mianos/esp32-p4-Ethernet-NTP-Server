@@ -2971,9 +2971,92 @@ void GpsTime::anchor(time_t second)
     steer();
 }
 
+void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
+{
+    /* Missing epochs first. A holdover produces no call at all until the next
+     * edge, so the holes are only visible here, and one record per skipped
+     * second is what lets a client tell "nothing was measured" from "nothing
+     * arrived". */
+    if (m_lastSampleSet && epoch > m_lastSampleEpoch + 1) {
+        uint32_t missing = epoch - m_lastSampleEpoch - 1;
+        if (missing > kSampleRing) {
+            missing = kSampleRing;
+        }
+        for (uint32_t i = 0; i < missing; ++i) {
+            portENTER_CRITICAL(&m_mux);
+            Sample &slot = m_samples[m_sampleSeq % kSampleRing];
+            slot.seq     = m_sampleSeq;
+            slot.epoch   = epoch - missing + i;
+            slot.kind    = 1;
+            slot.offsetNs = 0;
+            slot.ratePpb  = m_ratePpb;
+            slot.dispersionNs = 0;
+            slot.jitterNs     = 0;
+            slot.flags        = 0;
+            slot.sats         = 0;
+            slot.fix          = 0;
+            ++m_sampleSeq;
+            if (m_sampleSeq - m_sampleOldest > kSampleRing) {
+                m_sampleOldest = m_sampleSeq - kSampleRing;
+            }
+            portEXIT_CRITICAL(&m_mux);
+        }
+    }
+
+    portENTER_CRITICAL(&m_mux);
+    Sample &slot      = m_samples[m_sampleSeq % kSampleRing];
+    slot.seq          = m_sampleSeq;
+    slot.epoch        = epoch;
+    slot.kind         = 0;
+    slot.offsetNs     = offsetNs > INT32_MAX   ? INT32_MAX
+                        : offsetNs < INT32_MIN ? INT32_MIN
+                                               : static_cast<int32_t>(offsetNs);
+    slot.ratePpb      = m_ratePpb;
+    /* Dispersion is a Status computation, not a member, so the record carries
+     * the jitter it is built from and the client can apply the same growth. */
+    slot.dispersionNs = 0;
+    slot.jitterNs     = static_cast<uint16_t>(m_jitterNs > UINT16_MAX ? UINT16_MAX : m_jitterNs);
+    slot.flags        = m_timTpFlags;
+    slot.sats         = m_satCount;
+    slot.fix          = m_fixType;
+    ++m_sampleSeq;
+    if (m_sampleSeq - m_sampleOldest > kSampleRing) {
+        m_sampleOldest = m_sampleSeq - kSampleRing;
+    }
+    m_lastSampleEpoch = epoch;
+    m_lastSampleSet   = true;
+    portEXIT_CRITICAL(&m_mux);
+}
+
+size_t GpsTime::drainSamples(uint32_t since, Sample *out, size_t max, uint32_t &first,
+                             uint32_t &last, uint32_t &lost) const
+{
+    portENTER_CRITICAL(&m_mux);
+    const uint32_t newest = m_sampleSeq; /* one past the last written */
+    first                 = m_sampleOldest;
+    last                  = newest == 0 ? 0 : newest - 1;
+    if (since == 0 || since < m_sampleOldest) {
+        lost  = since == 0 ? 0 : m_sampleOldest - since;
+        since = m_sampleOldest;
+    } else {
+        lost = 0;
+    }
+    size_t copied = 0;
+    for (uint32_t seq = since; seq < newest && copied < max; ++seq) {
+        out[copied++] = m_samples[seq % kSampleRing];
+    }
+    portEXIT_CRITICAL(&m_mux);
+    return copied;
+}
+
 void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
 {
     const int64_t offsetNs = utcNs - monoNs;
+
+    /* Recorded before the fit gets its say: the gap and step paths below return
+     * without measuring, but the epoch itself was still paired and a client
+     * wants it either way. */
+    recordSample(static_cast<uint32_t>(utcNs / 1000000000LL), offsetNs);
 
     /* A gap in the reference: neither the fit below nor a second difference
      * wants a sample with a hole in front of it. Drop the window, drop the

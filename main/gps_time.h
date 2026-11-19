@@ -406,6 +406,37 @@ public:
 
     Status status() const;
 
+    /* One epoch of the clock, for a client to drain by sequence.
+     *
+     * The ring exists because the client is a poller: without it a viewer
+     * restart costs every epoch in between, and the only stamp a row can carry
+     * is when the HTTP reply happened to arrive. With it a row carries the
+     * receiver's own second and a sequence number, so a client can prove it
+     * missed nothing -- and the box says so when it did.
+     *
+     * seq advances on every epoch including a holdover, so contiguity is over
+     * epochs rather than over good measurements. kind says which this is. */
+    struct Sample {
+        uint32_t seq;
+        uint32_t epoch; /* the receiver second this describes */
+        int32_t  offsetNs;
+        int32_t  ratePpb;
+        uint16_t dispersionNs;
+        uint16_t jitterNs;
+        uint8_t  flags; /* TIM-TP flags, as published elsewhere */
+        uint8_t  kind;  /* 0 measured, 1 gap (no offset), 2 holdover */
+        uint8_t  sats;
+        uint8_t  fix;
+    };
+    static constexpr size_t kSampleRing = 900;
+
+    /* Copies up to max records at or after since, oldest first, and reports the
+     * range and how far since fell behind the ring. since == 0 means "from the
+     * oldest you still have", which is the restart and resync path. Returns the
+     * count copied. */
+    size_t drainSamples(uint32_t since, Sample *out, size_t max, uint32_t &first, uint32_t &last,
+                        uint32_t &lost) const;
+
     /* The per-satellite sample behind status().cn0Mean, copied into a caller
      * buffer, returning the count copied.
      *
@@ -584,6 +615,14 @@ private:
         int64_t utcNs  = 0; /* the UTC second that edge began */
     };
     void pushRateSample(int64_t monoNs, int64_t utcNs);
+    /* Appends one epoch, filling in any epochs missed since the last one. Runs
+     * on the servo task with the same lock discipline as the rate ring. */
+    void recordSample(uint32_t epoch, int64_t offsetNs);
+    Sample   m_samples[kSampleRing];
+    uint32_t m_sampleSeq       = 1; /* seq 0 is the "from the oldest" sentinel */
+    uint32_t m_sampleOldest    = 1;
+    uint32_t m_lastSampleEpoch = 0;
+    bool     m_lastSampleSet   = false;
     /* The cycle count at which esp_timer's microsecond ticks, so a count can be
      * turned into an offset inside the current microsecond. Calibrated once at
      * boot; zero until then, which means "fall back to whole microseconds". */

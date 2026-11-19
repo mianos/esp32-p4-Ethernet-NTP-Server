@@ -153,6 +153,7 @@ void NtpWebServer::register_routes()
         {"/gps/survey",   HTTP_POST, gps_survey_post_handler},
         {"/gps/info",     HTTP_GET,  gps_info_get_handler},
         {"/gps/sats",     HTTP_GET,  gps_sats_get_handler},
+        {"/gps/samples",  HTTP_GET,  gps_samples_get_handler},
         {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
         {"/gps/baud",     HTTP_POST, gps_baud_post_handler},
         {"/firmware",     HTTP_GET,  firmware_get_handler},
@@ -499,6 +500,65 @@ esp_err_t NtpWebServer::gps_pps_post_handler(httpd_req_t *req)
     ESP_LOGW(TAG, "POST /gps/pps from %s: suppress_s=%u", caller.c_str(),
              static_cast<unsigned>(applied));
     return sendJson(req, resp, 200);
+}
+
+esp_err_t NtpWebServer::gps_samples_get_handler(httpd_req_t *req)
+{
+    /* The drain endpoint: GET /gps/samples?since=<seq>&max=<n>.
+     *
+     * Deliberately not inside /gps/info. That reply is rebuilt every poll and
+     * is the bulk of the traffic; this one is bounded, cursor-addressed and
+     * only asked for by the logger. since=0 means "from the oldest you have",
+     * which is also what a client that has just restarted sends.
+     *
+     * lost is the ring telling the client how many epochs it dropped before
+     * reaching the cursor. Non-zero is a real device-side hole and the client
+     * writes one gap row for it; zero with a long absence is our own downtime,
+     * which the ring has simply absorbed. */
+    uint32_t since = 0;
+    size_t   max   = 120;
+    char     buf[96];
+    if (httpd_req_get_url_query_len(req) > 0 &&
+        httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
+        char value[16];
+        if (httpd_query_key_value(buf, "since", value, sizeof(value)) == ESP_OK) {
+            since = static_cast<uint32_t>(std::strtoul(value, nullptr, 10));
+        }
+        if (httpd_query_key_value(buf, "max", value, sizeof(value)) == ESP_OK) {
+            const unsigned long asked = std::strtoul(value, nullptr, 10);
+            if (asked > 0 && asked < 400) {
+                max = asked;
+            }
+        }
+    }
+
+    static GpsTime::Sample page[400];
+    uint32_t              first = 0;
+    uint32_t              last  = 0;
+    uint32_t              lost  = 0;
+    const size_t          got   = GpsTime::instance().drainSamples(since, page, max, first, last, lost);
+
+    /* Built by hand rather than through JsonWrapper: an array of arrays with
+     * eight fixed fields is a fraction of the bytes of 120 named objects, and
+     * the wrapper would add each item one allocation at a time. */
+    std::string body;
+    body.reserve(got * 72 + 128);
+    body += std::format("{{\"firstSeq\":{},\"lastSeq\":{},\"lost\":{},\"samples\":[", first,
+                        last, lost);
+    for (size_t i = 0; i < got; ++i) {
+        const GpsTime::Sample &s = page[i];
+        if (i != 0) {
+            body += ',';
+        }
+        body += std::format("[{},{},{},{},{},{},{},{}]", s.seq, s.epoch,
+                            s.kind == 0 ? s.offsetNs : 0, s.ratePpb, s.jitterNs, s.flags, s.sats,
+                            s.kind);
+    }
+    body += "]}";
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "cache-control", "no-store");
+    return httpd_resp_send(req, body.c_str(), body.size());
 }
 
 esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
