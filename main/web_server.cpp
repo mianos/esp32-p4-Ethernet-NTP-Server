@@ -682,6 +682,12 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     doc.AddItem("servo_steps", static_cast<double>(gps.servoSteps));
     doc.AddItem("servo_clamps", static_cast<double>(gps.servoClamps));
     doc.AddItem("edge_spikes", static_cast<double>(gps.edgeSpikes));
+    /* Edges the trust test refused outright, and whether the newest one passed.
+     * A spike is an edge that was used and landed somewhere unexpected; a reject
+     * is one that was never used, so the two are the difference between a pulse
+     * with noise on it and a pulse that is not keeping time. */
+    doc.AddItem("edge_rejects", static_cast<double>(gps.edgeRejects));
+    doc.AddItem("last_edge_trusted", gps.lastEdgeTrusted);
     doc.AddItem("tie_max_ns", gps.tieMaxNs);
     doc.AddItem("tie_rms_ns", gps.tieRmsNs);
 

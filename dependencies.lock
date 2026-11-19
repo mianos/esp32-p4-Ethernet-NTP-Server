@@ -12,7 +12,7 @@ dependencies:
   idf:
     source:
       type: idf
-    version: 6.0.1
+    version: 6.0.3
   jsonwrapper:
     component_hash: fc06d29df177f71c330edeae204f5d900a7bb9658fbd297a955d1c917212379e
     dependencies:

@@ -147,16 +147,53 @@ constexpr int32_t kRateLimitPpb = 200000;
  * after it by a whole second. */
 constexpr int64_t kMinEdgeSpacingUs = 500000;
 
+/* What counts as the next second rather than an extra or a missed one. The ISR
+ * above already refuses anything under 500 ms, so what these catch is the rest:
+ * an edge at 1.4 s is a pulse that was lost, one at 0.7 s is a receiver emitting
+ * twice, and both land in the fit at a place where their error has the most
+ * leverage. */
+constexpr int64_t kEdgeRegularMinUs = 900000;
+constexpr int64_t kEdgeRegularMaxUs = 1100000;
+
+/* Consecutive refused edges that mean the pulse is failing rather than merely
+ * glitching once. At 1 Hz this is forty-five seconds of unusable reference: the
+ * fit is thrown away and rebuilt rather than carried across the hole. */
+constexpr uint32_t kRejectStreakReacquire = 45;
+
+/* How far out the phase may sit, and how wide the fit's worst residual may be,
+ * before this stops calling itself locked. Age alone calls a servo locked while
+ * it is still ringing; these two magnitudes make "locked" a claim about the
+ * clock rather than about the interrupt still firing. The band is five times
+ * the worst jitter this reference will ever publish. */
+constexpr int64_t kLockOffsetNs = 100000;
+constexpr double  kLockTieMaxNs = 20000.0;
+
 /* The silence test never fires while a wrong rate still parses the odd frame.
  * But the floor has to sit below what a *correct* rate can look like while the
  * receiver re-acquires -- roughly two frames a second here, mostly ACKs -- or
  * the scan walks off a rate that was working. A wrong rate gives far less. */
 constexpr uint32_t kMinFramesPerSec = 1;
 
-/* A correction larger than this is a step, not a slew. IDF implements adjtime()
- * at ~1.5% of elapsed time, so a second of error would take a minute to clear --
- * during which the served clock is knowingly wrong. */
-constexpr int64_t kStepThresholdNs = 250000000; /* 250 ms */
+/* Where a step stops being cheaper than a slew -- and it is far lower than the
+ * slew rate alone suggests, because a step does not land on target. A step is a
+ * read of the clock followed by a set(): the set reaches the timebase tens of
+ * microseconds after the instant the timestamp was taken, so what it leaves
+ * behind is that latency, and the servo spends the following seconds removing
+ * it. A slew leaves nothing behind and is invisible to a client.
+ *
+ * So the threshold belongs at the point where the slew starts costing more than
+ * the step's own latency: 10 ms at IDF's ~1.5% per call converges in under a
+ * second, where the old 250 ms figure meant sixteen seconds of a knowingly
+ * wrong clock to save a write. Steps remain for the first set and for a module
+ * that has moved the clock under us, where the error is past what a slew can
+ * follow anyway. */
+constexpr int64_t kStepThresholdNs = 10000000; /* 10 ms */
+
+/* What a step leaves behind is bounded by the syscall path rather than by the
+ * servo, so it is removed with a slew straight away instead of waiting for the
+ * next edge to notice. Wider than this and the re-measurement has stopped
+ * describing the step, so it is left alone. */
+constexpr int64_t kPostStepSlewNs = 2000000; /* 2 ms */
 
 /* An edge landing further than this from where the last one put it is a
  * corrupted pulse rather than a slow crystal: the crystal's own worst case is
@@ -2931,13 +2968,100 @@ void GpsTime::anchor(time_t second)
      * honest way to quote what a holdover was worth. */
     int64_t predictedNs = 0;
     int64_t gapUs       = 0;
+    bool    hadAnchor   = false;
     {
         portENTER_CRITICAL(&m_mux);
         if (m_anchorValid && ppsMonoUs > m_anchorMonoUs) {
+            hadAnchor   = true;
             gapUs       = ppsMonoUs - m_anchorMonoUs;
             predictedNs = m_anchorUtcNs + gapUs * 1000 - gapUs * m_ratePpb / 1000000;
         }
         portEXIT_CRITICAL(&m_mux);
+    }
+
+    /* Classify the edge before it is allowed to move anything, on two
+     * independent questions that both have to be answered yes:
+     *
+     *  - regularity: did about a second pass since the last edge? The ISR has
+     *    already refused anything under half a second, so what is left is a
+     *    pulse that was lost (1.4 s) or one emitted twice (0.7 s);
+     *  - continuity: does the module's own date agree with the time that
+     *    actually passed? A receiver that reconfigured its pulse, or that has
+     *    just been stepped, emits an edge a second early or late while the
+     *    spacing looks perfect -- and a sample whose second is wrong is a whole
+     *    second wrong, not a little wrong.
+     *
+     * An edge failing either is counted and dropped. It does not become the
+     * anchor, does not enter the fit and does not steer: holding the anchor
+     * still lets the servo's own rate carry this second, which is what the fit
+     * is for, and costs one second of phase correction instead of poisoning
+     * five minutes of rate. */
+    /* Spacing is measured edge to edge, not from the anchor. The two differ
+     * exactly when it matters: a refused edge leaves the anchor behind, so the
+     * next gap measured from the anchor is two seconds while only one second of
+     * edges went by -- and testing against that refuses every edge after the
+     * first and never recovers. */
+    const int64_t edgeGapUs = m_lastEdgeMonoSet ? ppsMonoUs - m_lastEdgeMonoUs : 0;
+    const bool regular = !m_lastEdgeMonoSet || (edgeGapUs >= kEdgeRegularMinUs &&
+                                                edgeGapUs <= kEdgeRegularMaxUs);
+    /* Continuity is tested against the seconds that actually elapsed rather than
+     * against a flat one, or a returning edge after an outage would always fail
+     * it and the anchor would never come back. Half a second of rounding, and
+     * nothing beyond what the pulse allowed: a date that jumps further than the
+     * edges did is the pairing being wrong. */
+    const int64_t expectedS = m_lastEdgeMonoSet ? (edgeGapUs + 500000) / 1000000 : 1;
+    const bool advance = m_lastEdgeSecondSet &&
+                         static_cast<int64_t>(second) ==
+                             static_cast<int64_t>(m_lastEdgeSecond) + expectedS;
+    /* An edge that ends a holdover is outside a second's spacing by definition,
+     * and has to be usable: it is the one the holdover error is measured
+     * against. From kRateGapNs up, the fit is dropped by the gap path in
+     * pushRateSample() anyway, so admitting it costs the fit nothing. Between
+     * one missed edge and that, the spanning sample would still be fitted and
+     * the edge is refused instead. */
+    const bool resumed = m_lastEdgeMonoSet && edgeGapUs >= kRateGapNs;
+    const bool trusted = advance && (regular || resumed);
+
+    /* A pulse arriving a millisecond or more from where the fit and the anchor
+     * put it is being corrupted rather than merely late. Measured against the
+     * prediction in the monotonic domain, because that is the domain the servo
+     * works in -- against the realtime clock the figure would carry whatever
+     * slew is in flight. Only for ordinary edges: across a holdover the
+     * prediction has been running on the crystal for seconds and its error is
+     * expected, so testing there would count every return from a gap. */
+    if (trusted && hadAnchor && gapUs < kLockWindowUs &&
+        (static_cast<int64_t>(second) * 1000000000 - predictedNs > kEdgeSpikeNs ||
+         predictedNs - static_cast<int64_t>(second) * 1000000000 > kEdgeSpikeNs)) {
+        portENTER_CRITICAL(&m_mux);
+        ++m_edgeSpikes;
+        portEXIT_CRITICAL(&m_mux);
+    }
+
+    m_lastEdgeSecond    = second;
+    m_lastEdgeSecondSet = true;
+    m_lastEdgeMonoUs    = ppsMonoUs;
+    m_lastEdgeMonoSet   = true;
+
+    portENTER_CRITICAL(&m_mux);
+    m_lastEdgeTrusted = trusted;
+    uint32_t streak   = trusted ? 0 : ++m_edgeRejects;
+    if (trusted) {
+        m_edgeRejects = 0;
+    }
+    portEXIT_CRITICAL(&m_mux);
+
+    if (!trusted) {
+        /* One refused edge is one second of unconsumed correction. Forty-five
+         * of them in a row is not a coincidence: either the pulse or the
+         * module's idea of the second is wrong, and a fit built across that is
+         * worth less than the minute it takes to build a new one. */
+        if (streak == kRejectStreakReacquire) {
+            resetRateWindow();
+            ESP_LOGW(TAG, "servo: %u edges in a row refused (spacing or second continuity) "
+                          "- refitting the rate",
+                     static_cast<unsigned>(streak));
+        }
+        return;
     }
 
     portENTER_CRITICAL(&m_mux);
@@ -3049,6 +3173,23 @@ size_t GpsTime::drainSamples(uint32_t since, Sample *out, size_t max, uint32_t &
     return copied;
 }
 
+void GpsTime::resetRateWindow()
+{
+    m_rateCount = 0;
+    m_rateNext  = 0;
+    /* The first sample after this seeds the window instead of being differenced
+     * against one from the window that was just thrown away. */
+    m_lastRateOffsetSet = false;
+    /* The published deviation and sample count have to go with the window they
+     * were taken over, or the panel keeps quoting both for a sequence that no
+     * longer exists. rateSamples is normally only refreshed inside fitRate(),
+     * which early-returns below its minimum, so left alone it would sit at the
+     * old number for a minute. */
+    portENTER_CRITICAL(&m_mux);
+    m_rateSamples = 0;
+    portEXIT_CRITICAL(&m_mux);
+}
+
 void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
 {
     const int64_t offsetNs = utcNs - monoNs;
@@ -3058,19 +3199,9 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
      * spanning sample, and let the first post-gap second seed it again. */
     if (m_lastRateMonoSet && monoNs - m_lastRateMonoNs > kRateGapNs) {
         const int64_t gapMs = (monoNs - m_lastRateMonoNs) / 1000000;
-        m_rateCount         = 0;
-        m_rateNext          = 0;
-        m_lastRateOffsetSet = false;
-        m_lastRateMonoNs    = monoNs;
-        m_lastRateMonoSet   = true;
-        /* Published ADEV and anchor count have to go with the window they were
-         * taken over, or the panel keeps quoting a deviation and a sample count
-         * for a sequence that no longer exists. rateSamples is normally only
-         * refreshed inside fitRate(), which early-returns below its minimum, so
-         * left alone it would sit at the old number for a minute. */
-        portENTER_CRITICAL(&m_mux);
-        m_rateSamples = 0;
-        portEXIT_CRITICAL(&m_mux);
+        resetRateWindow();
+        m_lastRateMonoNs  = monoNs;
+        m_lastRateMonoSet = true;
         ESP_LOGW(TAG, "servo: %lld s without a reference, dropping the rate window",
                  static_cast<long long>(gapMs / 1000));
         return;
@@ -3083,13 +3214,7 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
          * again -- and a second out is worth saying out loud, because it is the
          * one failure that would otherwise look like a healthy clock. */
         const int64_t stepMs = (offsetNs - m_lastRateOffsetNs) / 1000000;
-        m_rateCount          = 0;
-        m_rateNext           = 0;
-        /* Same reason as the gap path: the published figures describe the old
-         * window until fitRate() is allowed to run again. */
-        portENTER_CRITICAL(&m_mux);
-        m_rateSamples = 0;
-        portEXIT_CRITICAL(&m_mux);
+        resetRateWindow();
         ESP_LOGW(TAG, "servo: %+lld ms step in the reference, refitting the rate",
                  static_cast<long long>(stepMs));
     }
@@ -3239,12 +3364,6 @@ void GpsTime::steer()
         portENTER_CRITICAL(&m_mux);
         m_offsetUs = offsetNs / 1000;
         m_offsetNs = offsetNs;
-        /* An edge this far from the last is not the edge being late, it is the
-         * pulse being corrupted. Counted rather than logged: they arrive in
-         * bursts and a log line each would bury the servo's own record. */
-        if (offsetNs > kEdgeSpikeNs || offsetNs < -kEdgeSpikeNs) {
-            ++m_edgeSpikes;
-        }
         portEXIT_CRITICAL(&m_mux);
     }
 
@@ -3275,12 +3394,39 @@ void GpsTime::steer()
         portENTER_CRITICAL(&m_mux);
         ++m_servoSteps;
         portEXIT_CRITICAL(&m_mux);
+
+        /* The set() reached the timebase after the instant gps was read, so the
+         * clock is now late by the syscall path -- tens of microseconds that
+         * would otherwise sit there until the next edge noticed. Measure it
+         * again and take it out with a slew, which is the one kind of
+         * correction that does not add latency of its own. */
+        struct timespec after = {};
+        if (now(after)) {
+            struct timespec sysAfter = {};
+            clock_gettime(CLOCK_REALTIME, &sysAfter);
+            const int64_t residueNs =
+                (static_cast<int64_t>(after.tv_sec) - static_cast<int64_t>(sysAfter.tv_sec)) *
+                    1000000000 +
+                (after.tv_nsec - sysAfter.tv_nsec);
+            if (residueNs <= kPostStepSlewNs && residueNs >= -kPostStepSlewNs) {
+                slew(residueNs);
+            }
+        }
         return;
     }
 
-    /* Under a quarter of a second: slew, so a client polling across this moment
-     * never sees the clock jump. IDF's adjtime() applies about 1.5% of elapsed
-     * time per call, i.e. this clears in seconds rather than minutes. */
+    /* Everything smaller than the step threshold is slewed, so a client polling
+     * across this moment never sees the clock jump -- and unlike a step the
+     * correction leaves no residue of its own behind. */
+    slew(offsetNs);
+}
+
+void GpsTime::slew(int64_t offsetNs)
+{
+    /* IDF's adjtime() applies about 1.5% of elapsed time per call, so this
+     * clears in seconds rather than minutes. A slew already in flight is not
+     * lost: adjtime() replaces the remaining adjustment rather than queueing
+     * behind it. */
     int64_t sec  = offsetNs / 1000000000;
     int64_t usec = (offsetNs % 1000000000) / 1000;
     if (usec < 0) {
@@ -3448,6 +3594,8 @@ GpsTime::Status GpsTime::status() const
     st.servoSteps        = m_servoSteps;
     st.servoClamps       = m_servoClamps;
     st.edgeSpikes        = m_edgeSpikes;
+    st.edgeRejects       = m_edgeRejects;
+    st.lastEdgeTrusted   = m_lastEdgeTrusted;
     dopAtUs              = m_dopAtUs;
     clockAtUs            = m_clockAtUs;
     navStatusAtUs        = m_navStatusAtUs;
@@ -3577,6 +3725,35 @@ GpsTime::Status GpsTime::status() const
      * explain that difference in its stratum. */
     st.locked = st.anchored && st.timeValid && st.fixType >= 2 && st.ppsAgeUs >= 0 &&
                 st.ppsAgeUs < st.lockWindowUs;
+
+    /* Age is not enough on its own: it says an edge arrived, not that the clock
+     * is being held where it belongs. Three further tests, and each of them
+     * demotes to stratum 16 rather than serving on a claim that has stopped
+     * being true:
+     *
+     *  - the newest edge passed the trust test. A pulse that was corrupt, or a
+     *    second that did not advance, means this second's anchor is a guess;
+     *  - while the edge is fresh, the phase sits inside the band. A servo still
+     *    ringing out from a step has edges arriving perfectly and an offset in
+     *    the hundreds of milliseconds;
+     *  - while the edge is fresh and a rate is known, the fit's worst residual
+     *    is inside the jitter bound. That is the slope test: a window assembled
+     *    across a fault fits a line through noise, and the residual is what
+     *    gives it away. It is skipped in a holdover, where the phase is not
+     *    measured at all and the residual is by definition the gap.
+     *
+     * The offset and residual tests are skipped until a rate exists, so the
+     * first minute still locks on a fresh, trusted edge as it always did. */
+    if (st.locked) {
+        const bool fresh = st.ppsAgeUs <= kLockWindowUs;
+        if (!st.lastEdgeTrusted) {
+            st.locked = false;
+        } else if (fresh && (st.offsetNs > kLockOffsetNs || st.offsetNs < -kLockOffsetNs)) {
+            st.locked = false;
+        } else if (fresh && st.rateKnown && st.tieMaxNs > kLockTieMaxNs) {
+            st.locked = false;
+        }
+    }
 
     if (st.locked) {
         /* What this reference states about itself, and where each term comes
@@ -3730,9 +3907,17 @@ std::string GpsTime::describe() const
         return std::format("GPS/PPS, {} fix, {} satellites", fixText(st.fixType), st.satellites);
     }
     if (st.fixType >= 2 && st.timeValid) {
-        /* A fix but no edge we can pair it with: the receiver is fine and the
-         * pulse is not, which is a different fault from "no fix" and worth
-         * saying differently in the boot log. */
+        /* A fix but no edge we can trust: the receiver is fine and the pulse is
+         * not, which is a different fault from "no fix" and worth saying
+         * differently in the boot log. The refused case is not the same as the
+         * missing one either -- edges are arriving, they just are not seconds --
+         * and reading "no fresh edge" on a box whose LED is blinking would send
+         * the reader to the wrong wire. */
+        if (!st.lastEdgeTrusted) {
+            return std::format("GPS/PPS, {} fix, {} edges refused in a row (spacing or "
+                               "second continuity)",
+                               fixText(st.fixType), st.edgeRejects);
+        }
         return std::format("GPS/PPS, {} fix but no fresh PPS edge", fixText(st.fixType));
     }
     return "GPS/PPS (no fix yet)";
@@ -3750,6 +3935,12 @@ void GpsTime::logLockChange()
         } else if (st.ppsCount == 0) {
             ESP_LOGW(TAG, "no PPS edges: is the module's timepulse wired to GPIO%d?",
                      static_cast<int>(kPpsPin));
+        } else if (!st.lastEdgeTrusted) {
+            /* Edges arriving and being refused is the one PPS fault that looks
+             * healthy from a distance: the counter climbs and nothing works. */
+            ESP_LOGW(TAG, "not locked: %u PPS edges in a row refused (wrong spacing, or the "
+                          "module's second did not advance with them)",
+                     st.edgeRejects);
         } else {
             ESP_LOGW(TAG, "not locked (fix %s, last edge %lld ms ago): stratum 16 until it returns",
                      fixText(st.fixType), static_cast<long long>(st.ppsAgeUs / 1000));

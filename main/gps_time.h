@@ -326,6 +326,14 @@ public:
         uint32_t servoSteps   = 0;
         uint32_t servoClamps  = 0;
         uint32_t edgeSpikes   = 0;
+        /* The trust test's verdict on the newest edge, and how many edges in a
+         * row it has refused. Spikes are edges that arrived where nothing
+         * predicted; rejects are edges that failed the spacing or the
+         * second-continuity test and were therefore never used at all. A count
+         * climbing towards the re-acquire threshold is the pulse failing
+         * slowly, which no single offset figure shows. */
+        bool     lastEdgeTrusted = true;
+        uint32_t edgeRejects     = 0;
         uint32_t bridgeSessions = 0;
         uint32_t bridgeRefused  = 0;
         /* Whether a client holds the port right now, and how many. The point of
@@ -615,6 +623,12 @@ private:
         int64_t utcNs  = 0; /* the UTC second that edge began */
     };
     void pushRateSample(int64_t monoNs, int64_t utcNs);
+
+    /* Drop the rate fit and seed it again from the next edge. */
+    void resetRateWindow();
+
+    /* Correct the realtime clock by adjtime() rather than by a set. */
+    void slew(int64_t offsetNs);
     /* Appends one epoch, filling in any epochs missed since the last one. Runs
      * on the servo task with the same lock discipline as the rate ring. */
     void recordSample(uint32_t epoch, int64_t offsetNs);
@@ -802,6 +816,15 @@ private:
     uint32_t   m_servoSteps        = 0;
     uint32_t   m_servoClamps       = 0;
     uint32_t   m_edgeSpikes        = 0;
+    /* The trust test's history: how many edges in a row it has refused, and
+     * the module's second at the previous edge (kept separately from m_lastFix,
+     * which only advances on an edge that was actually anchored). */
+    uint32_t   m_edgeRejects       = 0;
+    bool       m_lastEdgeTrusted   = true;
+    time_t     m_lastEdgeSecond    = 0;
+    bool       m_lastEdgeSecondSet = false;
+    int64_t    m_lastEdgeMonoUs    = 0;
+    bool       m_lastEdgeMonoSet   = false;
     /* Phase relative to the fit's base sample, for the deviation below. The
      * absolute offsets are ~1.8e18 ns and a double resolves only ~256 ns there,
      * so a second difference taken on them cancels to exactly zero -- measured
