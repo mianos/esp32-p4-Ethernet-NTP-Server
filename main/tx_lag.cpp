@@ -18,10 +18,16 @@ namespace {
 
 constexpr const char *TAG = "tx_lag";
 
-/* How often to measure. The figure is a property of the build and the link, not
- * of the moment, so this only has to track a slow change; the EWMA does the
- * rest. */
-constexpr uint32_t kEveryMs = 30000;
+/* How often to measure. The figure is a property of the moment, not of the
+ * build, so this is frequent enough that the window closes faster than the
+ * thing it is tracking moves, and cheap enough to ignore: one datagram to
+ * ourselves every few seconds. */
+constexpr uint32_t kEveryMs = 5000;
+
+/* How many samples before the centre is published. Five is enough for a median
+ * to survive two bad ones; below it, the value would jump between the first few
+ * probes and a reply would carry whatever the last one saw. */
+constexpr uint32_t kMinSamples = 5;
 
 /* Twelve bytes: big enough that the stack does the real work, small enough that
  * the wire time (about 1 us at 100 Mbit) is well under what this measures. */
@@ -31,10 +37,6 @@ constexpr size_t kProbeBytes = 12;
  * about the granularity of the clock; the ceiling is a busy moment. */
 constexpr int64_t kMinNs = 2000;
 constexpr int64_t kMaxNs = 5000000;
-
-/* Weight of a new sample. A handful of probes converge and a single outlier
- * cannot move the figure much. */
-constexpr double kAlpha = 0.25;
 
 /* How long one probe waits before giving up. */
 /* The probe socket's own port, so the datagram is delivered to a bound socket the
@@ -70,6 +72,64 @@ void TxLag::taskEntry(void *arg)
     static_cast<TxLag *>(arg)->task();
 }
 
+void TxLag::absorb(int64_t lag)
+{
+    m_ring[m_ringPos] = lag;
+    m_ringPos         = (m_ringPos + 1) % kRing;
+    if (m_ringFill < kRing) {
+        ++m_ringFill;
+    }
+    const uint32_t n = m_samples.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    /* A median needs enough of the ring to be a median of anything. Until then
+     * the newest sample stands, which is what the old code did on its first. */
+    if (m_ringFill < kMinSamples) {
+        m_lagNs.store(lag, std::memory_order_relaxed);
+        return;
+    }
+
+    /* Insertion sort of at most fifteen values: cheaper than a call and the ring
+     * is already in cache. */
+    int64_t sorted[kRing] = {};
+    for (uint32_t i = 0; i < m_ringFill; ++i) {
+        const int64_t v = m_ring[i];
+        uint32_t      j = i;
+        while (j > 0 && sorted[j - 1] > v) {
+            sorted[j] = sorted[j - 1];
+            --j;
+        }
+        sorted[j] = v;
+    }
+
+    const int64_t median = sorted[m_ringFill / 2];
+
+    /* Spread around that centre, taken the same way so a single stall cannot
+     * widen the stated error. */
+    int64_t deviations[kRing] = {};
+    for (uint32_t i = 0; i < m_ringFill; ++i) {
+        const int64_t d = m_ring[i] - median;
+        deviations[i]   = d < 0 ? -d : d;
+    }
+    for (uint32_t i = 0; i < m_ringFill; ++i) {
+        const int64_t v = deviations[i];
+        uint32_t      j = i;
+        while (j > 0 && deviations[j - 1] > v) {
+            deviations[j] = deviations[j - 1];
+            --j;
+        }
+        deviations[j] = v;
+    }
+
+    m_lagNs.store(median, std::memory_order_relaxed);
+    m_scatterNs.store(deviations[m_ringFill / 2], std::memory_order_relaxed);
+
+    /* Every sample, because the point of this run is to see the path move: the
+     * raw value says what one probe saw, the two aggregates say what the
+     * correction and the claimed error would be if they were published now. */
+    ESP_LOGI(TAG, "txprobe raw %lld us  median %.1f  mad %.1f  n %u", (long long)(lag / 1000),
+             lagUs(), scatterUs(), (unsigned)n);
+}
+
 void TxLag::task()
 {
     /* Nothing to measure until there is an address to send to. */
@@ -83,15 +143,7 @@ void TxLag::task()
     for (;;) {
         const int64_t lag = probe();
         if (lag >= kMinNs && lag <= kMaxNs) {
-            const int64_t previous = m_lagNs.load(std::memory_order_relaxed);
-            const int64_t next =
-                previous == 0 ? lag
-                              : static_cast<int64_t>(previous + kAlpha * (lag - previous));
-            m_lagNs.store(next, std::memory_order_relaxed);
-            const uint32_t n = m_samples.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (n == 1 || n % 20 == 0) {
-                ESP_LOGI(TAG, "transmit correction %.1f us over %u probes", lagUs(), n);
-            }
+            absorb(lag);
         }
         vTaskDelay(pdMS_TO_TICKS(kEveryMs));
     }

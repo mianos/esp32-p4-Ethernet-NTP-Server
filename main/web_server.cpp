@@ -358,6 +358,7 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
          * answered in interleaved mode. Zero / zero on a client that does not
          * ask for it. */
         json.AddItem("ntp_tx_correction_us", server.txLagUs());
+        json.AddItem("ntp_tx_scatter_us", server.txScatterUs());
         json.AddItem("ntp_interleaved_served",
                      static_cast<double>(server.interleavedServed()));
         json.AddItem("ntp_clients", static_cast<double>(counters.clients));

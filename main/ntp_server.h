@@ -68,8 +68,14 @@ public:
         return m_interleaved.load(std::memory_order_relaxed);
     }
     /* Measured transmit-path delay, so a reader can see the correction the
-     * replies carry. Zero means "not measured yet". */
+     * replies carry. Zero means "not measured yet".
+     *
+     * Paired with the spread the same window produced. The two answer different
+     * questions -- what a reply is shifted by, and how much that shift is
+     * trusted -- and a run that watches only the first cannot tell a path that
+     * moved from a loop reporting its own noise. */
     double txLagUs() const { return TxLag::instance().lagUs(); }
+    double txScatterUs() const { return TxLag::instance().scatterUs(); }
 
     /* What the responder has done with requests, beyond counting the answered
      * ones. `answered` alone cannot tell a client that is being rate-limited
