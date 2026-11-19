@@ -41,6 +41,7 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 
+#include "clock_source.h"
 #include "eth_link.h"
 #include "gps_time.h"
 #include "ntp_time.h"
@@ -77,8 +78,13 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    /* The receiver's UART and PPS line first: a fix takes tens of seconds to
-     * settle, so the sooner it is listening the sooner the clock is real. */
+    /* The arbiter's quiet timer starts before the receiver does: under
+     * timeSource=auto a device that boots with no antenna has to fall back
+     * fifteen seconds from here, and the timer is what counts it. */
+    ClockSource::instance().begin();
+
+    /* The receiver's UART and PPS line: a fix takes tens of seconds to settle,
+     * so the sooner it is listening the sooner the clock is real. */
     ESP_ERROR_CHECK(GpsTime::instance().begin());
 
     /* Armed before the first DHCP DISCOVER: lwIP only keeps an option-42 NTP

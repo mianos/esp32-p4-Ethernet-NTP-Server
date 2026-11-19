@@ -1,5 +1,7 @@
 #include "ntp_server.h"
 
+#include "clock_source.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
@@ -79,13 +81,6 @@ constexpr uint32_t kRootDelay = 65; /* 1 ms */
  * 54 ms of claimed uncertainty, which is what a client needs in order to
  * demote this server instead of trusting a clock nobody is correcting. */
 constexpr double kDispersionPpm = 15.0;
-
-/* How recent the last sync has to be for the clock to count as locked: fifteen
- * missed polls of NtpTime's one-a-minute interval. The window has to be
- * comfortably wider than the poll interval, or a healthy server flaps to stratum
- * 16 between polls; it still catches discipline stopping altogether, because at
- * 15 ppm this window is 13 ms of drift, which rootDispersion() advertises. */
-constexpr time_t kLockWindowS = 900;
 
 /* ---- Rate limiting ----------------------------------------------------
  * A LAN full of clients polling at minpoll is fine; one client in a loop is
@@ -389,18 +384,18 @@ public:
     TimeReference reference() const override
     {
         NtpTime &ntp = NtpTime::instance();
-        const time_t last = ntp.lastSync();
-        const time_t now  = time(nullptr);
 
         TimeReference ref;
-        ref.lastSync = last;
+        ref.lastSync = ntp.lastSync();
         /* "Synced" only records ever having been set, so the freshness window
          * is what makes this a lock: an upstream that went away an hour ago
          * leaves a clock that is drifting with no one correcting it. The
-         * client's own reach register is deliberately not consulted -- it
+         * window lives in ClockSource because the arbiter needs the same
+         * answer, and two definitions of "still good" would be one too many.
+         * The client's own reach register is deliberately not consulted -- it
          * flaps on a single lost poll, and it is empty for a clock set by
          * POST /ntp/sync while timeSource is off. */
-        ref.locked = ntp.synced() && last != 0 && now > last && (now - last) < kLockWindowS;
+        ref.locked = ClockSource::instance().upstreamLocked();
         if (!ref.locked) {
             ref.stratum = kStratumUnlocked;
             ref.refId   = kRefIdInit;
@@ -489,7 +484,28 @@ private:
     {
         static const std::unique_ptr<TimeRef> upstream = makeUpstreamTimeRef();
         static const std::unique_ptr<TimeRef> gps      = makeGpsTimeRef();
-        return Settings::instance().timeSource() == Settings::TimeSource::Gps ? *gps : *upstream;
+
+        switch (Settings::instance().timeSource()) {
+        case Settings::TimeSource::Gps:
+            return *gps;
+        case Settings::TimeSource::Auto:
+            break;
+        case Settings::TimeSource::Dhcp:
+        case Settings::TimeSource::Static:
+        case Settings::TimeSource::Off:
+            return *upstream;
+        }
+
+        /* "auto": the receiver is served for as long as it is still claiming
+         * something worth serving -- locked, or holding over on its fitted rate,
+         * which is what the receiver's own reference reports -- and the
+         * upstream takes the reply only once the client has actually synced.
+         * While neither holds, the receiver answers stratum 16, which is the
+         * honest reply and the same one it gives today. */
+        if (ClockSource::instance().owner() != ClockOwner::Upstream) {
+            return *gps;
+        }
+        return *upstream;
     }
 };
 

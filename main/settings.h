@@ -36,12 +36,21 @@ public:
 
     /* Where the system clock gets its time from. "gps" is the stratum-1 path:
      * the u-blox receiver on UART1, disciplined by its PPS line (gps_time.cpp).
-     * The others are the upstream SNTP client. */
+     * The others are the upstream SNTP client.
+     *
+     * "auto" is gps with an upstream behind it: the receiver is served and
+     * steered while it is healthy, and the moment it stops correcting (no
+     * pulse for fifteen seconds) the SNTP client is started and takes the
+     * clock, the served reference and the stratum with it. The rule that makes
+     * it safe is that exactly one of them owns CLOCK_REALTIME at any instant;
+     * see clock_source.cpp. "gps" stays strict, so a device configured before
+     * this existed keeps the behaviour it was configured for. */
     enum class TimeSource {
         Off,    // leave the clock alone: it runs from reset
         Dhcp,   // ask the DHCP server for option 42
         Static, // poll ntpServer()
         Gps,    // u-blox over UART plus PPS
+        Auto,   // GPS while it is healthy, the upstream while it is not
     };
 
     static Settings &instance();
@@ -58,8 +67,8 @@ public:
      * always serves UTC regardless of it. */
     const std::string &tz() const { return m_tz; }
 
-    /* The stored timeSource text: "off", "dhcp", "static", "gps", or junk left
-     * by a hand-edited blob (timeSource() maps that to Off). */
+    /* The stored timeSource text: "off", "dhcp", "static", "gps", "auto", or
+     * junk left by a hand-edited blob (timeSource() maps that to Off). */
     const std::string &timeSourceText() const { return m_timeSource; }
 
     /* The parsed answer, not the string: the responder task asks this on every

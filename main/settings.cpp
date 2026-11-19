@@ -93,6 +93,9 @@ Settings::TimeSource Settings::parseTimeSource(const std::string &text)
     if (text == "gps") {
         return TimeSource::Gps;
     }
+    if (text == "auto") {
+        return TimeSource::Auto;
+    }
     return TimeSource::Off;
 }
 
@@ -102,6 +105,7 @@ const char *Settings::timeSourceName(TimeSource source)
     case TimeSource::Dhcp:   return "dhcp";
     case TimeSource::Static: return "static";
     case TimeSource::Gps:    return "gps";
+    case TimeSource::Auto:   return "auto";
     case TimeSource::Off:    break;
     }
     return "off";

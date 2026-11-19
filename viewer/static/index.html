@@ -448,6 +448,13 @@ function render(body) {
     cell('Fix', fixNames[fix] || `type ${fix}`, fix >= 2 ? 'good' : 'bad'),
     cell('Time valid', body.time.time_valid ? 'yes' : 'no', body.time.time_valid ? 'good' : 'bad'),
     cell('Synced', body.time.synced ? 'yes' : 'no', body.time.synced ? 'good' : 'bad'),
+    /* Which reference holds the clock. Anything but the receiver means an
+       upstream is correcting it, so the offsets beside it are not a claim
+       about the receiver's own accuracy. */
+    cell('Clock', body.time.owner === 'gps' ? 'GPS'
+         : body.time.fallback ? `${body.time.owner} ${duration(body.time.fallback_s)}`
+         : body.time.owner,
+         body.time.owner === 'gps' ? 'good' : 'warn'),
     cell('PPS age', fmt(body.time.pps_age_ms / 1000, 2, ' s'),
          (body.time.pps_age_ms ?? 1e9) > 2000 ? 'bad' : 'good'),
     cell('Edges', fmt(body.time.pps_count)),

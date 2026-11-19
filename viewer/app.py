@@ -588,7 +588,13 @@ def build(poller: Poller) -> dict[str, Any]:
         },
         "time": {
             "synced": health.get("ntp_synced"),
+            # What is configured, and which reference actually has the clock:
+            # they differ on an auto box that has fallen back.
             "source": text(health.get("ntp_source")),
+            "owner": text(health.get("time_owner")) or "gps",
+            "client": text(health.get("ntp_client")),
+            "fallback": bool(health.get("gps_fallback")),
+            "fallback_s": integer(health.get("fallback_age_s")),
             "fix": integer(health.get("gps_fix")),
             "stratum": integer(health.get("ntp_stratum")),
             "refid": text(health.get("ntp_refid")),

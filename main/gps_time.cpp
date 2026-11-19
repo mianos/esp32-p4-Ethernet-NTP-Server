@@ -21,6 +21,7 @@
 #include "soc/systimer_struct.h"
 #include "esp_timer.h"
 
+#include "clock_source.h"
 #include "ntp_time.h"
 #include "settings.h"
 
@@ -3420,13 +3421,6 @@ void GpsTime::fitRate()
 
 void GpsTime::steer()
 {
-    /* Only while this source is the configured one. With timeSource=dhcp an
-     * SNTP poll owns the system clock, and two owners fighting over it is worse
-     * than either of them alone. */
-    if (Settings::instance().timeSource() != Settings::TimeSource::Gps) {
-        return;
-    }
-
     struct timespec gps = {};
     if (!now(gps)) {
         return;
@@ -3451,6 +3445,16 @@ void GpsTime::steer()
      * and is the number the servo is actually holding. */
     recordSample(static_cast<uint32_t>(gps.tv_sec), offsetNs);
 
+    /* Who may write CLOCK_REALTIME: this source, or the fallback's upstream
+     * client. The measurement above happens either way -- the offset is
+     * published and charted through a fallback too, and it is what shows the two
+     * references pulling apart -- but only the owner corrects anything. Two
+     * owners is worse than either alone: the client would step, this would
+     * measure the step as an error, and the two would undo each other. */
+    if (!ClockSource::instance().gpsSteers()) {
+        return;
+    }
+
     if (!m_stepped || offsetNs > kStepThresholdNs || offsetNs < -kStepThresholdNs) {
         struct timeval tv = {};
         tv.tv_sec         = gps.tv_sec;
@@ -3471,6 +3475,16 @@ void GpsTime::steer()
         portENTER_CRITICAL(&m_mux);
         ++m_servoSteps;
         portEXIT_CRITICAL(&m_mux);
+
+        /* A step is a phase discontinuity the fit cannot see coming and the
+         * step detector below cannot catch: that one compares samples and
+         * trips at kRateResetNs (100 ms), while a step here is anything over
+         * 10 ms. Left in the window, the samples on the far side of it are a
+         * constant offset away and *tieMaxNs* -- the lock's own worst-residual
+         * test -- sits above its bound for the five minutes the window takes
+         * to flush. That is five minutes of stratum 16 immediately after every
+         * hand-back from a fallback, which is the opposite of the point. */
+        resetRateWindow();
 
         /* The set() reached the timebase after the instant gps was read, so the
          * clock is now late by the syscall path -- tens of microseconds that
@@ -4044,6 +4058,22 @@ void GpsTime::logLockChange()
 {
     const Status st = status();
 
+    /* The fallback arbiter, once a second and from boot: a device whose antenna
+     * is missing has to be able to hand over without anybody asking it to.
+     *
+     * What it is told is "the pulse is back and trustworthy", which is
+     * deliberately *not* the lock. Lock also needs the phase inside
+     * kLockOffsetNs, and while a fallback holds the clock the phase is the
+     * distance between the upstream's clock and the receiver's -- it cannot come
+     * back into the band until this servo steers again, and the servo is gated
+     * off until the arbiter hands back. Judging the return on the lock alone
+     * therefore never returns: each waits for the other. */
+    const bool holding = st.locked && st.ppsAgeUs > kLockWindowUs;
+    const bool pulseGood = !holding && st.anchored && st.timeValid && st.fixType >= 2 &&
+                           st.ppsAgeUs >= 0 && st.ppsAgeUs <= kLockWindowUs &&
+                           st.lastEdgeTrusted;
+    ClockSource::instance().observe(pulseGood);
+
     if (st.locked != m_wasLocked) {
         m_wasLocked = st.locked;
         if (st.locked) {
@@ -4067,7 +4097,6 @@ void GpsTime::logLockChange()
     /* Inside a holdover nothing above changes for ten minutes, which would
      * otherwise look like a healthy clock that has quietly lost its PPS. Say it
      * when the edge goes stale, and say it again when it comes back. */
-    const bool holding = st.locked && st.ppsAgeUs > kLockWindowUs;
     if (holding != m_holdoverLogged) {
         m_holdoverLogged = holding;
         if (holding) {

@@ -688,8 +688,11 @@ private:
     bool     m_lastSampleSet   = false;
     void fitRate();
 
-    /* Slew the system clock towards the anchor, but only while this source is
-     * the configured one -- two owners of CLOCK_REALTIME is worse than either. */
+    /* Measure the offset against the anchor, then slew or step the system clock
+     * towards it if this source owns CLOCK_REALTIME. The measurement happens
+     * whether it owns it or not, so a fallback's divergence stays visible;
+     * ownership is ClockSource's to decide, and under timeSource=gps it is
+     * always ours. */
     void steer();
 
     /* The edge, written by the interrupt and read by the task and the responder.

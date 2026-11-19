@@ -402,7 +402,7 @@ httpd's built-in plain-text page.
 | GET    | `/config`       | current settings                                 |
 | POST   | `/config`       | apply any subset of the keys, persist, echo back |
 | POST   | `/config/reset` | restore compiled-in defaults and persist         |
-| POST   | `/ntp/sync`     | force an upstream poll, wait up to 5 s for it (with `timeSource=gps`: report the lock) |
+| POST   | `/ntp/sync`     | force an upstream poll, wait up to 5 s for it (while the receiver is serving: report the lock) |
 | POST   | `/gps/pps`      | make the PPS interrupt ignore edges for `{"suppress_s":N}` seconds — the holdover test hook |
 | GET    | `/firmware`     | build + slot info for the running image          |
 | POST   | `/firmware`     | write the body into the inactive OTA slot, reboot into it |
@@ -436,10 +436,20 @@ RFC 5905 reachability register: non-zero means the server has answered. `ip` is
 omitted until the DHCP lease lands, and `ipv6_linklocal` / `ipv6_global` are
 omitted until each address exists.
 
-With `timeSource=gps` the same object answers the same question about the other
-source: `ntp_server` is `null` (nothing is polled, so there is no upstream),
-`ntp_synced` is the receiver's lock, and `gps_fix` (u-blox fix type: 0 none,
-2 2D, 3 3D), `gps_sats` and `gps_pps_age_ms` describe the receiver itself — see [GPS](#gps-u-blox-lea-8--pps) for what those numbers mean.
+With the receiver serving (`timeSource=gps`, or `auto` while it is healthy)
+`ntp_server` is `null` — nothing is polled, so there is no upstream — `ntp_synced`
+is the receiver's lock, and `gps_fix` (u-blox fix type: 0 none, 2 2D, 3 3D),
+`gps_sats` and `gps_pps_age_ms` describe the receiver itself — see [GPS](#gps-u-blox-lea-8--pps) for what those numbers mean. The block reports whichever
+source is actually serving, not the setting, so on an `auto` box that has fallen
+back it is the upstream half.
+
+`ntp_source` is the *configured* value and reads `auto` on a box that may be on
+either; `time_owner` is the one that actually has the clock (`gps`, `handing` or
+`upstream`), `ntp_client` is what the SNTP client is doing, `gps_fallback` says
+whether one is engaged, `fallback_age_s` how long this episode has run and
+`fallback_count` how many there have been since boot. `gps_fix`, `gps_sats` and
+`gps_pps_age_ms` are present on every path, including while the upstream is
+serving, because then they are the answer to "is it the antenna or the sky?".
 
 The GPS side of `/healthz` is deliberately five fields: `gps_fix`, `gps_sats`,
 `gps_pps_age_ms`, and the two configuration failures below when they are set. It
@@ -471,8 +481,8 @@ are not registered are ignored, so an older/newer client will not break it:
 |------------|----------------------------------|--------|
 | `hostname` | `esp32p4-ntp`                    | netif hostname, and the name the DHCP client sends as option 12. A change reaches the lease at the next renewal. |
 | `tz`       | `AEST-10AEDT,M10.1.0,M4.1.0/3`   | POSIX TZ used by `localtime()` for `/healthz`. Presentation only — NTP always serves UTC. |
-| `timeSource` | `dhcp`                         | `dhcp` takes the upstream NTP server from DHCP option 42, `static` polls `ntpServer`, `gps` disciplines the clock from the u-blox receiver over UART plus its PPS line ([GPS](#gps-u-blox-lea-8--pps)), `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
-| `ntpServer` | *(empty)*                       | Upstream NTP host or address, used only when `timeSource` is `static`. An IPv6 literal is stored but cannot sync — lwIP's SNTP client resolves A records only ([IPv6](#ipv6)). |
+| `timeSource` | `dhcp`                         | `dhcp` takes the upstream NTP server from DHCP option 42, `static` polls `ntpServer`, `gps` disciplines the clock from the u-blox receiver over UART plus its PPS line ([GPS](#gps-u-blox-lea-8--pps)), `auto` is `gps` with the upstream behind it ([fallback](#fallback-when-the-receiver-stops)), `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
+| `ntpServer` | *(empty)*                       | Upstream NTP host or address, used when `timeSource` is `static` and preferred over the lease's server when it is `auto`. An IPv6 literal is stored but cannot sync — lwIP's SNTP client resolves A records only ([IPv6](#ipv6)). |
 | `serveNtp` | `on`                            | `off` stops the UDP/123 responder within a second and starts it again on `on`, no reboot. Serving an unlocked clock is safe by construction: it answers stratum 16 with LI 3, which tells clients to ignore it. |
 
 ```console
@@ -541,8 +551,9 @@ There is no RTC on this board, so until something disciplines it `time()` is
 1970 + uptime — useless for an NTP *server*. Two things fix that now: the GPS
 above (the real reference, `timeSource=gps`) and `NtpTime`, the upstream SNTP
 client, which is what `timeSource=dhcp` or `static` still uses — and what runs
-when there is no receiver on the pins. It polls and **steps** (not slews) the
-system clock; `sdkconfig.defaults` is the map:
+when there is no receiver on the pins, or under `auto` when the receiver stops
+([fallback](#fallback-when-the-receiver-stops)). It polls and **steps** (not
+slews) the system clock; `sdkconfig.defaults` is the map:
 
 | Setting                            | Why |
 |------------------------------------|-----|
@@ -633,6 +644,50 @@ The dependencies are mianesp components pulled over git (`main`), plus
 `espressif/cjson` from the registry — cJSON left the IDF core in v6. The first
 build downloads them into `managed_components/` (git-ignored), and it needs an
 SSH key with read access to `mianos/mianesp`.
+
+## Fallback when the receiver stops
+
+`timeSource=auto` is the stratum-1 GPS path with an upstream behind it. While
+the receiver is locked it is served and it steers, exactly as `gps` does. When
+the receiver stops correcting — no pulse for fifteen seconds, which is three
+lost seconds plus a margin — the SNTP client is started against `ntpServer` if
+one is set and the lease's option-42 server otherwise, and the clock, the served
+reference and the stratum all move to it.
+
+The rule that makes this safe is that **exactly one source owns
+`CLOCK_REALTIME` at any instant**. Ownership changes on the client's first
+sync, not on a timer, and going back is stop-then-hand-back: the receiver has to
+hold for twenty seconds, the client is stopped, and only then is the servo
+allowed to steer again. A settling window keeps the edge that lands on the same
+instant as the client's step from measuring that step as an error and undoing
+it. While the client owns the clock the receiver keeps measuring — the offsets
+at `/gps/info` continue and are taken against the upstream's clock — because
+that is what shows the two references pulling apart.
+
+While the receiver still claims something worth serving (locked, or holding over
+on its fitted rate) it is what answers, so a short outage stays a stratum-1
+answer with growing dispersion. Only when that claim expires does the upstream
+answer, at stratum 3 with the LAN guess for root delay: lwIP's client cannot
+measure its own round trip and the upstream's own stratum is not visible through
+it, so the claim is one hop pessimistic rather than optimistic. With neither
+source usable the board answers stratum 16 and LI 3, as it always has.
+
+Three limits are worth knowing:
+
+ - **Nothing to fall back to.** No `ntpServer` and no option 42 in the lease
+   means the client comes up with nothing to poll; the board then serves the
+   receiver until its holdover expires and stratum 16 after that. Option 42 is
+   collected from boot even while the client is stopped, but a lease that
+   arrives before `auto` is set is not replayed — name a server with
+   `ntpServer` instead of relying on it.
+ - **A server pointing at this board.** An offset measured against ourselves is
+   always zero, so the clock would look disciplined and free-run. The dotted quad
+   is compared against the leased address and skipped with a warning; a host name
+   that resolves back here is not caught.
+ - **It does not make the clock good.** A WAN path is milliseconds where the
+   receiver is microseconds, so a fallback is about not lying and not drifting,
+   not about staying a reference. `gps_fallback`, `time_owner` and
+   `fallback_age_s` at `/healthz` are how a client or a person tells.
 
 ## GPS (u-blox LEA-M8T + PPS)
 

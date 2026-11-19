@@ -17,10 +17,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "clock_source.h"
 #include "eth_link.h"
 #include "gps_time.h"
-#include "net_state.h"
 #include "net_log.h"
+#include "net_state.h"
 #include "ntp_server.h"
 #include "ntp_time.h"
 #include "settings.h"
@@ -248,19 +249,41 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
 
     /* The clock: where it is disciplined from, which upstream server is in use,
      * and whether it has actually been set rather than merely looking sane.
-     * With timeSource=gps there is no upstream to name: the receiver's own state
-     * replaces that half, and ntp_synced means "the configured source is
-     * locked", which for the GPS is a fix plus a fresh PPS edge. */
-    json.AddItem("ntp_source", ntp.sourceName());
-    if (ntp.source() == Settings::TimeSource::Gps) {
-        const GpsTime::Status gps = GpsTime::instance().status();
+     * With the receiver serving there is no upstream to name: its own state
+     * replaces that half, and ntp_synced means "the source that is serving is
+     * locked", which for the GPS is a fix plus a fresh PPS edge.
+     *
+     * ntp_source is the *configured* value and so reads "auto" on a box that
+     * may be on either; time_owner says which one actually has the clock, and
+     * ntp_client what the client is doing. Reporting only the setting would
+     * leave a fallback invisible in exactly the field a reader looks at. */
+    const ClockSource &arbiter = ClockSource::instance();
+    json.AddItem("ntp_source", Settings::timeSourceName(settings.timeSource()));
+    json.AddItem("ntp_client", ntp.sourceName());
+    json.AddItem("time_owner", ClockSource::name(arbiter.owner()));
+    json.AddItem("gps_fallback", arbiter.owner() != ClockOwner::Gps);
+    /* Cumulative, so it stays after the fallback ends; the age is per episode. */
+    json.AddItem("fallback_count", static_cast<double>(arbiter.engagements()));
+    if (arbiter.owner() != ClockOwner::Gps) {
+        json.AddItem("fallback_age_s", static_cast<double>(arbiter.ageS()));
+    }
+
+    /* The receiver's headline state whatever is serving. On a fallback these
+     * three are the answer to "is it the antenna, or the sky?", and they used
+     * to vanish exactly then because they sat in the receiver's own branch. */
+    const GpsTime::Status gps = GpsTime::instance().status();
+    json.AddItem("gps_fix", static_cast<double>(gps.fixType));
+    json.AddItem("gps_sats", static_cast<double>(gps.satellites));
+    if (gps.ppsAgeUs >= 0) {
+        json.AddItem("gps_pps_age_ms", static_cast<double>(gps.ppsAgeUs / 1000));
+    }
+
+    if (arbiter.owner() != ClockOwner::Upstream) {
         json.AddNull("ntp_server");
         json.AddItem("ntp_synced", gps.locked);
         if (gps.lastFix != 0) {
             json.AddItem("last_sync", static_cast<double>(gps.lastFix));
         }
-        json.AddItem("gps_fix", static_cast<double>(gps.fixType));
-        json.AddItem("gps_sats", static_cast<double>(gps.satellites));
         /* Time validity, edge count and whether an edge has ever been paired
          * with a date. A 3D fix with invalid time is the state that quietly
          * serves rubbish, and `locked` alone hides it by folding all three
@@ -269,9 +292,6 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("gps_time_valid", gps.timeValid);
         json.AddItem("gps_pps_count", static_cast<double>(gps.ppsCount));
         json.AddItem("gps_anchored", gps.anchored);
-        if (gps.ppsAgeUs >= 0) {
-            json.AddItem("gps_pps_age_ms", static_cast<double>(gps.ppsAgeUs / 1000));
-        }
         /* Framing health. The answer and the receiver going quiet look the same
          * from every other field here, and these three tell them apart: good
          * frames, frames the checksum or the length table threw away, and how
@@ -317,8 +337,11 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         } else {
             json.AddNull("ntp_server");
         }
-        json.AddItem("ntp_synced", ntp.synced());
-        if (ntp.synced()) {
+        /* The freshness window, not "was set once at boot": under auto this
+         * branch is also reached while a fallback is being served, and a stale
+         * sync has to read as unsynced or a reader would trust it. */
+        json.AddItem("ntp_synced", arbiter.upstreamLocked());
+        if (ntp.lastSync() != 0) {
             json.AddItem("last_sync", static_cast<double>(ntp.lastSync()));
         }
     }
@@ -396,7 +419,10 @@ esp_err_t NtpWebServer::config_post_handler(httpd_req_t *req)
     if (settings.hostname() != hostname_before) {
         apply_hostname(settings.hostname());
     }
-    /* A changed timeSource/ntpServer takes effect now, not at the next boot. */
+    /* A changed timeSource/ntpServer takes effect now, not at the next boot.
+     * The arbiter goes first: leaving "auto" has to hand the clock back before
+     * NtpTime decides whether a client should be running at all. */
+    ClockSource::instance().applySettings();
     NtpTime::instance().applySettings();
     /* And so does serveNtp: off stops the responder, on starts it. */
     NtpServer::instance().applySettings();
@@ -414,6 +440,7 @@ esp_err_t NtpWebServer::config_reset_post_handler(httpd_req_t *req)
     settings.save();
     settings.log();
     apply_hostname(settings.hostname());
+    ClockSource::instance().applySettings();
     NtpTime::instance().applySettings();
     NtpServer::instance().applySettings(); /* serveNtp is back to its default */
     ESP_LOGW(TAG, "POST /config/reset from %s: back to compiled-in defaults", caller.c_str());
@@ -425,13 +452,25 @@ esp_err_t NtpWebServer::config_reset_post_handler(httpd_req_t *req)
 
 esp_err_t NtpWebServer::sync_post_handler(httpd_req_t *req)
 {
-    const std::string caller = callerAddress(req);
+    const std::string caller   = callerAddress(req);
+    const Settings   &settings = Settings::instance();
 
     /* The GPS is not polled: it reports once a second whether anyone asks or
      * not, so "sync now" has nothing to trigger. It still has an answer worth
      * giving -- is the clock disciplined at this moment -- so the same reply
-     * shape is built from the receiver's state rather than refused. */
-    if (Settings::instance().timeSource() == Settings::TimeSource::Gps) {
+     * shape is built from the receiver's state rather than refused.
+     *
+     * While the receiver is the one serving, not the setting: under auto it
+     * keeps the clock until the fallback's upstream has synced, and a request
+     * in that window is answered here rather than polling a client that may not
+     * be running yet. off/dhcp/static are never the receiver's, so they keep the
+     * 409 the client gives below. */
+    const Settings::TimeSource configured = settings.timeSource();
+    const bool gpsServing =
+        configured == Settings::TimeSource::Gps ||
+        (configured == Settings::TimeSource::Auto &&
+         ClockSource::instance().owner() != ClockOwner::Upstream);
+    if (gpsServing) {
         const GpsTime::Status gps = GpsTime::instance().status();
         if (!gps.locked) {
             ESP_LOGW(TAG, "POST /ntp/sync from %s: no GPS lock", caller.c_str());
@@ -578,6 +617,14 @@ esp_err_t NtpWebServer::gps_samples_get_handler(httpd_req_t *req)
  * as well, and 50-odd keys that only a human reads were going out every 2 s. */
 static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
 {
+    /* Who owns the clock. The receiver's own statistics read the same during a
+     * fallback as before it, so without this a chart cannot tell a working
+     * receiver from one whose offsets are being measured against somebody
+     * else's clock. */
+    const ClockSource &arbiter = ClockSource::instance();
+    doc.AddItem("time_owner", ClockSource::name(arbiter.owner()));
+    doc.AddItem("gps_fallback", arbiter.owner() != ClockOwner::Gps);
+
     if (!gps.moduleId.empty()) {
         doc.AddItem("module", gps.moduleId);
     }
@@ -847,6 +894,9 @@ static constexpr const char *kPolled[] = {
     /* Kept although nothing parses them yet: the trust test and the pairing
      * margin are what the operator watches after a pulse fault. */
     "edge_rejects", "last_edge_trusted", "pair_age_us", "pair_age_max_us", "pair_age_s",
+    /* Whether the receiver still owns the clock, which every offset in the
+     * document is measured against. */
+    "time_owner", "gps_fallback",
 };
 
 /* Drop every key the polled endpoint has no use for. The names are collected
