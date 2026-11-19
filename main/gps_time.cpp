@@ -3053,16 +3053,6 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
 {
     const int64_t offsetNs = utcNs - monoNs;
 
-    /* Recorded before the fit gets its say: the gap and step paths below return
-     * without measuring, but the epoch itself was still paired and a client
-     * wants it either way.
-     *
-     * The offset here is 1.8e18 -- nanoseconds since the epoch less nanoseconds
-     * since boot -- and will not fit the record's 32 bits. What is wanted is
-     * the phase, so it goes in modulo one second. */
-    recordSample(static_cast<uint32_t>(utcNs / 1000000000LL),
-                 (utcNs - monoNs) % 1000000000LL);
-
     /* A gap in the reference: neither the fit below nor a second difference
      * wants a sample with a hole in front of it. Drop the window, drop the
      * spanning sample, and let the first post-gap second seed it again. */
@@ -3257,6 +3247,13 @@ void GpsTime::steer()
         }
         portEXIT_CRITICAL(&m_mux);
     }
+
+    /* The record carries what a client reads, not the raw counter phase. The
+     * monotonic counter is never steered -- every correction is arithmetic in
+     * now() -- so its phase against GPS sits at milliseconds and wanders with
+     * the crystal, while the offset here is against the steered realtime clock
+     * and is the number the servo is actually holding. */
+    recordSample(static_cast<uint32_t>(gps.tv_sec), offsetNs);
 
     if (!m_stepped || offsetNs > kStepThresholdNs || offsetNs < -kStepThresholdNs) {
         struct timeval tv = {};
