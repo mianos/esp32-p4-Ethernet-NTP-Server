@@ -124,13 +124,17 @@ class Recorder:
         self.db.execute("DELETE FROM rx WHERE t < ?", (horizon,))
 
     def put(self, epoch: int, row: tuple[Any, ...]) -> None:
-        """One device record. epoch is the primary key, so a re-fetch is free."""
+        """One device record. epoch is the primary key, so a re-fetch is free.
+
+        The box records ppb and the column is ppm, so it is divided here: the
+        charts, the bursts and adev.py all treat the column as ppm.
+        """
         if self.db is None:
             return
         self.db.execute(
             "INSERT OR IGNORE INTO samples"
             " (epoch, boot, seq, kind, offset_ns, rate_ppm, jitter_ns, flags, sats)"
-            " VALUES (?,?,?,?,?,?,?,?,?)", (epoch,) + row)
+            " VALUES (?,?,?,?,?,?,?,?,?)", (epoch,) + row[:4] + (row[4] / 1000.0,) + row[5:])
         self._prune()
 
     def gap(self, first_epoch: int, count: int) -> None:
