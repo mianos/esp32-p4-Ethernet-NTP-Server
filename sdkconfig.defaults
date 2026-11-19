@@ -69,3 +69,10 @@ CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=6144
 # going away under an OTA write, as the old GPIO interrupt did.
 CONFIG_MCPWM_ISR_CACHE_SAFE=y
 CONFIG_MCPWM_CTRL_FUNC_IN_IRAM=y
+
+# The status poller holds connections open and the transmit probe takes a
+# socket every five seconds; ten is not enough for a listen backlog plus
+# both, and the httpd then fails to accept with ENFILE every couple of
+# seconds. Requests still succeed on the retry, so it read as log noise
+# rather than the shortage it is.
+CONFIG_LWIP_MAX_SOCKETS=16
