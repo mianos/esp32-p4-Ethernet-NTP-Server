@@ -56,7 +56,7 @@ without positions.
 |---|---|
 | `GET /` | the page |
 | `GET /api/snapshot` | everything the page draws, merged and sanitised |
-| `GET /api/history` | last 5 minutes of C/N0, noise, AGC and offset |
+| `GET /api/history?span=` | C/N0, noise, AGC, offset and rate over the span, bucketed |
 | `GET /api/long?span=` | logged span, bucketed, with its ADEV |
 | `GET /api/sats.csv` | current satellites as CSV |
 | `GET /healthz` | this viewer's own health, 503 when the box is stale |

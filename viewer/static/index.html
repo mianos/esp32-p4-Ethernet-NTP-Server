@@ -213,7 +213,8 @@
     <div class="panel">
       <h2>Receiver</h2>
       <div class="strip" id="rxstrip"></div>
-      <div class="sparks" id="sparks" style="margin-top:12px"></div>
+      <div class="strip" id="sparkspans" style="margin-top:12px"></div>
+      <div class="sparks" id="sparks"></div>
     </div>
   </div>
 </div>
@@ -730,10 +731,30 @@ function buildSpans() {
 }
 
 /* Sparklines from the viewer's own ring buffer, not the box. */
+/* The strips are drawn from the log rather than the 300 s ring, so they can
+ * reach back past it when a longer range is chosen. */
+let sparkSpan = 300;
+
+function buildSparkSpans() {
+  const host = $('sparkspans');
+  host.replaceChildren();
+  for (const [span, label] of [[300, '5 min'], [3600, '1 h'], [86400, '24 h'], [604800, '7 d']]) {
+    const button = document.createElement('button');
+    button.textContent = label;
+    button.className = span === sparkSpan ? 'on' : '';
+    button.addEventListener('click', () => {
+      sparkSpan = span;
+      buildSparkSpans();
+      renderSparks();
+    });
+    host.appendChild(button);
+  }
+}
+
 async function renderSparks() {
   let payload;
   try {
-    const response = await fetch('/api/history');
+    const response = await fetch(`/api/history?span=${sparkSpan}`);
     if (response.status === 304) return;
     payload = await response.json();
   } catch { return; }
@@ -807,6 +828,7 @@ for (const mode of ['cno', 'res']) {
 
 drawFurniture();
 tick();
+buildSparkSpans();
 renderSparks();
 buildSpans();
 renderLong();

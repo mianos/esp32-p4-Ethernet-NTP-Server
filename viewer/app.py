@@ -55,6 +55,7 @@ PRUNE_S = 3600.0
 # Long-span transport: never more than this many buckets in one reply, and a
 # reply is reused for LONG_CACHE_S rather than recomputed per view.
 LONG_BUCKETS = 600
+SPARK_BUCKETS = 300
 LONG_CACHE_S = 30.0
 LONG_SPANS = (300, 3600, 21600, 86400, 604800)
 
@@ -96,13 +97,22 @@ class Recorder:
             "CREATE TABLE IF NOT EXISTS samples ("
             " t REAL PRIMARY KEY, gap INTEGER NOT NULL,"
             " rate_ppm REAL, offset_us REAL, dispersion_us REAL,"
-            " flags INTEGER, fix INTEGER, sats INTEGER, holdover_s REAL)"
+            " flags INTEGER, fix INTEGER, sats INTEGER, holdover_s REAL,"
+            " noise_dbm REAL, agc REAL, cn0_mean REAL, cn0_used REAL)"
         )
+        # The receiver statistics were added after the table existed, so bring
+        # an older file up rather than dropping the history in it.
+        have = {row[1] for row in self.db.execute("PRAGMA table_info(samples)")}
+        for column in ("noise_dbm", "agc", "cn0_mean", "cn0_used"):
+            if column not in have:
+                self.db.execute(f"ALTER TABLE samples ADD COLUMN {column} REAL")
 
     def _insert(self, row: tuple[Any, ...]) -> None:
         if self.db is None:
             return
-        self.db.execute("INSERT OR REPLACE INTO samples VALUES (?,?,?,?,?,?,?,?,?)", row)
+        self.db.execute(
+            "INSERT OR REPLACE INTO samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row
+        )
         if time.time() >= self.next_prune:
             self.next_prune = time.time() + PRUNE_S
             self.db.execute("DELETE FROM samples WHERE t < ?", (time.time() - RETENTION_D * 86400.0,))
@@ -116,7 +126,8 @@ class Recorder:
             now, 0, num(info.get("rate_ppm")), num(info.get("offset_us")),
             num(info.get("dispersion_us")), num(info.get("timtp_flags")),
             num(health.get("gps_fix")), num(health.get("gps_sats")),
-            num(info.get("last_holdover_s")),
+            num(info.get("last_holdover_s")), num(info.get("noise_dbm")),
+            num(info.get("agc")), num(info.get("cn0_mean")), num(info.get("cn0_used")),
         ))
 
     def gap(self) -> None:
@@ -125,7 +136,7 @@ class Recorder:
         if now - self.last_t < RECORD_S:
             return
         self.last_t = now
-        self._insert((now, 1, None, None, None, None, None, None, None))
+        self._insert((now, 1) + (None,) * 11)
 
     def close(self) -> None:
         if self.db is not None:
@@ -766,9 +777,47 @@ async def long_window(span: int = 3600) -> JSONResponse:
     return JSONResponse(payload, headers={"cache-control": "max-age=10"})
 
 
+def build_history(span: int) -> list[dict[str, Any]]:
+    """Sparkline series out of the log, averaged into at most SPARK_BUCKETS.
+
+    Means rather than the min-max bands the big charts use: these strips are a
+    few pixels tall and the value is the shape, not the extremes.
+    """
+    since = time.time() - span
+    db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    rows = db.execute(
+        "SELECT t, noise_dbm, agc, cn0_mean, offset_us, rate_ppm FROM samples"
+        " WHERE gap = 0 AND t >= ? ORDER BY t", (since,)
+    ).fetchall()
+    db.close()
+    if not rows:
+        return []
+
+    width = max(1.0, span / SPARK_BUCKETS)
+    buckets: dict[int, list[tuple[Any, ...]]] = {}
+    for row in rows:
+        buckets.setdefault(int((row[0] - since) / width), []).append(row)
+
+    out = []
+    for key in sorted(buckets):
+        group = buckets[key]
+        point: dict[str, Any] = {"t": round(since + (key + 0.5) * width, 1)}
+        for name, index, scale in (("noise_dbm", 1, 1.0), ("agc", 2, 1.0),
+                                   ("cn0_mean", 3, 1.0), ("offset_ns", 4, 1000.0),
+                                   ("rate_ppm", 5, 1.0)):
+            values = [g[index] for g in group if g[index] is not None]
+            if values:
+                point[name] = round(sum(values) / len(values) * scale, 1)
+        out.append(point)
+    return out
+
+
 @app.get("/api/history")
-async def history() -> JSONResponse:
-    return JSONResponse({"box": BOX_HOST, "samples": list(poller.history)}, headers={"cache-control": "no-store"})
+async def history(span: int = 300) -> JSONResponse:
+    span = max(120, min(span, RETENTION_D * 86400))
+    samples = await asyncio.to_thread(build_history, span)
+    return JSONResponse({"box": BOX_HOST, "span": span, "samples": samples},
+                        headers={"cache-control": "no-store"})
 
 
 @app.get("/healthz")
