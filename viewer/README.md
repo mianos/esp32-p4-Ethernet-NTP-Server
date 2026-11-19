@@ -57,6 +57,7 @@ without positions.
 | `GET /` | the page |
 | `GET /api/snapshot` | everything the page draws, merged and sanitised |
 | `GET /api/history?span=` | C/N0, noise, AGC, offset and rate over the span, bucketed |
+| `GET /gps/samples?since=&max=` | on the box: drain the epoch ring by cursor |
 | `GET /api/long?span=` | logged span, bucketed, with its ADEV |
 | `GET /api/sats.csv` | current satellites as CSV |
 | `GET /healthz` | this viewer's own health, 503 when the box is stale |
@@ -88,12 +89,22 @@ uses `httpx` now. `nc` is no longer needed at runtime.
 
 The sparkline keeps 300 s, which is what the firmware's own 300 s fit is over
 and therefore the most the live page can honestly draw. Anything longer needs
-storage, so the poller also appends a row per poll to SQLite (default 2 s):
-`rate_ppm`,
-`offset_us`, `dispersion_us`, `timtp_flags`, fix, satellites and the last
-holdover. A failed poll writes a **gap row** rather than nothing, because
-interpolating across an outage invents stability at the longest averaging
-times, which is where nobody can check it by eye.
+storage.
+
+Two things are stored and they are not the same kind. `samples` is drained from
+the box's own 900-epoch ring by cursor: those rows carry the receiver's second
+and a sequence, so a viewer restart costs nothing the ring still holds and an
+overrun is written down as a gap. `rx` is our own observation at poll time --
+noise, AGC, C/N0 -- which has no epoch of its own and cannot be restored after
+the fact.
+
+`samples` columns: `epoch` (primary key, absolute), `boot`, `seq`, `kind`
+(0 measured, 1 gap), `offset_ns`, `rate_ppm`, `jitter_ns`, `flags`, `sats`.
+
+A gap row is written down rather than left out, because interpolating across one
+invents stability at the longest averaging times, which is where nobody can
+check it by eye. Two things produce one: an epoch the ring had already dropped,
+and a failed poll of our own.
 
 `adev.py` reads that file and prints overlapping Allan deviation. Frequency by
 default, since the 1 µs stamp makes phase ADEV a picture of the timer below a

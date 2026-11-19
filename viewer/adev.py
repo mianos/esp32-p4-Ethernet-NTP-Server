@@ -34,8 +34,11 @@ FIT_WINDOW_S = 300.0
 
 def load(path: str, field: str) -> list[tuple[float, float]]:
     db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # epoch is the device's own second and kind 0 is a measurement; a gap row
+    # has no offset and is there to break the run.
     rows = db.execute(
-        f"SELECT t, {field} FROM samples WHERE gap = 0 AND {field} IS NOT NULL ORDER BY t"
+        f"SELECT epoch, {field} FROM samples WHERE kind = 0 AND {field} IS NOT NULL"
+        " ORDER BY epoch"
     ).fetchall()
     db.close()
     return [(float(t), float(v)) for t, v in rows]
@@ -100,10 +103,10 @@ def main() -> int:
     ap.add_argument("--max-tau", type=float, default=86400.0)
     args = ap.parse_args()
 
-    field = args.field or ("offset_us" if args.phase else "rate_ppm")
-    # ppb for a frequency in ppm; seconds for a phase in microseconds. ADEV is
-    # a fractional quantity in both cases, so the phase is divided by tau too.
-    scale = 1e3 if field == "rate_ppm" else 1e-6
+    field = args.field or ("offset_ns" if args.phase else "rate_ppm")
+    # ppb for a frequency in ppm; seconds for a phase in nanoseconds. ADEV is a
+    # fractional quantity in both cases, so the phase is divided by tau too.
+    scale = 1e3 if field == "rate_ppm" else 1e-9
 
     try:
         samples = load(args.db, field)

@@ -45,8 +45,10 @@ MIN_BASELINE_S = 30  # below this much history, claim nothing
 
 # Long-term recording, which the sparkline's 300 s cannot serve. sqlite because
 # the geometry here is one writer, one reader later, and no server to run.
-# RECORD_S is a floor on the interval between rows, not a scheduler: the poller
-# already ticks at POLL_S and a row per poll is what the statistics want. A day
+# RECORD_S is a floor on the interval between receiver observations, not a
+# scheduler: the poller already ticks at POLL_S and a row per poll is what the
+# statistics want. Device epochs are not throttled by it -- they come in as the
+# box hands them over. A day
 # is 86 400 rows and about 5 MB, so RETENTION_D can be generous.
 DB_PATH = os.environ.get("DB", os.path.join(HERE, "samples.db"))
 RECORD_S = float(os.environ.get("RECORD_S", "1"))
@@ -95,11 +97,17 @@ class Recorder:
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute(
             "CREATE TABLE IF NOT EXISTS samples ("
-            " t REAL PRIMARY KEY, gap INTEGER NOT NULL,"
-            " rate_ppm REAL, offset_us REAL, dispersion_us REAL,"
-            " flags INTEGER, fix INTEGER, sats INTEGER, holdover_s REAL,"
-            " noise_dbm REAL, agc REAL, cn0_mean REAL, cn0_used REAL)"
+            " epoch INTEGER PRIMARY KEY, boot INTEGER, seq INTEGER,"
+            " kind INTEGER NOT NULL, offset_ns INTEGER,"
+            " rate_ppm REAL, jitter_ns INTEGER, flags INTEGER, sats INTEGER)"
         )
+        # Our own observations, not the box's: the receiver statistics are a
+        # reading taken at poll time and have no epoch of their own.
+        self.db.execute(
+            "CREATE TABLE IF NOT EXISTS rx ("
+            " t REAL PRIMARY KEY, noise_dbm REAL, agc REAL, cn0_mean REAL, cn0_used REAL)"
+        )
+        self.db.execute("CREATE TABLE IF NOT EXISTS cursor (id INTEGER PRIMARY KEY, seq INTEGER)")
         # The receiver statistics were added after the table existed, so bring
         # an older file up rather than dropping the history in it.
         have = {row[1] for row in self.db.execute("PRAGMA table_info(samples)")}
@@ -107,36 +115,62 @@ class Recorder:
             if column not in have:
                 self.db.execute(f"ALTER TABLE samples ADD COLUMN {column} REAL")
 
-    def _insert(self, row: tuple[Any, ...]) -> None:
+    def _prune(self) -> None:
+        if time.time() < self.next_prune or self.db is None:
+            return
+        self.next_prune = time.time() + PRUNE_S
+        horizon = time.time() - RETENTION_D * 86400.0
+        self.db.execute("DELETE FROM samples WHERE epoch < ?", (int(horizon),))
+        self.db.execute("DELETE FROM rx WHERE t < ?", (horizon,))
+
+    def put(self, epoch: int, row: tuple[Any, ...]) -> None:
+        """One device record. epoch is the primary key, so a re-fetch is free."""
         if self.db is None:
             return
         self.db.execute(
-            "INSERT OR REPLACE INTO samples VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", row
-        )
-        if time.time() >= self.next_prune:
-            self.next_prune = time.time() + PRUNE_S
-            self.db.execute("DELETE FROM samples WHERE t < ?", (time.time() - RETENTION_D * 86400.0,))
+            "INSERT OR IGNORE INTO samples"
+            " (epoch, boot, seq, kind, offset_ns, rate_ppm, jitter_ns, flags, sats)"
+            " VALUES (?,?,?,?,?,?,?,?,?)", (epoch,) + row)
+        self._prune()
 
-    def sample(self, info: dict[str, Any], health: dict[str, Any]) -> None:
+    def gap(self, first_epoch: int, count: int) -> None:
+        """Epochs the ring dropped before reaching our cursor.
+
+        Distinct from our own downtime, which the ring absorbs: these are
+        seconds the box held and no longer has, so they go in as gaps rather
+        than being closed over.
+        """
+        if self.db is None or count <= 0:
+            return
+        for offset in range(count):
+            self.db.execute(
+                "INSERT OR IGNORE INTO samples (epoch, kind) VALUES (?, 1)",
+                (first_epoch + offset,))
+        self._prune()
+
+    def observe(self, info: dict[str, Any]) -> None:
+        """Receiver statistics as read at poll time."""
+        if self.db is None:
+            return
         now = time.time()
         if now - self.last_t < RECORD_S:
             return
         self.last_t = now
-        self._insert((
-            now, 0, num(info.get("rate_ppm")), num(info.get("offset_us")),
-            num(info.get("dispersion_us")), num(info.get("timtp_flags")),
-            num(health.get("gps_fix")), num(health.get("gps_sats")),
-            num(info.get("last_holdover_s")), num(info.get("noise_dbm")),
-            num(info.get("agc")), num(info.get("cn0_mean")), num(info.get("cn0_used")),
-        ))
+        self.db.execute(
+            "INSERT OR REPLACE INTO rx VALUES (?,?,?,?,?)",
+            (now, num(info.get("noise_dbm")), num(info.get("agc")),
+             num(info.get("cn0_mean")), num(info.get("cn0_used"))))
+        self._prune()
 
-    def gap(self) -> None:
-        """A failed poll, or the box not answering."""
-        now = time.time()
-        if now - self.last_t < RECORD_S:
-            return
-        self.last_t = now
-        self._insert((now, 1) + (None,) * 11)
+    def cursor(self) -> int:
+        if self.db is None:
+            return 0
+        row = self.db.execute("SELECT seq FROM cursor WHERE id = 1").fetchone()
+        return int(row[0]) if row else 0
+
+    def set_cursor(self, seq: int) -> None:
+        if self.db is not None:
+            self.db.execute("INSERT OR REPLACE INTO cursor VALUES (1, ?)", (seq,))
 
     def close(self) -> None:
         if self.db is not None:
@@ -165,6 +199,7 @@ class Poller:
     consecutive_failures: int = 0
     task: asyncio.Task[None] | None = None
     recorder: Recorder = field(default_factory=lambda: Recorder(DB_PATH))
+    boot: int = -1
 
     async def _get(self, path: str) -> dict[str, Any]:
         """GET through httpx.
@@ -189,6 +224,37 @@ class Poller:
             raise RuntimeError(f"{path}: not an object")
         return decoded
 
+    async def drain(self) -> None:
+        """Take every epoch the box still holds, from our cursor.
+
+        The cursor is what makes a viewer restart cheap: the ring keeps the
+        epochs, and the box says how many it dropped before reaching us, so our
+        own downtime leaves no hole and its overrun leaves an honest one.
+        """
+        boots = int(self.doc["health"].get("boots") or 0)
+        if boots != self.boot:
+            # A different boot numbers its sequences from the start again, so
+            # the stored cursor means nothing. The epochs are absolute, so no
+            # rows collide and only the cursor resets.
+            self.boot = boots
+            self.recorder.set_cursor(0)
+        cursor = self.recorder.cursor()
+        for _ in range(8):
+            page = await self._get(f"/gps/samples?since={cursor + 1}&max=120")
+            rows = page.get("samples") or []
+            lost = int(page.get("lost") or 0)
+            if lost and rows:
+                self.recorder.gap(int(rows[0][1]) - lost, lost)
+            for seq, epoch, offset, rate, jitter, flags, sats, kind in rows:
+                self.recorder.put(epoch, (self.boot, seq, kind,
+                                          offset if kind == 0 else None,
+                                          rate, jitter, flags, sats))
+            last = int(page.get("lastSeq") or 0)
+            if not rows or cursor >= last:
+                break
+            cursor = last
+            self.recorder.set_cursor(cursor)
+
     async def once(self) -> None:
         self.polls += 1
         self.last_try = time.time()
@@ -198,11 +264,12 @@ class Poller:
             health, info, sats = await asyncio.gather(
                 self._get("/healthz"), self._get("/gps/info"), self._get("/gps/sats")
             )
+            await self.drain()
         except RuntimeError as exc:
             self.failures += 1
             self.consecutive_failures += 1
             self.error = str(exc)
-            self.recorder.gap()
+            self.recorder.gap(int(time.time()), 1)
             # Rebuilt on failure too, so a client that arrives mid-outage gets
             # the stale-but-honest view rather than the last good one silently.
             self.rebuild()
@@ -234,7 +301,7 @@ class Poller:
                 "ubx": num(info.get("msg_ubx")),
             }
         )
-        self.recorder.sample(info, health)
+        self.recorder.observe(info)
         # After the append: build() reads the history this poll just added.
         self.rebuild()
 
@@ -719,23 +786,28 @@ def build_long(span: int) -> dict[str, Any]:
     only averages hides exactly the spikes the page exists to show. The ADEV is
     computed from the raw rows, not the buckets: downsampling first would put a
     false floor under the short octaves.
+
+    Device-sourced rows only. A gap row has no offset and is there to break the
+    band rather than to be averaged into it.
     """
-    since = time.time() - span
+    since = int(time.time() - span)
     db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     rows = db.execute(
-        "SELECT t, offset_us, rate_ppm FROM samples WHERE gap = 0 AND t >= ? ORDER BY t", (since,)
+        "SELECT epoch, offset_ns, rate_ppm FROM samples"
+        " WHERE kind = 0 AND epoch >= ? ORDER BY epoch", (since,)
     ).fetchall()
     db.close()
 
-    width = max(1.0, span / LONG_BUCKETS)
-    buckets: dict[int, list[tuple[float, float | None, float | None]]] = {}
-    for t, off, rate in rows:
-        buckets.setdefault(int((t - since) / width), []).append((t, off, rate))
+    width = max(1, span // LONG_BUCKETS)
+    buckets: dict[int, list[tuple[int, float, float]]] = {}
+    for epoch, offset, rate in rows:
+        buckets.setdefault((epoch - since) // width, []).append(
+            (epoch, offset / 1000.0, rate))
 
     series = []
     for key in sorted(buckets):
         group = buckets[key]
-        point: dict[str, Any] = {"t": round(since + (key + 0.5) * width, 1)}
+        point: dict[str, Any] = {"t": since + (key + 0.5) * width}
         for name, index in (("off", 1), ("rate", 2)):
             values = [g[index] for g in group if g[index] is not None]
             if values:
@@ -747,7 +819,7 @@ def build_long(span: int) -> dict[str, Any]:
     # One tau per octave, out to an eighth of the span: past that there are too
     # few independent windows for the answer to mean anything.
     deviation = []
-    pairs = [(t, rate) for t, _, rate in rows if rate is not None]
+    pairs = [(float(epoch), float(rate)) for epoch, _, rate in rows if rate is not None]
     parts = analysis.runs(pairs)
     tau0 = analysis.sample_interval(pairs)
     if parts and tau0 > 0:
@@ -778,36 +850,47 @@ async def long_window(span: int = 3600) -> JSONResponse:
 
 
 def build_history(span: int) -> list[dict[str, Any]]:
-    """Sparkline series out of the log, averaged into at most SPARK_BUCKETS.
+    """Sparkline series over the span, averaged into at most SPARK_BUCKETS.
 
     Means rather than the min-max bands the big charts use: these strips are a
     few pixels tall and the value is the shape, not the extremes.
+
+    Two sources, because they are two kinds of thing: the receiver statistics
+    are our own observation at poll time, the offset and rate are the box's
+    epochs. Both land in the same buckets so the strips line up.
     """
-    since = time.time() - span
+    since = int(time.time() - span)
     db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
-    rows = db.execute(
-        "SELECT t, noise_dbm, agc, cn0_mean, offset_us, rate_ppm FROM samples"
-        " WHERE gap = 0 AND t >= ? ORDER BY t", (since,)
+    observed = db.execute(
+        "SELECT CAST(t AS INTEGER), noise_dbm, agc, cn0_mean FROM rx WHERE t >= ?", (since,)
+    ).fetchall()
+    measured = db.execute(
+        "SELECT epoch, offset_ns, rate_ppm FROM samples WHERE kind = 0 AND epoch >= ?", (since,)
     ).fetchall()
     db.close()
-    if not rows:
+    if not observed and not measured:
         return []
 
-    width = max(1.0, span / SPARK_BUCKETS)
-    buckets: dict[int, list[tuple[Any, ...]]] = {}
-    for row in rows:
-        buckets.setdefault(int((row[0] - since) / width), []).append(row)
+    width = max(1, span // SPARK_BUCKETS)
+    buckets: dict[int, dict[str, list[float]]] = {}
+    for t, noise, agc, cn0 in observed:
+        b = buckets.setdefault((t - since) // width, {})
+        for name, value, scale in (("noise_dbm", noise, 1.0), ("agc", agc, 1.0),
+                                   ("cn0_mean", cn0, 1.0)):
+            if value is not None:
+                b.setdefault(name, []).append(value)
+    for epoch, offset, rate in measured:
+        b = buckets.setdefault((epoch - since) // width, {})
+        if offset is not None:
+            b.setdefault("offset_ns", []).append(offset)
+        if rate is not None:
+            b.setdefault("rate_ppm", []).append(rate)
 
     out = []
     for key in sorted(buckets):
-        group = buckets[key]
-        point: dict[str, Any] = {"t": round(since + (key + 0.5) * width, 1)}
-        for name, index, scale in (("noise_dbm", 1, 1.0), ("agc", 2, 1.0),
-                                   ("cn0_mean", 3, 1.0), ("offset_ns", 4, 1000.0),
-                                   ("rate_ppm", 5, 1.0)):
-            values = [g[index] for g in group if g[index] is not None]
-            if values:
-                point[name] = round(sum(values) / len(values) * scale, 1)
+        point: dict[str, Any] = {"t": since + (key + 0.5) * width}
+        for name, values in buckets[key].items():
+            point[name] = round(sum(values) / len(values), 1)
         out.append(point)
     return out
 
