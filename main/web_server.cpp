@@ -5,6 +5,7 @@
 #include <ctime>
 #include <inttypes.h>
 #include <optional>
+#include <vector>
 #include <string>
 
 #include "esp_app_desc.h"
@@ -154,6 +155,7 @@ void NtpWebServer::register_routes()
         {"/gps/gnss",     HTTP_POST, gps_gnss_post_handler},
         {"/gps/survey",   HTTP_POST, gps_survey_post_handler},
         {"/gps/info",     HTTP_GET,  gps_info_get_handler},
+        {"/gps/bench",    HTTP_GET,  gps_bench_get_handler},
         {"/gps/sats",     HTTP_GET,  gps_sats_get_handler},
         {"/gps/samples",  HTTP_GET,  gps_samples_get_handler},
         {"/gps/reset",    HTTP_POST, gps_reset_post_handler},
@@ -566,16 +568,16 @@ esp_err_t NtpWebServer::gps_samples_get_handler(httpd_req_t *req)
     return httpd_resp_send(req, body.c_str(), body.size());
 }
 
-esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
+/* Every diagnostic the receiver has, in one place. Both endpoints below serve
+ * this same document: /gps/info strips it to what a poller reads, /gps/bench
+ * sends all of it. One builder means a new field is added once, and which
+ * endpoint carries it is one line in kPolled rather than a second copy of the
+ * emitter that drifts.
+ *
+ * The split exists because this grew from a bench endpoint into the polled one
+ * as well, and 50-odd keys that only a human reads were going out every 2 s. */
+static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
 {
-    /* The static half of the receiver, out of /healthz because none of it
-     * changes while the board is up and a poller should not have to carry it.
-     * This is what a bench session reads: what the module says it is, which pins
-     * it has, and which configuration messages it took. The ages come with it
-     * because they are only meaningful next to the readings they date. */
-    const GpsTime::Status gps = GpsTime::instance().status();
-
-    JsonWrapper doc;
     if (!gps.moduleId.empty()) {
         doc.AddItem("module", gps.moduleId);
     }
@@ -824,6 +826,84 @@ esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
     if (gps.navSatAgeUs >= 0) {
         doc.AddItem("cn0_age_s", static_cast<double>(gps.navSatAgeUs) / 1e6);
     }
+}
+
+/* What /gps/info keeps: every key something reads, plus the five the standing
+ * watch on this box is kept in. Everything else is /gps/bench. */
+static constexpr const char *kPolled[] = {
+    "module", "tp5_ok", "timtp", "offset_ns", "rate_ppm", "rate_n", "bridge_active",
+    "bridge_clients", "gnss", "gnss_cfg", "time_mode", "svin_dur_s", "svin_acc_mm",
+    "svin_var_mm2", "svin_obs", "svin_target_s", "svin_limit_mm", "svin_valid",
+    "dispersion_us", "lock_window_s", "tp_jitter_ns", "root_delay_ns", "servo_steps",
+    "servo_clamps", "edge_spikes", "tie_max_ns", "tie_rms_ns", "gdop", "pdop", "hdop",
+    "vdop", "dop_age_s", "clk_bias_ns", "clk_drift_ns_s", "t_acc_ns", "f_acc_ps_s",
+    "nav_status_flags", "nav_status_flags2", "ttff_ms", "baud", "recent_frames",
+    "io_rx_bytes", "io_tx_bytes", "io_parity", "io_framing", "io_overrun", "rbuf_pending",
+    "rbuf_peak", "tbuf_pending", "tbuf_peak", "tbuf_errors", "msg_ubx", "msg_skipped",
+    "msgpp_hex", "io_hex", "rf_cfg", "rf_bands", "rf_jam_worst", "rf_agc_min", "ant",
+    "ant_power", "ant_bias", "ant_short", "ant_delay_ns", "noise_dbm", "agc", "jam_ind",
+    "jam", "cn0_max", "cn0_mean", "cn0_used", "leap_pending", "leap_in_s", "last_holdover_s",
+    "last_holdover_error_us",
+    /* Kept although nothing parses them yet: the trust test and the pairing
+     * margin are what the operator watches after a pulse fault. */
+    "edge_rejects", "last_edge_trusted", "pair_age_us", "pair_age_max_us", "pair_age_s",
+};
+
+/* Drop every key the polled endpoint has no use for. The names are collected
+ * before anything is deleted: cJSON's item pointers are spliced by the delete. */
+static void stripToPolled(cJSON *obj)
+{
+    std::vector<std::string> drop;
+    for (const cJSON *item = obj->child; item != nullptr; item = item->next) {
+        bool keep = false;
+        for (const char *name : kPolled) {
+            if (item->string != nullptr && std::strcmp(item->string, name) == 0) {
+                keep = true;
+                break;
+            }
+        }
+        if (!keep && item->string != nullptr) {
+            drop.emplace_back(item->string);
+        }
+    }
+    for (const std::string &name : drop) {
+        cJSON_DeleteItemFromObjectCaseSensitive(obj, name.c_str());
+    }
+}
+
+esp_err_t NtpWebServer::gps_info_get_handler(httpd_req_t *req)
+{
+    const GpsTime::Status gps = GpsTime::instance().status();
+    JsonWrapper           doc;
+    emitGpsInfo(gps, doc);
+
+    /* Print, strip, print again would cost a parse; the wrapper hands the tree
+     * over instead and the strip works on it in place. */
+    cJSON *obj = doc.Release();
+    if (obj == nullptr) {
+        return sendJsonError(req, 500, "out of memory");
+    }
+    stripToPolled(obj);
+    char *text = cJSON_PrintUnformatted(obj);
+    cJSON_Delete(obj);
+    if (text == nullptr) {
+        return sendJsonError(req, 500, "out of memory");
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "cache-control", "no-store");
+    const esp_err_t err = httpd_resp_send(req, text, HTTPD_RESP_USE_STRLEN);
+    free(text);
+    return err;
+}
+
+esp_err_t NtpWebServer::gps_bench_get_handler(httpd_req_t *req)
+{
+    /* Everything, including the configuration echoes: what the module says it
+     * is, which messages it took, what the pins are doing. For a bench session
+     * or a bug report, not for a 2 s poll. */
+    const GpsTime::Status gps = GpsTime::instance().status();
+    JsonWrapper           doc;
+    emitGpsInfo(gps, doc);
     return sendJson(req, doc, 200);
 }
 
