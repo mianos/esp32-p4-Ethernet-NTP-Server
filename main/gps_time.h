@@ -148,7 +148,6 @@ public:
          * lock -- 3 s before the rate is known, 10 minutes after. */
         int32_t  ratePpb     = 0;
         uint16_t rateSamples = 0;
-        bool     rateKnown   = false;
         int64_t  lockWindowUs = 0;
 
         /* The error budget this reference states for itself, in nanoseconds:
@@ -259,7 +258,6 @@ public:
         uint8_t  navStatusFlags  = 0;
         uint8_t  navStatusFlags2 = 0;
         uint32_t ttffMs       = 0;
-        bool     qualitySeen  = false; /* any of the three ever arrived */
         int64_t  dopAgeUs     = -1;
         int64_t  clockAgeUs   = -1;
         int64_t  navStatusAgeUs = -1;
@@ -290,8 +288,6 @@ public:
          * the count below says how many samples stand behind the numbers. */
         uint32_t ticksPerUs   = 0; /* systimer ticks in a microsecond, as IDF converts it */
         int64_t  tickUsDelta  = 0; /* ticks-derived microseconds minus esp_timer's */
-        uint32_t cycPhase     = 0; /* phase at boot */
-        uint32_t cycPhaseNow  = 0; /* phase, re-measured */ /* 0 unanswered, 1 accepted, 2 rejected */
 
         /* Link health, which was the one thing with no observation at all. At
          * 9600 baud the wire is the scarcest resource here, and until now a
@@ -656,17 +652,6 @@ private:
     uint32_t m_sampleOldest    = 1;
     uint32_t m_lastSampleEpoch = 0;
     bool     m_lastSampleSet   = false;
-    /* The cycle count at which esp_timer's microsecond ticks, so a count can be
-     * turned into an offset inside the current microsecond. Calibrated once at
-     * boot; zero until then, which means "fall back to whole microseconds". */
-    void calibrateCyclePhase();
-    uint32_t   m_cycPhase          = 0;
-    bool       m_cycPhaseValid     = false;
-    /* Re-measured periodically and reported, to show whether the two clocks
-     * hold a fixed phase. If this wanders, the fraction is noise. */
-    volatile uint32_t m_cycPhaseNow = 0;
-    int64_t    m_nextPhaseUs       = 0;
-    void measureCyclePhase();
     void fitRate();
 
     /* Slew the system clock towards the anchor, but only while this source is
@@ -729,7 +714,6 @@ private:
     bool     m_fixLogged    = false;
     bool     m_wasLocked    = false;
     bool     m_ackLogged    = false;
-    bool     m_nakLogged    = false;
     bool     m_noDataLogged = false;
     int      m_baudIndex    = 0;
     uint32_t m_baud         = 0;
@@ -794,7 +778,6 @@ private:
     text::Buf<241> m_ioHex;
     bool       m_antCfgAcked       = false;
     bool       m_antCfgNaked       = false;
-    bool       m_antLogged         = false;
     uint8_t    m_antStatus         = 0;
     uint8_t    m_antPower          = 0;
     uint16_t   m_noisePerMs        = 0;
@@ -822,7 +805,6 @@ private:
     uint8_t    m_navStatusFlags    = 0;
     uint8_t    m_navStatusFlags2   = 0;
     uint32_t   m_ttffMs            = 0;
-    bool       m_qualitySeen       = false;
     int64_t    m_dopAtUs           = -1;
     int64_t    m_clockAtUs         = -1;
     int64_t    m_navStatusAtUs     = -1;
@@ -869,7 +851,6 @@ private:
     uint8_t    m_tosCfg            = 0;
     uint8_t    m_timTpCfg          = 0;
     int64_t    m_timTpPolledUs     = 0;
-    uint32_t   m_tosCount          = 0;
     uint32_t   m_timTpTimN         = 0;
     uint32_t   m_timTpNavN         = 0;
     uint8_t    m_rateCfg           = 0;

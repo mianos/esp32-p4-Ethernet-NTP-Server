@@ -116,7 +116,6 @@ public:
     const std::string &logHost() const { return m_logHost; }
     const std::string &logPort() const { return m_logPort; }
     const std::string &boots() const { return m_boots; }
-    void setBoots(const std::string &v) { m_boots = v; }
     void setGpsTimeMode(const std::string &v) { m_gpsTimeMode = v; }
     void setGpsFixedPos(const std::string &v) { m_gpsFixedPos = v; }
     void setGpsSurvey(const std::string &v) { m_gpsSurvey = v; }

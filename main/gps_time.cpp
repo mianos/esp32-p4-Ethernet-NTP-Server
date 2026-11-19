@@ -2343,7 +2343,6 @@ void GpsTime::onNavDop(const ubx::Frame &f)
     m_vDop        = dop(10);
     m_hDop        = dop(12);
     m_dopAtUs     = nowUs;
-    m_qualitySeen = true;
     portEXIT_CRITICAL(&m_mux);
 }
 
@@ -2363,7 +2362,6 @@ void GpsTime::onNavClock(const ubx::Frame &f)
     m_tAccNs         = f.u4(12);
     m_fAccPsPerS     = f.u4(16);
     m_clockAtUs      = nowUs;
-    m_qualitySeen    = true;
     portEXIT_CRITICAL(&m_mux);
 }
 
@@ -2381,7 +2379,6 @@ void GpsTime::onNavStatus(const ubx::Frame &f)
     m_navStatusFlags2 = f.u8(7);
     m_ttffMs          = f.u4(8);
     m_navStatusAtUs   = nowUs;
-    m_qualitySeen     = true;
     portEXIT_CRITICAL(&m_mux);
 }
 
@@ -2756,7 +2753,6 @@ void GpsTime::onTimTos(const ubx::Frame &f)
     const uint32_t utcUnc   = f.u4(20);
 
     portENTER_CRITICAL(&m_mux);
-    ++m_tosCount;
     m_tosFlags     = flags;
     m_tosUtcOffset = utcOff;
     m_tosUtcUnc    = utcUnc;
@@ -3627,7 +3623,6 @@ GpsTime::Status GpsTime::status() const
     st.navStatusFlags    = m_navStatusFlags;
     st.navStatusFlags2   = m_navStatusFlags2;
     st.ttffMs            = m_ttffMs;
-    st.qualitySeen       = m_qualitySeen;
     st.rfBands           = m_rfBands;
     st.rfJamWorst        = m_rfJamWorst;
     st.rfAntWorst        = m_rfAntWorst;
@@ -3782,14 +3777,14 @@ GpsTime::Status GpsTime::status() const
     }
 
     st.pairAgeS = pairAgeAtUs != 0 ? static_cast<double>(nowUs - pairAgeAtUs) / 1e6 : -1;
-    st.rateKnown = st.rateSamples >= kRateMinSamples;
+    const bool rateKnown = st.rateSamples >= kRateMinSamples;
 
     /* Two windows, and the difference between them is the servo. Without a rate
      * there is nothing to hold over with, so three missed edges demote; with one
      * the crystal's known error is taken out of every timestamp and ten minutes
      * of holdover is worth serving, with the claim decaying as it ages. */
-    st.lockWindowUs = (st.rateKnown && st.timeValid && st.fixType >= 2) ? kHoldoverWindowUs
-                                                                       : kLockWindowUs;
+    st.lockWindowUs = (rateKnown && st.timeValid && st.fixType >= 2) ? kHoldoverWindowUs
+                                                                    : kLockWindowUs;
 
     /* Lock needs all three: a fix to trust the date, a valid NAV-PVT to know
      * which second, and an edge recent enough that the clock is still being
@@ -3821,7 +3816,7 @@ GpsTime::Status GpsTime::status() const
         const bool fresh = st.ppsAgeUs <= kLockWindowUs;
         const bool bad   = !st.lastEdgeTrusted ||
                          (fresh && (st.offsetNs > kLockOffsetNs || st.offsetNs < -kLockOffsetNs)) ||
-                         (fresh && st.rateKnown && st.tieMaxNs > kLockTieMaxNs);
+                         (fresh && rateKnown && st.tieMaxNs > kLockTieMaxNs);
 
         /* Debounced per edge, not per call: status() runs on every reply and
          * every health poll, so a counter advanced here would saturate inside
@@ -3936,7 +3931,8 @@ uint32_t GpsTime::suppressPps(uint32_t seconds)
     ESP_LOGW(TAG, "PPS edges ignored for %u s at the request of POST /gps/pps: the holdover from "
                   "here is deliberate, and %s",
              static_cast<unsigned>(seconds),
-             st.rateKnown ? "the servo is carrying it" : "with no rate yet it demotes in 3 s");
+             st.rateSamples >= kRateMinSamples ? "the servo is carrying it"
+                                               : "with no rate yet it demotes in 3 s");
     return seconds;
 }
 

@@ -106,8 +106,6 @@ private:
     std::atomic<uint32_t>      m_answered{0};
     std::atomic<uint32_t>      m_kod{0};
     std::atomic<uint32_t>      m_dropped{0};
-    std::atomic<uint32_t>      m_winAnswered{0};
-    std::atomic<uint32_t>      m_winDropped{0};
     std::atomic<uint32_t>      m_ratePerMin{0};
     std::atomic<int64_t>       m_lastServedUs{-1};
     std::atomic<uint8_t>       m_clients{0};
