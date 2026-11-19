@@ -16,6 +16,18 @@
 
 server esp32p4-ntp iburst minpoll 4 maxpoll 6
 
+# Interleaved mode (RFC 9769) is the interesting experiment with this box, and
+# it is off by default because it is the one part of it that other servers do
+# not all speak. Adding `xleave` to the line above makes chrony ask for the
+# *measured* transmit timestamp of the previous reply instead of a prediction of
+# the current one, which removes the server's processing interval from the
+# measurement rather than bounding it. The box answers in that mode and falls
+# back to basic replies whenever it has lost the exchange, so a mixed
+# environment is safe; `chronyc ntpdata <addr>` then reports `Interleaved: yes`
+# and `/healthz` on the box counts them in `ntp_interleaved_served`.
+#
+# server esp32p4-ntp iburst minpoll 4 maxpoll 6 xleave
+
 # Fallbacks. minpoll 5 is 32 s, which is plenty for a source that should rarely
 # be needed.
 pool 2.debian.pool.ntp.org iburst minpoll 5 maxpoll 7

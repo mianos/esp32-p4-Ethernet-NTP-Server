@@ -682,6 +682,9 @@ private:
      * recordSample(), so the served figure and the recorded one cannot drift
      * apart. */
     int64_t rootDelayNs() const;
+    /* What our own stamping is worth: capture latency, receive lag, quantisation.
+     * Dispersion material, not delay -- see rootDelayNs(). */
+    int64_t sampleErrorNs() const;
     int64_t unobservedNs() const;
     int64_t dispersionNs(int64_t ageUs, int64_t unobservedNs) const;
 

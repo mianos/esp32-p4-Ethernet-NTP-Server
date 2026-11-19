@@ -3319,6 +3319,22 @@ void GpsTime::anchor(time_t second)
 
 int64_t GpsTime::rootDelayNs() const
 {
+    /* Zero, because there is no round trip to measure. The reference is a
+     * receiver on the board, so the field that means "path to the reference" has
+     * nothing to say, and ntpd reports 0 for a local refclock for exactly that
+     * reason.
+     *
+     * What the 283 us once published here actually is: our own stamping error,
+     * which belongs in dispersion. Keeping it in the delay is not neutral --
+     * a client halves the delay into its bound, so a local error advertised
+     * there is charged at half rate while the client *also* measures a real
+     * delay to us that already includes the processing. It has been charged
+     * twice. */
+    return 0;
+}
+
+int64_t GpsTime::sampleErrorNs() const
+{
     /* Three terms, all of them about where the two stamps come from: the
      * interrupt latency of the pulse capture, the lag of the receive stamp
      * behind the datagram, and half the receiver's stated pulse quantisation --
@@ -3351,7 +3367,7 @@ int64_t GpsTime::unobservedNs() const
 int64_t GpsTime::dispersionNs(int64_t ageUs, int64_t unobservedNs) const
 {
     const int64_t ageS = ageUs > 0 ? ageUs / 1000000 : 0;
-    return rootDelayNs() + m_jitterNs + ageS * kWanderNsPerS + unobservedNs;
+    return sampleErrorNs() + m_jitterNs + ageS * kWanderNsPerS + unobservedNs;
 }
 
 void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)

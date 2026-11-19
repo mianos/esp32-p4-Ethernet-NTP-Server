@@ -1458,6 +1458,14 @@ port, dropped after two minutes). A client that falls further behind than that
 gets a basic reply, which every client understands; answering twice from one
 receive timestamp is forbidden and the lookup consumes it.
 
+One consequence worth stating: a stratum-1 server's **root delay is 0**. The
+reference is a receiver on the board, so the field that means "round trip to the
+reference" has nothing to measure, and the local stamping error goes in
+dispersion where it belongs. Reporting it in the delay instead charged it at
+half rate *and* let the client's own measured delay charge the processing a
+second time; the client's own error bound dropped from 366 us to 290 us when it
+moved.
+
 What this does **not** fix: the transmit stamp is still taken in user space and
 still early by whatever the probe could not see, which on a self-send is the
 PHY's serialisation. Hardware transmit stamping would make the whole correction
