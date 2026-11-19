@@ -407,6 +407,10 @@ httpd's built-in plain-text page.
 | GET    | `/firmware`     | build + slot info for the running image          |
 | POST   | `/firmware`     | write the body into the inactive OTA slot, reboot into it |
 
+UDP/123 answers NTPv3/v4 client requests — basic and
+[interleaved](#interleaved-mode-rfc-9769) — and read-only mode 6 control queries
+([`ntpq`](#control-queries-ntpq)).
+
 UDP/123 answers NTPv3/v4 client requests and read-only mode 6 control queries
 ([`ntpq`](#control-queries-ntpq)).
 
@@ -447,7 +451,9 @@ source is actually serving, not the setting, so on an `auto` box that has fallen
 back it is the upstream half.
 
 `ntp_source` is the *configured* value and reads `auto` on a box that may be on
-either; `time_owner` is the one that actually has the clock (`gps`, `handing` or
+either; `ntp_tx_correction_us` is the measured transmit correction the replies carry and
+`ntp_interleaved_served` counts replies answered in interleaved mode.
+`time_owner` is the one that actually has the clock (`gps`, `handing` or
 `upstream`), `ntp_client` is what the SNTP client is doing, `gps_fallback` says
 whether one is engaged, `fallback_age_s` how long this episode has run and
 `fallback_count` how many there have been since boot. `gps_fix`, `gps_sats` and
@@ -1403,6 +1409,34 @@ from one dual-stack socket: `AF_INET6`, `IPV6_V6ONLY=0`, bound to `::`, exactly
 as [IPv6](#ipv6) recommended before it existed. It starts on the first DHCP
 lease, next to the HTTP server, and serves the clock whichever source above set —
 `stratum 3` from the upstream SNTP client, `stratum 1` from the GPS.
+
+### Interleaved mode (RFC 9769)
+
+A client that asks for it gets, in each reply, the *measured* receive and
+transmit timestamps of the previous exchange rather than a prediction of this
+one, which is the only way a server with a software transmit stamp can hand out
+a timestamp it did not have to guess. The negotiation is implicit: an
+interleaved request carries the previous reply's receive timestamp as its origin
+timestamp, and the reply then replays the saved transmit timestamp of that same
+exchange. Clients that do not ask see exactly the same bytes as before.
+
+That required measuring the transmit path, which is what
+`ntp_tx_correction_us` is: a self-probe of the stack every thirty seconds,
+EWMA-filtered and clamped, applied to the transmit stamp before it is written.
+The receive side uses the same figure — both stamps are software, both err by
+the same path and the errors have opposite signs, so one measurement serves both
+and a client's offset is not left carrying the difference between two guesses.
+`kReceiveLagNs` is now only the floor used before the first sample.
+
+The saved-pair table is deliberately small (24 entries, keyed by address and not
+port, dropped after two minutes). A client that falls further behind than that
+gets a basic reply, which every client understands; answering twice from one
+receive timestamp is forbidden and the lookup consumes it.
+
+What this does **not** fix: the transmit stamp is still taken in user space and
+still early by whatever the probe could not see, which on a self-send is the
+PHY's serialisation. Hardware transmit stamping would make the whole correction
+unnecessary.
 
 ### Control queries (`ntpq`)
 

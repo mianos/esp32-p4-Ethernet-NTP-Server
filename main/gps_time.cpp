@@ -22,6 +22,7 @@
 #include "esp_timer.h"
 
 #include "clock_source.h"
+#include "tx_lag.h"
 #include "ntp_time.h"
 #include "settings.h"
 
@@ -122,6 +123,14 @@ constexpr int64_t kIsrLatencyNs = 2000;
  * arrival stamp is the largest unmeasured term left, and the one hardware
  * stamping would remove. */
 constexpr int64_t kReceiveLagNs = 50000;
+
+/* The receive lag is measured now (tx_lag.cpp self-probes the stack), and this
+ * constant is only the floor used before the first sample. */
+int64_t receiveLagNs()
+{
+    const int64_t measured = TxLag::instance().rxLagNs();
+    return measured > kReceiveLagNs ? measured : kReceiveLagNs;
+}
 
 /* Bounds on what TIM-TP may claim, so a nonsense frame cannot turn into a
  * 10 ms root delay in an answer to a client: a receiver that knows its pulse
@@ -3134,7 +3143,7 @@ int64_t GpsTime::rootDelayNs() const
      * behind the datagram, and half the receiver's stated pulse quantisation --
      * half because the sawtooth is uniform over the step and a bound is about
      * the worst case from the middle of it. */
-    return kIsrLatencyNs + kReceiveLagNs + (m_qErrValid ? m_qErrNs / 2 : 0);
+    return kIsrLatencyNs + receiveLagNs() + (m_qErrValid ? m_qErrNs / 2 : 0);
 }
 
 int64_t GpsTime::unobservedNs() const

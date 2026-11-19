@@ -33,6 +33,7 @@
 #include "freertos/task.h"
 
 #include "ntp_control.h"
+#include "tx_lag.h"
 #include "time_ref.h"
 
 /* The upstream SNTP clock as a TimeRef. Locked means the clock was set from an
@@ -62,6 +63,13 @@ public:
     /* Counters for /healthz. Read from the HTTP task while the responder task
      * writes them, hence the atomics. */
     uint32_t requests() const { return m_requests.load(std::memory_order_relaxed); }
+    uint32_t interleavedServed() const
+    {
+        return m_interleaved.load(std::memory_order_relaxed);
+    }
+    /* Measured transmit-path delay, so a reader can see the correction the
+     * replies carry. Zero means "not measured yet". */
+    double txLagUs() const { return TxLag::instance().lagUs(); }
 
     /* What the responder has done with requests, beyond counting the answered
      * ones. `answered` alone cannot tell a client that is being rate-limited
@@ -112,6 +120,8 @@ private:
     std::atomic<uint32_t>      m_kod{0};
     std::atomic<uint32_t>      m_dropped{0};
     std::atomic<uint32_t>      m_control{0};
+    std::atomic<uint32_t>      m_interleaved{0};
+    TxLag                      m_txLag;
     std::atomic<uint32_t>      m_ratePerMin{0};
     std::atomic<int64_t>       m_lastServedUs{-1};
     std::atomic<uint8_t>       m_clients{0};

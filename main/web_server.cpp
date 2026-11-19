@@ -352,6 +352,12 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("ntp_kod", static_cast<double>(counters.kod));
         json.AddItem("ntp_dropped", static_cast<double>(counters.dropped));
         json.AddItem("ntp_rate_per_min", counters.perMinute);
+        /* The transmit-path correction the replies carry, and how many were
+         * answered in interleaved mode. Zero / zero on a client that does not
+         * ask for it. */
+        json.AddItem("ntp_tx_correction_us", server.txLagUs());
+        json.AddItem("ntp_interleaved_served",
+                     static_cast<double>(server.interleavedServed()));
         json.AddItem("ntp_clients", static_cast<double>(counters.clients));
         if (counters.lastServedS >= 0) {
             json.AddItem("ntp_last_served_s", counters.lastServedS);

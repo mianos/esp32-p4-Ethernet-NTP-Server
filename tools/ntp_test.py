@@ -110,8 +110,95 @@ def main():
     show("mode 3, vn 4", ask(args.host, request(), timeout=2.0))
 
     control_section(args.host)
+    # The burst above emptied this host's token bucket and mode 6 does not use
+    # it, so let the limiter refill before asking for replies again: this
+    # section needs six tokens and they arrive one per two seconds.
+    time.sleep(11)
+    interleaved_section(args.host)
 
     return 0
+
+
+def exchange(host, origin=b"\x00" * 8, receive=b"\x00" * 8, transmit=None):
+    """One mode 3 packet with chosen origin and receive fields.
+
+    `transmit` defaults to a fresh value so that origin == receive is not
+    accidentally also equal to transmit, which would be read as a basic request.
+    """
+    if transmit is None:
+        transmit = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
+    hdr = bytearray(request(transmit))
+    hdr[24:32] = origin
+    hdr[32:40] = receive
+    return ask(host, bytes(hdr), timeout=2.0)
+
+
+def interleaved_section(host):
+    print("\n== interleaved mode (RFC 9769) ==")
+
+    # 1. The first request of an association is basic: zero origin.
+    first = exchange(host)
+    if first is None:
+        print("first (basic)                     NO REPLY")
+        return
+    print(f"first (basic)                     len={len(first)} origin_echoed="
+          f"{first[24:32] == struct.unpack_from('>8s', first, 24)[0]}")
+    t2_first = first[32:40]
+    t3_first = first[40:48]
+
+    # 2. A request whose origin is the previous receive timestamp is interleaved:
+    #    the reply must echo that as origin and carry the *previous* transmit
+    #    timestamp, not a fresh one.
+    t1 = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
+    receive = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
+    second = exchange(host, origin=t2_first, receive=receive, transmit=t1)
+    if second is None:
+        print("second (interleaved)              NO REPLY")
+        return
+    got_origin = second[24:32]
+    got_tx = second[40:48]
+    print(f"second (interleaved)              len={len(second)} "
+          f"origin_is_our_receive={got_origin == receive} "
+          f"transmit_is_previous={got_tx == t3_first}")
+
+    # 3. The same origin again must not answer interleaved a second time: the
+    #    entry was consumed.
+    third = exchange(host, origin=t2_first, receive=receive, transmit=t1)
+    if third is None:
+        print("reused origin                     NO REPLY")
+    else:
+        print(f"reused origin                     origin_echo={third[24:32] == t3_first} "
+              f"(basic reply echoes our transmit; interleaved would echo our receive)")
+
+    # 4. Basic requests stay basic: an origin nobody knows.
+    junk = struct.pack(">II", 1, 2)
+    fourth = exchange(host, origin=junk)
+    if fourth is None:
+        print("unknown origin                    NO REPLY")
+    else:
+        print(f"unknown origin                    interleaved={fourth[24:32] == junk} "
+              f"(must be False: basic echoes the transmit field, not the origin)")
+
+    # 5. A request whose receive equals its transmit cannot be interleaved. The
+    #    reply's origin cannot tell the modes apart in that case (both echo the
+    #    same value), so this uses the transmit field and an aged pair: a basic
+    #    reply stamps the moment, an interleaved one replays the old transmit.
+    fresh = exchange(host)
+    if fresh is None:
+        print("receive == transmit               NO REPLY")
+        return
+    t2_fresh, t3_fresh = fresh[32:40], fresh[40:48]
+    time.sleep(2.2)
+    same = struct.pack(">II", int(time.time()) + 2208988800, 7)
+    fifth = exchange(host, origin=t2_fresh, receive=same, transmit=same)
+    if fifth is None:
+        print("receive == transmit               NO REPLY")
+    else:
+        print(f"receive == transmit               replayed_old_transmit="
+              f"{fifth[40:48] == t3_fresh} (must be False: basic)")
+
+    print(f"  check /healthz ntp_interleaved_served increments, and "
+          f"ntp_tx_correction_us is a plausible few-microsecond figure")
 
 
 def control(host, opcode, associd=0, data=b"", sequence=None):
