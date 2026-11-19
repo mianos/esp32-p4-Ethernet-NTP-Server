@@ -3055,8 +3055,13 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
 
     /* Recorded before the fit gets its say: the gap and step paths below return
      * without measuring, but the epoch itself was still paired and a client
-     * wants it either way. */
-    recordSample(static_cast<uint32_t>(utcNs / 1000000000LL), offsetNs);
+     * wants it either way.
+     *
+     * The offset here is 1.8e18 -- nanoseconds since the epoch less nanoseconds
+     * since boot -- and will not fit the record's 32 bits. What is wanted is
+     * the phase, so it goes in modulo one second. */
+    recordSample(static_cast<uint32_t>(utcNs / 1000000000LL),
+                 (utcNs - monoNs) % 1000000000LL);
 
     /* A gap in the reference: neither the fit below nor a second difference
      * wants a sample with a hole in front of it. Drop the window, drop the
