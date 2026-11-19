@@ -224,14 +224,14 @@ class Poller:
             raise RuntimeError(f"{path}: not an object")
         return decoded
 
-    async def drain(self) -> None:
+    async def drain(self, health: dict[str, Any]) -> None:
         """Take every epoch the box still holds, from our cursor.
 
         The cursor is what makes a viewer restart cheap: the ring keeps the
         epochs, and the box says how many it dropped before reaching us, so our
         own downtime leaves no hole and its overrun leaves an honest one.
         """
-        boots = int(self.doc["health"].get("boots") or 0)
+        boots = int(health.get("boots") or 0)
         if boots != self.boot:
             # A different boot numbers its sequences from the start again, so
             # the stored cursor means nothing. The epochs are absolute, so no
@@ -264,7 +264,7 @@ class Poller:
             health, info, sats = await asyncio.gather(
                 self._get("/healthz"), self._get("/gps/info"), self._get("/gps/sats")
             )
-            await self.drain()
+            await self.drain(health)
         except RuntimeError as exc:
             self.failures += 1
             self.consecutive_failures += 1
