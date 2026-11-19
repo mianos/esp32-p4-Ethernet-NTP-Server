@@ -835,6 +835,16 @@ private:
      * on the host before it was believed. Relative, the numbers are seconds and
      * the arithmetic is exact. Static, because 300 doubles does not belong on
      * the GPS task's stack. */
+    /* The first 120 payload bytes of a MON frame as hex, for the panel. Both
+     * MON-IO and MON-MSGPP carry their numbers past where the eye can follow,
+     * and the frame start is what says which message it was. */
+    void hexPreview(const ubx::Frame &f, text::Buf<241> &out);
+
+    /* Take a position as the hold, validated or not. Two callers: restoring one
+     * from NVS, and adopting one the module reported. */
+    void adoptFixedPosition(long long x, long long y, long long z, unsigned long acc,
+                            bool validated);
+
     int64_t    m_pairAgeUs         = 0;
     int64_t    m_pairAgeMaxUs      = 0;
     int64_t    m_pairAgeAtUs       = 0;

@@ -157,15 +157,23 @@ constexpr int64_t kConfirmHoldoffUs = 120 * 1000000;
 
 esp_timer_handle_t s_confirmTimer = nullptr;
 
-void confirmTimerBody(void *)
+/* True while the running image is still on probation. Read at both sites rather
+ * than once: the timer fires 120 s after a lease, and the image could have been
+ * confirmed by something else (or rolled back) in between. */
+bool imagePendingVerify()
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t   state   = ESP_OTA_IMG_UNDEFINED;
 
     if (running == nullptr || esp_ota_get_state_partition(running, &state) != ESP_OK) {
-        return;
+        return false;
     }
-    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+    return state == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+void confirmTimerBody(void *)
+{
+    if (!imagePendingVerify()) {
         return;
     }
 
@@ -180,13 +188,7 @@ void confirmTimerBody(void *)
 
 void confirmRunningImage()
 {
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    esp_ota_img_states_t   state   = ESP_OTA_IMG_UNDEFINED;
-
-    if (running == nullptr || esp_ota_get_state_partition(running, &state) != ESP_OK) {
-        return;
-    }
-    if (state != ESP_OTA_IMG_PENDING_VERIFY) {
+    if (!imagePendingVerify()) {
         return; /* first boot after a USB flash: nothing to confirm */
     }
     if (s_confirmTimer != nullptr) {

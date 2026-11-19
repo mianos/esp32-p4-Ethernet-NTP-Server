@@ -219,6 +219,13 @@ constexpr UBaseType_t  kTaskPriority = 4; /* below the responder: it answers pac
  * bytes, the last a NUL that the responder's text formatter trims. */
 constexpr uint32_t kRefIdGps = (static_cast<uint32_t>('G') << 24) | ('P' << 16) | ('S' << 8);
 
+/* Squeeze a value into a range. The record narrowing below clamps at four
+ * different widths and the expression was written out at each. */
+static int64_t clamp(int64_t v, int64_t lo, int64_t hi)
+{
+    return v > hi ? hi : v < lo ? lo : v;
+}
+
 /* Days since 1970-01-01 from a proleptic Gregorian date (Hinnant's
  * days_from_civil). Written out rather than reached for: timegm() is not in this
  * libc, and mktime() would apply the POSIX TZ from Settings -- turning UTC from
@@ -447,13 +454,7 @@ void GpsTime::restoreTimeMode()
          * was. */
         if (text::getList(settings.gpsFixedPos(), ',', x, y, z, acc, val) ||
             text::getList(settings.gpsFixedPos(), ',', x, y, z, acc)) {
-            for (int i = 0; i < 3; ++i) {
-                m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
-            }
-            m_fixedAcc      = acc;
-            m_fixedValid    = true;
-            m_holdWanted    = true;
-            m_holdValidated = val != 0;
+            adoptFixedPosition(x, y, z, acc, val != 0);
             ESP_LOGW(TAG, "position hold restored from NVS%s",
                      m_holdValidated ? ", survey-validated" : "");
             return;
@@ -527,13 +528,7 @@ void GpsTime::reassertFix()
         return;
     }
 
-    for (int i = 0; i < 3; ++i) {
-        m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
-    }
-    m_fixedAcc      = acc;
-    m_fixedValid    = true;
-    m_holdWanted    = true;
-    m_holdValidated = val != 0;
+    adoptFixedPosition(x, y, z, acc, val != 0);
 
     uint8_t tm[28] = {};
     tm[0]          = 2; /* fixed */
@@ -2225,6 +2220,30 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     }
 }
 
+void GpsTime::hexPreview(const ubx::Frame &f, text::Buf<241> &out)
+{
+    static constexpr char kDigits[] = "0123456789abcdef";
+    const std::size_t     bytes     = f.len < 120 ? f.len : 120;
+    for (std::size_t i = 0; i < bytes; ++i) {
+        const uint8_t byte = f.u8(i);
+        out[i * 2]         = kDigits[byte >> 4];
+        out[i * 2 + 1]     = kDigits[byte & 0x0F];
+    }
+    out[bytes * 2] = '\0';
+}
+
+void GpsTime::adoptFixedPosition(long long x, long long y, long long z, unsigned long acc,
+                                 bool validated)
+{
+    for (int i = 0; i < 3; ++i) {
+        m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
+    }
+    m_fixedAcc      = acc;
+    m_fixedValid    = true;
+    m_holdWanted    = true;
+    m_holdValidated = validated;
+}
+
 /* MON-IO: 20 bytes per port, in the receiver's fixed port order. UART1 is block
  * 1 -- the only port wired here -- and its counts are what say whether the line
  * is coping. Parity and framing errors are the wire's own verdict, separate
@@ -2239,14 +2258,7 @@ void GpsTime::onMonIo(const ubx::Frame &f)
     const std::size_t at  = kBlock * kPort;
     const int64_t     now = esp_timer_get_time();
     text::Buf<241> hex = {};
-        static constexpr char kDigits[] = "0123456789abcdef";
-        const std::size_t bytes = f.len < 120 ? f.len : 120;
-        for (std::size_t i = 0; i < bytes; ++i) {
-            const uint8_t byte = f.u8(i);
-            hex[i * 2]         = kDigits[byte >> 4];
-            hex[i * 2 + 1]     = kDigits[byte & 0x0F];
-        }
-        hex[bytes * 2] = '\0';
+    hexPreview(f, hex);
     portENTER_CRITICAL(&m_mux);
     std::memcpy(m_ioHex.data(), hex.data(), sizeof(m_ioHex));
     m_ioRxBytes = f.u4(at);
@@ -2308,14 +2320,7 @@ void GpsTime::onMonMsgpp(const ubx::Frame &f)
     }
     constexpr std::size_t kPort1 = 16; /* msg2 */
     text::Buf<241> hex = {};
-        static constexpr char kDigits[] = "0123456789abcdef";
-        const std::size_t bytes = f.len < 120 ? f.len : 120;
-        for (std::size_t i = 0; i < bytes; ++i) {
-            const uint8_t byte = f.u8(i);
-            hex[i * 2]         = kDigits[byte >> 4];
-            hex[i * 2 + 1]     = kDigits[byte & 0x0F];
-        }
-        hex[bytes * 2] = '\0';
+    hexPreview(f, hex);
     portENTER_CRITICAL(&m_mux);
     m_msgUbx     = f.u2(kPort1);
     m_msgSkipped = f.u4(96 + 4 * 1);
@@ -3170,10 +3175,9 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
              * second. Leaving it zero said "no uncertainty here" about seconds
              * that had nothing but the crystal behind them. */
             const int64_t ageUs = static_cast<int64_t>(epoch) - slot.epoch;
-            const int64_t disp  = dispersionNs(ageUs * 1000000, unobservedNs());
-            slot.dispersionNs   = disp > UINT32_MAX   ? UINT32_MAX
-                                  : disp < 0          ? 0
-                                                      : static_cast<uint32_t>(disp);
+            slot.dispersionNs =
+                static_cast<uint32_t>(clamp(dispersionNs(ageUs * 1000000, unobservedNs()), 0,
+                                            UINT32_MAX));
             slot.jitterNs     = 0;
             slot.flags        = 0;
             slot.sats         = 0;
@@ -3191,19 +3195,15 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
     slot.seq          = m_sampleSeq;
     slot.epoch        = epoch;
     slot.kind         = 0;
-    slot.offsetNs     = offsetNs > INT32_MAX   ? INT32_MAX
-                        : offsetNs < INT32_MIN ? INT32_MIN
-                                               : static_cast<int32_t>(offsetNs);
+    slot.offsetNs     = static_cast<int32_t>(clamp(offsetNs, INT32_MIN, INT32_MAX));
     slot.ratePpb      = m_ratePpb;
     /* The bound this reference states about the packet it would have built for
      * this second, from the same terms status() uses. Recorded at the instant
      * of the sample, so the age term is zero and the wander arrives later, in
      * the rows a holdover generates. */
-    {
-        const int64_t disp = dispersionNs(0, unobservedNs());
-        slot.dispersionNs  = disp > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(disp);
-    }
-    slot.jitterNs     = static_cast<uint16_t>(m_jitterNs > UINT16_MAX ? UINT16_MAX : m_jitterNs);
+    slot.dispersionNs = static_cast<uint32_t>(clamp(dispersionNs(0, unobservedNs()), 0,
+                                                    UINT32_MAX));
+    slot.jitterNs     = static_cast<uint16_t>(clamp(m_jitterNs, 0, UINT16_MAX));
     slot.flags        = m_timTpFlags;
     slot.sats         = m_satCount;
     slot.fix          = m_fixType;
