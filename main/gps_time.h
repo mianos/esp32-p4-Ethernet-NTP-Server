@@ -437,7 +437,7 @@ public:
         uint32_t epoch; /* the receiver second this describes */
         int32_t  offsetNs;
         int32_t  ratePpb;
-        uint16_t dispersionNs;
+        uint32_t dispersionNs;
         uint16_t jitterNs;
         uint8_t  flags; /* TIM-TP flags, as published elsewhere */
         uint8_t  kind;  /* 0 measured, 1 gap (no offset), 2 holdover */
@@ -634,6 +634,17 @@ private:
 
     /* Drop the rate fit and seed it again from the next edge. */
     void resetRateWindow();
+
+    /* The stated error budget, in ns. rootDelayNs() is the measurement path --
+     * the named interrupt latency plus half the receiver's own pulse
+     * quantisation. dispersionNs() is that plus the jitter the fit measures
+     * plus the wander of ageUs, and carries the unobserved-pulse term its
+     * caller computed. One implementation, used by status() and by
+     * recordSample(), so the served figure and the recorded one cannot drift
+     * apart. */
+    int64_t rootDelayNs() const;
+    int64_t unobservedNs() const;
+    int64_t dispersionNs(int64_t ageUs, int64_t unobservedNs) const;
 
     /* Correct the realtime clock by adjtime() rather than by a set. */
     void slew(int64_t offsetNs);

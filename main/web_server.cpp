@@ -542,10 +542,12 @@ esp_err_t NtpWebServer::gps_samples_get_handler(httpd_req_t *req)
     const size_t          got   = GpsTime::instance().drainSamples(since, page, max, first, last, lost);
 
     /* Built by hand rather than through JsonWrapper: an array of arrays with
-     * eight fixed fields is a fraction of the bytes of 120 named objects, and
-     * the wrapper would add each item one allocation at a time. */
+     * nine fixed fields is a fraction of the bytes of 120 named objects, and
+     * the wrapper would add each item one allocation at a time. The ninth is
+     * the bound the reference was stating for that second, so the archive can
+     * be read against the offset rather than only beside it. */
     std::string body;
-    body.reserve(got * 72 + 128);
+    body.reserve(got * 82 + 128);
     body += std::format("{{\"firstSeq\":{},\"lastSeq\":{},\"lost\":{},\"samples\":[", first,
                         last, lost);
     for (size_t i = 0; i < got; ++i) {
@@ -553,9 +555,9 @@ esp_err_t NtpWebServer::gps_samples_get_handler(httpd_req_t *req)
         if (i != 0) {
             body += ',';
         }
-        body += std::format("[{},{},{},{},{},{},{},{}]", s.seq, s.epoch,
+        body += std::format("[{},{},{},{},{},{},{},{},{}]", s.seq, s.epoch,
                             s.kind == 0 ? s.offsetNs : 0, s.ratePpb, s.jitterNs, s.flags, s.sats,
-                            s.kind);
+                            s.kind, s.dispersionNs);
     }
     body += "]}";
 

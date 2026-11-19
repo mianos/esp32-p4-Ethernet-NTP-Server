@@ -3114,6 +3114,41 @@ void GpsTime::anchor(time_t second)
     steer();
 }
 
+int64_t GpsTime::rootDelayNs() const
+{
+    /* The named interrupt latency, plus half the receiver's stated pulse
+     * quantisation: half because the sawtooth is uniform over the step and a
+     * bound is about the worst case from the middle of it. */
+    return kIsrLatencyNs + (m_qErrValid ? m_qErrNs / 2 : 0);
+}
+
+int64_t GpsTime::unobservedNs() const
+{
+    /* A pulse nobody is watching. While TIM-TP is configured and has stopped
+     * arriving, the position of the edge against its own second is unobserved
+     * -- the servo cannot see it either, because the anchor is taken from the
+     * same edge and moves with it. Unobserved is not known, so the stated
+     * uncertainty grows with how long it has been silent.
+     *
+     * 10 us a second covers the measured growth (4.2 us/s to 133 ms) with
+     * margin, and the 30 s grace keeps a mode change from widening it. Capped
+     * at 200 ms, six times the worst error seen and still finite. */
+    if (m_timTpCfg != 1) {
+        return 0;
+    }
+    const int64_t silentS = (esp_timer_get_time() - m_qErrAtUs) / 1000000;
+    if (silentS <= 30) {
+        return 0;
+    }
+    return std::min<int64_t>((silentS - 30) * 10000, 200000000);
+}
+
+int64_t GpsTime::dispersionNs(int64_t ageUs, int64_t unobservedNs) const
+{
+    const int64_t ageS = ageUs > 0 ? ageUs / 1000000 : 0;
+    return rootDelayNs() + m_jitterNs + ageS * kWanderNsPerS + unobservedNs;
+}
+
 void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
 {
     /* Missing epochs first. A holdover produces no call at all until the next
@@ -3133,7 +3168,16 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
             slot.kind    = 1;
             slot.offsetNs = 0;
             slot.ratePpb  = m_ratePpb;
-            slot.dispersionNs = 0;
+            /* The row has no measurement, but the seconds it covers were still
+             * served: their bound is the one in force at the time, which is the
+             * current budget plus the wander over the age of that particular
+             * second. Leaving it zero said "no uncertainty here" about seconds
+             * that had nothing but the crystal behind them. */
+            const int64_t ageUs = static_cast<int64_t>(epoch) - slot.epoch;
+            const int64_t disp  = dispersionNs(ageUs * 1000000, unobservedNs());
+            slot.dispersionNs   = disp > UINT32_MAX   ? UINT32_MAX
+                                  : disp < 0          ? 0
+                                                      : static_cast<uint32_t>(disp);
             slot.jitterNs     = 0;
             slot.flags        = 0;
             slot.sats         = 0;
@@ -3155,9 +3199,14 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
                         : offsetNs < INT32_MIN ? INT32_MIN
                                                : static_cast<int32_t>(offsetNs);
     slot.ratePpb      = m_ratePpb;
-    /* Dispersion is a Status computation, not a member, so the record carries
-     * the jitter it is built from and the client can apply the same growth. */
-    slot.dispersionNs = 0;
+    /* The bound this reference states about the packet it would have built for
+     * this second, from the same terms status() uses. Recorded at the instant
+     * of the sample, so the age term is zero and the wander arrives later, in
+     * the rows a holdover generates. */
+    {
+        const int64_t disp = dispersionNs(0, unobservedNs());
+        slot.dispersionNs  = disp > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(disp);
+    }
     slot.jitterNs     = static_cast<uint16_t>(m_jitterNs > UINT16_MAX ? UINT16_MAX : m_jitterNs);
     slot.flags        = m_timTpFlags;
     slot.sats         = m_satCount;
@@ -3806,9 +3855,7 @@ GpsTime::Status GpsTime::status() const
          * This module rejects NAV-TIM-TP, so the quantisation term is absent --
          * but the jitter term is not, because it comes from the servo and not
          * from the message. */
-        const int64_t ageS = st.ppsAgeUs > 0 ? st.ppsAgeUs / 1000000 : 0;
-        st.rootDelayNs  = kIsrLatencyNs + (st.qErrValid ? st.qErrNs / 2 : 0);
-        st.dispersionNs = st.rootDelayNs + st.jitterNs + ageS * kWanderNsPerS;
+        st.rootDelayNs = rootDelayNs();
 
         /* A pulse nobody is watching. While TIM-TP is agreeing to be sent and
          * has stopped arriving, the position of the edge against its own second
@@ -3826,12 +3873,13 @@ GpsTime::Status GpsTime::status() const
         portENTER_CRITICAL(&m_mux);
         lastTpUs = m_qErrAtUs;
         portEXIT_CRITICAL(&m_mux);
+        /* Published inside the budget below as well as on its own, so a wide
+         * bound can be told from a bad clock. */
+        st.pulseUnobservedNs = unobservedNs();
+        st.dispersionNs      = dispersionNs(st.ppsAgeUs, st.pulseUnobservedNs);
         if (m_timTpCfg == 1) {
             const int64_t silentS = (esp_timer_get_time() - lastTpUs) / 1000000;
             if (silentS > 30) {
-                const int64_t termNs = std::min<int64_t>((silentS - 30) * 10000, 200000000);
-                st.pulseUnobservedNs += termNs;
-                st.dispersionNs += termNs;
                 if (!m_pulseUnobservedLogged) {
                     m_pulseUnobservedLogged = true;
                     ESP_LOGW(TAG, "TIM-TP silent for %lld s: the pulse position is unobserved, "
