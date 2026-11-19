@@ -9,6 +9,7 @@
 #include <string>
 
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "lwip/inet.h"
 #include "lwip/ip6_addr.h"
@@ -34,7 +35,10 @@ constexpr uint32_t     kReportEveryMs    = 60000;
  * several hundred bytes. At 4096 the stack-protector tripped inside
  * from_chars within a minute of the first client, and the board rolled back. */
 constexpr int          kTaskStack        = 8192;
-constexpr UBaseType_t  kTaskPriority     = 5;    /* above the status logger, below lwIP */
+/* Above the status logger and just under lwIP (18): a woken responder should
+ * preempt now rather than at the next scheduling point. It runs for
+ * microseconds per packet, so nothing is starved by it. */
+constexpr UBaseType_t  kTaskPriority     = 17;
 
 constexpr size_t       kStampBytes    = 8;
 constexpr size_t       kOriginOffset  = 24;
