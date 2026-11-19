@@ -168,6 +168,12 @@ constexpr uint32_t kRejectStreakReacquire = 45;
 constexpr int64_t kLockOffsetNs = 100000;
 constexpr double  kLockTieMaxNs = 20000.0;
 
+/* Consecutive edges a lock gate has to hold before it demotes. One bad second
+ * is noise on a pulse that is otherwise clean, and demoting for it costs a
+ * client a sample; three in a row is a servo or a fit that has actually gone
+ * wrong. */
+constexpr uint32_t kGateStreak = 3;
+
 /* The silence test never fires while a wrong rate still parses the odd frame.
  * But the floor has to sit below what a *correct* rate can look like while the
  * receiver re-acquires -- roughly two frames a second here, mostly ACKs -- or
@@ -3746,11 +3752,24 @@ GpsTime::Status GpsTime::status() const
      * first minute still locks on a fresh, trusted edge as it always did. */
     if (st.locked) {
         const bool fresh = st.ppsAgeUs <= kLockWindowUs;
-        if (!st.lastEdgeTrusted) {
-            st.locked = false;
-        } else if (fresh && (st.offsetNs > kLockOffsetNs || st.offsetNs < -kLockOffsetNs)) {
-            st.locked = false;
-        } else if (fresh && st.rateKnown && st.tieMaxNs > kLockTieMaxNs) {
+        const bool bad   = !st.lastEdgeTrusted ||
+                         (fresh && (st.offsetNs > kLockOffsetNs || st.offsetNs < -kLockOffsetNs)) ||
+                         (fresh && st.rateKnown && st.tieMaxNs > kLockTieMaxNs);
+
+        /* Debounced per edge, not per call: status() runs on every reply and
+         * every health poll, so a counter advanced here would saturate inside
+         * one second. m_gateLastPps makes it one vote per edge. A single
+         * glitched pulse, or one sample outside the band on its way back from a
+         * step, is then not worth a demotion and a relock line -- three
+         * consecutive seconds of it is. */
+        portENTER_CRITICAL(&m_mux);
+        if (m_gateLastPps != st.ppsCount) {
+            m_gateLastPps = st.ppsCount;
+            m_gateBad     = bad ? m_gateBad + 1 : 0;
+        }
+        const uint32_t badFor = m_gateBad;
+        portEXIT_CRITICAL(&m_mux);
+        if (badFor >= kGateStreak) {
             st.locked = false;
         }
     }

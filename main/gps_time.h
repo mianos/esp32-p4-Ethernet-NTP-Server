@@ -825,6 +825,9 @@ private:
     bool       m_lastEdgeSecondSet = false;
     int64_t    m_lastEdgeMonoUs    = 0;
     bool       m_lastEdgeMonoSet   = false;
+    /* The lock gates' debounce, written from status(), which is const. */
+    mutable uint32_t m_gateBad     = 0;
+    mutable uint32_t m_gateLastPps = 0;
     /* Phase relative to the fit's base sample, for the deviation below. The
      * absolute offsets are ~1.8e18 ns and a double resolves only ~256 ns there,
      * so a second difference taken on them cancels to exactly zero -- measured
