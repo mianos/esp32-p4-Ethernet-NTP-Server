@@ -40,8 +40,19 @@ public:
     /* Start the probe task. Idempotent; called with the responder. */
     esp_err_t begin();
 
+    /* Compile-time switch, so an A/B run needs no settings plumbing. */
+    static constexpr bool kEnabled = false;
+
     /* The correction in nanoseconds, 0 until there is a measurement. */
-    int64_t lagNs() const { return m_lagNs.load(std::memory_order_relaxed); }
+    int64_t lagNs() const
+    {
+        return enabled() ? m_lagNs.load(std::memory_order_relaxed) : 0;
+    }
+
+    /* Runtime switch, so an A/B run can be done inside one boot instead of
+     * across two reboots with the servo in different states. */
+    void setEnabled(bool on) { m_enabled.store(on, std::memory_order_relaxed); }
+    bool enabled() const { return m_enabled.load(std::memory_order_relaxed); }
 
     /* The same figure for the receive side.
      *
@@ -69,6 +80,7 @@ private:
     int64_t     probe();
 
     std::atomic<int64_t>  m_lagNs{0};
+    std::atomic<bool>     m_enabled{true};
     std::atomic<uint32_t> m_samples{0};
     TaskHandle_t          m_task = nullptr;
 };

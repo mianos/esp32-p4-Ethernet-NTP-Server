@@ -407,6 +407,8 @@ httpd's built-in plain-text page.
 | GET    | `/firmware`     | build + slot info for the running image          |
 | POST   | `/firmware`     | write the body into the inactive OTA slot, reboot into it |
 
+| POST   | `/ntp/txlag`    | turn the transmit correction on or off (A/B runs) |
+
 UDP/123 answers NTPv3/v4 client requests — basic and
 [interleaved](#interleaved-mode-rfc-9769) — and read-only mode 6 control queries
 ([`ntpq`](#control-queries-ntpq)).
@@ -1421,12 +1423,28 @@ timestamp, and the reply then replays the saved transmit timestamp of that same
 exchange. Clients that do not ask see exactly the same bytes as before.
 
 That required measuring the transmit path, which is what
-`ntp_tx_correction_us` is: a self-probe of the stack every thirty seconds,
-EWMA-filtered and clamped, applied to the transmit stamp before it is written.
-The receive side uses the same figure — both stamps are software, both err by
-the same path and the errors have opposite signs, so one measurement serves both
-and a client's offset is not left carrying the difference between two guesses.
-`kReceiveLagNs` is now only the floor used before the first sample.
+`ntp_tx_correction_us` is: the duration of a throwaway `sendto()` to the device's
+own address, every thirty seconds, EWMA-filtered and clamped, applied to the
+transmit stamp before it is written. The receive side uses the same figure —
+both stamps are software, both err by the same path and the errors have opposite
+signs, so one measurement serves both and a client's offset is not left carrying
+the difference between two guesses. `kReceiveLagNs` is now only the floor used
+before the first sample.
+
+The figure was chosen by A/B, not by argument. `POST /ntp/txlag {"enabled":false}`
+turns it off at runtime, and twenty `sntp` samples either side, interleaved
+across four rounds on one boot, moved the client's offset by **+161 µs for a
+323 µs correction — exactly L/2 at 16σ** — from −157 µs uncorrected to +4 µs
+with it. A first version probed a self-send and half round trip instead; that
+read about 1.5x high because it measures two stack traversals where a reply does
+one, and it left the offset at +18 µs.
+
+The cost is the mirror image: a client's *delay* falls by the same amount, from
+about 500 µs to about 100 µs here, because the delay formula assumes `t2..t3`
+spans the processing interval and the correction inflates it. So the offset is
+right and a client's distance to this server looks smaller than it is. Hardware
+transmit stamping is the fix for both, and is the only reason this is a trade at
+all.
 
 The saved-pair table is deliberately small (24 entries, keyed by address and not
 port, dropped after two minutes). A client that falls further behind than that

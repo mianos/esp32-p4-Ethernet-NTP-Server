@@ -23,9 +23,8 @@ constexpr const char *TAG = "tx_lag";
  * rest. */
 constexpr uint32_t kEveryMs = 30000;
 
-/* Sent and read back. Twelve bytes: big enough that the stack does the real
- * work, small enough that the wire time (about 1 us at 100 Mbit) is well under
- * what this is measuring. */
+/* Twelve bytes: big enough that the stack does the real work, small enough that
+ * the wire time (about 1 us at 100 Mbit) is well under what this measures. */
 constexpr size_t kProbeBytes = 12;
 
 /* A half round trip outside this range is not a transmit path. The floor is
@@ -38,7 +37,8 @@ constexpr int64_t kMaxNs = 5000000;
 constexpr double kAlpha = 0.25;
 
 /* How long one probe waits before giving up. */
-constexpr int kProbeTimeoutMs = 20;
+/* Somewhere nothing listens; the ICMP that follows is ignored. */
+constexpr uint16_t kProbePort = 9;
 
 constexpr int kTaskStack  = 4096;
 constexpr int kTaskPrio   = 4; /* below the responder and the status logger */
@@ -102,9 +102,9 @@ int64_t TxLag::probe()
         return -1;
     }
 
-    /* Our own address, so the probe traverses the same stack the reply does.
-     * lwIP short-circuits a self-send, which is why this covers the stack and
-     * not the PHY. */
+    /* Our own address, so the datagram traverses the stack and the driver the
+     * way a reply does. Nobody listens on this port; the ICMP that comes back
+     * is ignored. */
     esp_netif_ip_info_t ip = {};
     if (esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.ip.addr == 0) {
         return -1;
@@ -115,39 +115,28 @@ int64_t TxLag::probe()
         return -1;
     }
 
-    struct sockaddr_in to    = {};
-    to.sin_family            = AF_INET;
-    to.sin_port              = htons(0); /* filled in after the bind */
-    to.sin_addr.s_addr       = ip.ip.addr;
-    if (bind(sock, reinterpret_cast<const sockaddr *>(&to), sizeof(to)) != 0) {
-        close(sock);
-        return -1;
-    }
+    struct sockaddr_in to = {};
+    to.sin_family         = AF_INET;
+    to.sin_port           = htons(kProbePort);
+    to.sin_addr.s_addr    = ip.ip.addr;
 
-    socklen_t len = sizeof(to);
-    if (getsockname(sock, reinterpret_cast<sockaddr *>(&to), &len) != 0) {
-        close(sock);
-        return -1;
-    }
+    uint8_t  payload[kProbeBytes] = {};
+    int64_t  result               = -1;
 
-    struct timeval tv = {};
-    tv.tv_sec         = 0;
-    tv.tv_usec        = kProbeTimeoutMs * 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-
-    uint8_t payload[kProbeBytes] = {};
-    int64_t result               = -1;
-
+    /* The quantity that matters is how long *after the stamp* the datagram is
+     * still inside the stack, because that is how early the stamp is. sendto()
+     * returning is where the userspace part of that ends, so its duration is a
+     * direct measurement of it -- and a lower bound on the whole path, since the
+     * driver and the wire happen after the call returns.
+     *
+     * This replaced a self-send and a half round trip. That one read about 1.5x
+     * too high: it measured two stack traversals, two wakeups and the loopback
+     * dispatch, where a reply does one. It showed up as a correction that moved
+     * a client's offset from -39 us to +18 us instead of to about zero. */
     const int64_t sent = esp_timer_get_time();
     if (sendto(sock, payload, sizeof(payload), 0, reinterpret_cast<const sockaddr *>(&to),
                sizeof(to)) >= 0) {
-        uint8_t back[kProbeBytes];
-        if (recvfrom(sock, back, sizeof(back), 0, nullptr, nullptr) ==
-            static_cast<int>(sizeof(payload))) {
-            const int64_t roundTrip = esp_timer_get_time() - sent;
-            /* Half of it is one direction. */
-            result = roundTrip * 1000 / 2;
-        }
+        result = (esp_timer_get_time() - sent) * 1000;
     }
 
     close(sock);

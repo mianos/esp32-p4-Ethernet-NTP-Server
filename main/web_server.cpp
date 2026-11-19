@@ -24,6 +24,7 @@
 #include "net_state.h"
 #include "ntp_server.h"
 #include "ntp_time.h"
+#include "tx_lag.h"
 #include "settings.h"
 #include "text.h"
 
@@ -127,6 +128,7 @@ void NtpWebServer::register_routes()
         {"/config",       HTTP_POST, config_post_handler},
         {"/config/reset", HTTP_POST, config_reset_post_handler},
         {"/ntp/sync",     HTTP_POST, sync_post_handler},
+        {"/ntp/txlag",    HTTP_POST, txlag_post_handler},
         {"/gps/pps",      HTTP_POST, gps_pps_post_handler},
         {"/gps/ant",      HTTP_POST, gps_ant_post_handler},
         {"/gps/gnss",     HTTP_POST, gps_gnss_post_handler},
@@ -429,6 +431,31 @@ esp_err_t NtpWebServer::config_reset_post_handler(httpd_req_t *req)
 
     JsonWrapper resp;
     resp.AddItem("status", "reset");
+    return sendJson(req, resp, 200);
+}
+
+/* POST /ntp/txlag {"enabled":true|false}: turn the transmit correction off to
+ * measure what it is worth. Disabling it drops the receive lag back to its floor
+ * too, because both come from one measurement. */
+esp_err_t NtpWebServer::txlag_post_handler(httpd_req_t *req)
+{
+    JsonWrapper doc;
+    if (!readJsonBodyTimed(req, doc)) {
+        return ESP_FAIL;
+    }
+
+    bool enabled = true;
+    if (!doc.GetField("enabled", enabled)) {
+        return sendJsonError(req, 400, "expected {\"enabled\": true|false}");
+    }
+
+    TxLag &lag = TxLag::instance();
+    lag.setEnabled(enabled);
+    ESP_LOGW(TAG, "POST /ntp/txlag from %s: transmit correction %s", callerAddress(req).c_str(),
+             enabled ? "on" : "off");
+
+    JsonWrapper resp;
+    resp.AddItem("enabled", lag.enabled());
     return sendJson(req, resp, 200);
 }
 
