@@ -1,5 +1,6 @@
 #include "tx_lag.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 
@@ -130,6 +131,43 @@ void TxLag::absorb(int64_t lag)
              lagUs(), scatterUs(), (unsigned)n);
 }
 
+void TxLag::recordReply(int64_t ns)
+{
+    const uint32_t pos = m_replyPos.fetch_add(1, std::memory_order_relaxed);
+    m_reply[pos % kReplyRing] = ns;
+    if (pos >= kReplyRing) {
+        m_replyFlooded.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void TxLag::reportReplies()
+{
+    /* Drained by the same task that probes, once a minute. A slot that arrives
+     * while this runs is simply counted next time. */
+    const uint32_t filled = std::min<uint32_t>(m_replyPos.exchange(0, std::memory_order_relaxed),
+                                               kReplyRing);
+    if (filled < 4) {
+        return;
+    }
+    const uint32_t flooded = m_replyFlooded.exchange(0, std::memory_order_relaxed);
+
+    int64_t sorted[kReplyRing] = {};
+    for (uint32_t i = 0; i < filled; ++i) {
+        const int64_t v = m_reply[i];
+        uint32_t      j = i;
+        while (j > 0 && sorted[j - 1] > v) {
+            sorted[j] = sorted[j - 1];
+            --j;
+        }
+        sorted[j] = v;
+    }
+
+    const auto pct = [&](double p) { return sorted[static_cast<uint32_t>(p * (filled - 1))]; };
+    ESP_LOGI(TAG, "replypath n %u p10 %.1f med %.1f p90 %.1f us%s", (unsigned)filled,
+             pct(0.10) / 1000.0, pct(0.50) / 1000.0, pct(0.90) / 1000.0,
+             flooded > 0 ? " (flooded)" : "");
+}
+
 void TxLag::task()
 {
     /* Nothing to measure until there is an address to send to. */
@@ -144,6 +182,11 @@ void TxLag::task()
         const int64_t lag = probe();
         if (lag >= kMinNs && lag <= kMaxNs) {
             absorb(lag);
+        }
+        /* Every twelfth probe: a minute, matching the reply report cadence. */
+        if (++m_tick >= 12) {
+            m_tick = 0;
+            reportReplies();
         }
         vTaskDelay(pdMS_TO_TICKS(kEveryMs));
     }

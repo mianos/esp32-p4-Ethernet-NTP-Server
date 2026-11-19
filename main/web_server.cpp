@@ -24,6 +24,7 @@
 #include "net_state.h"
 #include "ntp_server.h"
 #include "ntp_time.h"
+#include "serve_path.h"
 #include "tx_lag.h"
 #include "settings.h"
 #include "text.h"
@@ -359,6 +360,10 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
          * ask for it. */
         json.AddItem("ntp_tx_correction_us", server.txLagUs());
         json.AddItem("ntp_tx_scatter_us", server.txScatterUs());
+        /* What dispersion rests on: the measured drift of the served time on
+         * answers that went out, which is the number a client's bound is made
+         * of. Auditable, so the claim can be checked against the log. */
+        json.AddItem("ntp_serve_bound_us", ServePath::instance().boundUs());
         json.AddItem("ntp_interleaved_served",
                      static_cast<double>(server.interleavedServed()));
         json.AddItem("ntp_clients", static_cast<double>(counters.clients));

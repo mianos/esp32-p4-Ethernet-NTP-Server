@@ -90,6 +90,16 @@ public:
     /* Round trips behind the current figure: 0 means "not measured yet". */
     uint32_t samples() const { return m_samples.load(std::memory_order_relaxed); }
 
+    /* One real reply's sendto, in nanoseconds. The probe measures the path when
+     * a probe task happens to run; a reply's own call is the path the client
+     * got, and it happens while the responder is warm rather than from an idle
+     * task, so the two distributions are not the same and the reply's is the
+     * one that matters. Kept as a distribution, not an average, because it is
+     * bimodal: about one probe in eight comes back 140 us faster, which is
+     * either an idle path the replies never take or a state they sometimes do.
+     * A single number cannot say which, so the run reports percentiles. */
+    void recordReply(int64_t ns);
+
     /* Public so a server can hold one by value. */
     TxLag() = default;
 
@@ -113,4 +123,12 @@ private:
     int64_t                   m_ring[kRing] = {};
     uint32_t                  m_ringPos    = 0;
     uint32_t                  m_ringFill   = 0;
+    uint32_t                  m_tick       = 0;
+
+    /* Replies, written by the responder and drained by the probe task. */
+    static constexpr uint32_t kReplyRing = 32;
+    int64_t                   m_reply[kReplyRing] = {};
+    std::atomic<uint32_t>     m_replyPos{0};
+    std::atomic<uint32_t>     m_replyFlooded{0};
+    void                      reportReplies();
 };

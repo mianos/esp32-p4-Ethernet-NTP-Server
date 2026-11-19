@@ -36,6 +36,9 @@
 #include "tx_lag.h"
 #include "time_ref.h"
 
+/* Only a reference is taken to it, and lwIP is a heavy include for a header. */
+struct sockaddr_storage;
+
 /* The upstream SNTP clock as a TimeRef. Locked means the clock was set from an
  * upstream server recently enough to still be worth serving: "was set once, at
  * boot" is not a lock, and a responder that cannot tell the difference will
@@ -118,6 +121,28 @@ private:
      * claims, and the counters. */
     void fillControlFacts(ControlFacts &facts, const TimeReference &ref) const;
     static void taskEntry(void *arg);
+
+    /* Per-client, per-minute extremes of (our receive stamp - the client's
+     * send stamp). The constant part of that difference is the client's clock
+     * offset and the path; the range is how far the served time moved against
+     * that client while it was watching, which is the only view of our own
+     * error available without hardware stamps. Fixed storage and task-owned. */
+    struct ServePathSlot {
+        uint32_t addr   = 0;
+        uint32_t count  = 0;
+        int64_t  minNs  = 0;
+        int64_t  maxNs  = 0;
+        int64_t  lastUs = 0;
+    };
+    static constexpr int kServeSlots = 6;
+    ServePathSlot        m_serve[kServeSlots] = {};
+    /* Why samples are being dropped, while the instrument settles: family,
+     * empty origin, out-of-range delta. Index 0 counts the ones kept. */
+    uint32_t             m_serveWhy[4] = {};
+    int64_t              m_serveReportUs      = 0;
+    void                 recordServePath(const sockaddr_storage &from,
+                                         const struct timespec &received, const uint8_t *origin);
+    void                 reportServePath(int64_t nowUs);
 
     std::unique_ptr<TimeRef>   m_ref;
     std::atomic<bool>          m_running{false};

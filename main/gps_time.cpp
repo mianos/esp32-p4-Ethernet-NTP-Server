@@ -23,7 +23,7 @@
 #include "hal/mcpwm_ll.h"
 
 #include "clock_source.h"
-#include "tx_lag.h"
+#include "serve_path.h"
 #include "ntp_time.h"
 #include "settings.h"
 
@@ -150,24 +150,13 @@ constexpr int kCapNowTimer = 0;
 
 constexpr int64_t kIsrLatencyNs = 2000;
 
-/* The receive side of the same budget, and unlike the pulse it is named rather
- * than measured. T2 is taken after recvfrom() returns -- lwIP has no
- * SO_TIMESTAMP -- so the scheduler wake, the syscall and the copy all sit
- * between the datagram landing and the stamp: tens of microseconds, halved into
- * what clients are told. (Baumart's server names 1 ms for the same thing over
- * SPI polled at 1 kHz; the P4 has no SPI in the path and wakes the task
- * directly.) 50 us is the honest order of it and deliberately generous: the
- * arrival stamp is the largest unmeasured term left, and the one hardware
- * stamping would remove. */
-constexpr int64_t kReceiveLagNs = 50000;
-
-/* The receive lag is measured now (tx_lag.cpp self-probes the stack), and this
- * constant is only the floor used before the first sample. */
-int64_t receiveLagNs()
-{
-    const int64_t measured = TxLag::instance().rxLagNs();
-    return measured > kReceiveLagNs ? measured : kReceiveLagNs;
-}
+/* The receive side used to be the transmit probe's own figure, on the argument
+ * that both stamps are software and both err by the same path. The figure is
+ * the same but the *variation* is not: the probe reports one syscall taken from
+ * an idle task, while the error a client actually sees moved by 72 us in nine
+ * minutes with the probe standing still. So the receive side is no longer
+ * bounded by a probe at all -- serve_path.cpp measures the drift on the replies
+ * that went out, and that number is added to the dispersion directly. */
 
 /* Bounds on what TIM-TP may claim, so a nonsense frame cannot turn into a
  * 10 ms root delay in an answer to a client: a receiver that knows its pulse
@@ -3335,12 +3324,12 @@ int64_t GpsTime::rootDelayNs() const
 
 int64_t GpsTime::sampleErrorNs() const
 {
-    /* Three terms, all of them about where the two stamps come from: the
-     * interrupt latency of the pulse capture, the lag of the receive stamp
-     * behind the datagram, and half the receiver's stated pulse quantisation --
-     * half because the sawtooth is uniform over the step and a bound is about
-     * the worst case from the middle of it. */
-    return kIsrLatencyNs + receiveLagNs() + (m_qErrValid ? m_qErrNs / 2 : 0);
+    /* The fixed part of the budget: the interrupt latency of the pulse capture,
+     * and half the receiver's stated pulse quantisation -- half because the
+     * sawtooth is uniform over the step and a bound is about the worst case
+     * from the middle of it. The moving part, the drift of the served time, is
+     * measured on the wire and added in dispersionNs(). */
+    return kIsrLatencyNs + (m_qErrValid ? m_qErrNs / 2 : 0);
 }
 
 int64_t GpsTime::unobservedNs() const
@@ -3367,7 +3356,8 @@ int64_t GpsTime::unobservedNs() const
 int64_t GpsTime::dispersionNs(int64_t ageUs, int64_t unobservedNs) const
 {
     const int64_t ageS = ageUs > 0 ? ageUs / 1000000 : 0;
-    return sampleErrorNs() + m_jitterNs + ageS * kWanderNsPerS + unobservedNs;
+    return sampleErrorNs() + ServePath::instance().boundNs() + m_jitterNs +
+           ageS * kWanderNsPerS + unobservedNs;
 }
 
 void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)

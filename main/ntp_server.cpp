@@ -22,6 +22,7 @@
 
 #include "gps_time.h"
 #include "ntp_time.h"
+#include "serve_path.h"
 #include "tx_lag.h"
 #include "settings.h"
 #include "text.h"
@@ -121,6 +122,25 @@ void store32(uint8_t *out, uint32_t value)
     out[1] = static_cast<uint8_t>(value >> 16);
     out[2] = static_cast<uint8_t>(value >> 8);
     out[3] = static_cast<uint8_t>(value);
+}
+
+uint32_t load32(const uint8_t *in)
+{
+    return (static_cast<uint32_t>(in[0]) << 24) | (static_cast<uint32_t>(in[1]) << 16) |
+           (static_cast<uint32_t>(in[2]) << 8) | static_cast<uint32_t>(in[3]);
+}
+
+/* A stamp back to nanoseconds since the epoch, or 0 when the field is empty (a
+ * client that sent no origin has nothing to compare against). */
+int64_t stampToNs(const uint8_t *stamp)
+{
+    const uint32_t seconds = load32(stamp);
+    if (seconds == 0) {
+        return 0;
+    }
+    const uint64_t fraction = load32(stamp + 4);
+    return (static_cast<int64_t>(seconds) - static_cast<int64_t>(kNtpUnixDelta)) * 1000000000 +
+           static_cast<int64_t>((fraction * 1000000000ull) >> 32);
 }
 
 /* 32-bit seconds since 1900 followed by a 32-bit binary fraction. The seconds
@@ -886,6 +906,110 @@ void NtpServer::fillControlFacts(ControlFacts &facts, const TimeReference &ref) 
     }
 }
 
+void NtpServer::recordServePath(const sockaddr_storage &from, const struct timespec &received,
+                                const uint8_t *origin)
+{
+    const int64_t nowUs = esp_timer_get_time();
+
+    uint32_t       addr = 0;
+    bool           ok   = true;
+    const uint8_t *b    = nullptr;
+    if (from.ss_family == AF_INET) {
+        addr = reinterpret_cast<const sockaddr_in *>(&from)->sin_addr.s_addr;
+    } else if (from.ss_family == AF_INET6) {
+        b                = reinterpret_cast<const sockaddr_in6 *>(&from)->sin6_addr.s6_addr;
+        const bool mapped = b[10] == 0xFF && b[11] == 0xFF;
+        for (int i = 0; i < 10 && mapped; ++i) {
+            if (b[i] != 0) {
+                ok = false;
+            }
+        }
+        if (mapped && ok) {
+            std::memcpy(&addr, b + 12, sizeof(addr));
+        } else {
+            ok = false;
+        }
+    } else {
+        ok = false;
+    }
+    if (!ok) {
+        ++m_serveWhy[1];
+        reportServePath(nowUs);
+        return;
+    }
+
+    const int64_t clientNs = stampToNs(origin);
+    if (clientNs == 0) {
+        ++m_serveWhy[2];
+        reportServePath(nowUs);
+        return;
+    }
+    const int64_t delta =
+        (static_cast<int64_t>(received.tv_sec) * 1000000000 + received.tv_nsec) - clientNs;
+    if (delta < -1000000000 || delta > 1000000000) {
+        ++m_serveWhy[3];
+        reportServePath(nowUs);
+        return;
+    }
+    ++m_serveWhy[0];
+
+    ServePathSlot *slot   = nullptr;
+    ServePathSlot *oldest = &m_serve[0];
+    for (auto &s : m_serve) {
+        if (s.addr == addr) {
+            slot = &s;
+            break;
+        }
+        if (s.lastUs < oldest->lastUs) {
+            oldest = &s;
+        }
+    }
+    if (slot == nullptr) {
+        slot        = oldest;
+        slot->addr  = addr;
+        slot->count = 0;
+    }
+    if (slot->count == 0) {
+        slot->minNs = delta;
+        slot->maxNs = delta;
+    } else {
+        slot->minNs = std::min(slot->minNs, delta);
+        slot->maxNs = std::max(slot->maxNs, delta);
+    }
+    ++slot->count;
+    slot->lastUs = nowUs;
+
+    reportServePath(nowUs);
+}
+
+void NtpServer::reportServePath(int64_t nowUs)
+{
+    if (nowUs - m_serveReportUs < 60000000) {
+        return;
+    }
+    m_serveReportUs = nowUs;
+    ESP_LOGI(TAG, "servepath kept %u family %u origin-zero %u out-of-range %u",
+             static_cast<unsigned>(m_serveWhy[0]), static_cast<unsigned>(m_serveWhy[1]),
+             static_cast<unsigned>(m_serveWhy[2]), static_cast<unsigned>(m_serveWhy[3]));
+    m_serveWhy[0] = m_serveWhy[1] = m_serveWhy[2] = m_serveWhy[3] = 0;
+    for (auto &s : m_serve) {
+        if (s.count == 0) {
+            continue;
+        }
+        const uint8_t *ip = reinterpret_cast<const uint8_t *>(&s.addr);
+        /* Half the range, because that is the number that belongs in a bound:
+         * the centre is where the replies went, and the aim is to say how far
+         * from it they can be. A constant client offset cancels in the range. */
+        const int64_t halfNs = (s.maxNs - s.minNs) / 2;
+        ESP_LOGI(TAG, "servepath %u.%u.%u.%u n %u half %.1f us centre %.1f us", ip[0], ip[1],
+                 ip[2], ip[3], static_cast<unsigned>(s.count),
+                 static_cast<double>(halfNs) / 1000.0,
+                 static_cast<double>(s.minNs + s.maxNs) / 2000.0);
+        ServePath::instance().observe(halfNs, s.count);
+        s.count = 0;
+    }
+}
+
 void NtpServer::serveLoop()
 {
     /* This task's socket, taken by value: the member may be replaced by a
@@ -1013,6 +1137,18 @@ void NtpServer::serveLoop()
                 } else {
                     const bool kod = action == Action::Kod;
 
+                    /* How the served time is moving, seen from a client. Its
+                     * own send stamp is in the transmit field of the request --
+                     * the origin field is empty on a plain client and only
+                     * carries an echo from an interleaved one. The difference
+                     * between that stamp and ours is the client's clock offset
+                     * plus the path, so over a minute the constant cancels and
+                     * the range left is drift, measured on answers that went
+                     * out rather than guessed by a probe. */
+                    if (!kod) {
+                        recordServePath(from, received, req.transmit);
+                    }
+
                     /* Take both stamps around the reply build, which is as
                      * close to the wire as a software timestamp gets. */
                     const TimeReference ref         = m_ref->reference();
@@ -1052,8 +1188,14 @@ void NtpServer::serveLoop()
                                    &transmitted);
                     }
 
-                    if (sendto(sock, reply, sizeof(reply), 0,
-                               reinterpret_cast<const sockaddr *>(&from), fromLen) < 0) {
+                    /* The reply's own time in the stack, which is the number
+                     * its timestamp above should have been corrected by. */
+                    const int64_t replySent = esp_timer_get_time();
+                    const int     replyRc   =
+                        sendto(sock, reply, sizeof(reply), 0,
+                               reinterpret_cast<const sockaddr *>(&from), fromLen);
+                    const int64_t replyCost = (esp_timer_get_time() - replySent) * 1000;
+                    if (replyRc < 0) {
                         ESP_LOGW(TAG, "sendto: errno %d", errno);
                     } else if (kod) {
                         ++kodSent;
@@ -1069,6 +1211,7 @@ void NtpServer::serveLoop()
                             std::memcpy(reply + kTransmitOffset, liveStamp, kStampBytes);
                         }
                         pairs.save(from, receiveStamp, liveStamp, nowMs);
+                        TxLag::instance().recordReply(replyCost);
                         ++answered;
                         ++winAnswered;
                         m_answered.store(answered, std::memory_order_relaxed);
