@@ -79,6 +79,17 @@ constexpr uint32_t kMdioAddresses = 32;
 constexpr uint32_t kPhyIdAbsent = 0xffff;
 
 constexpr uint32_t    kStatusPollMs    = 5000;
+
+/* A minute down before the MAC is assumed wedged rather than the cable being
+ * out: a switch reboot, a patch lead being moved and a DHCP server restart all
+ * finish inside that. The down-window restarts after every attempt, so the
+ * attempts space themselves by a minute too, and five of them is where a reboot
+ * becomes the honest answer. */
+constexpr int64_t     kLinkDownRestartUs = 60000000;
+constexpr uint32_t    kMaxRestarts       = 5;
+/* Millisecond-scale pause after stopping, so the PHY sees a real break in the
+ * link rather than a single sample of it. */
+constexpr uint32_t    kRestartSettleMs   = 250;
 /* The driver polls the link over MDIO by itself every 2 s, and IDF's SMI path
  * has no mutex: two readers can return each other's data, or ESP_ERR_INVALID_STATE.
  * So the registers are read once every six ticks (30 s) while the "waiting"
@@ -329,6 +340,33 @@ esp_err_t EthernetLink::attachNetif()
     return esp_netif_attach(m_netif, glue);
 }
 
+esp_err_t EthernetLink::restart(const char *why)
+{
+    bool expected = false;
+    if (!m_restarting.compare_exchange_strong(expected, true)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGW(TAG, "restarting the MAC (%s) -- %" PRIu32 " this boot, no reboot", why, m_restarts);
+    esp_err_t err = esp_eth_stop(m_eth);
+    if (err == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(kRestartSettleMs));
+        err = esp_eth_start(m_eth);
+    }
+    if (err == ESP_OK) {
+        ++m_restarts;
+        /* The PHY comes back with whatever autoneg settles on; say so, because
+         * "restarted and still 100 Mb/s" and "restarted into a half-duplex
+         * 10 Mb/s" are different outcomes for the servo's uplink. */
+        logPhyStatus();
+    } else {
+        ESP_LOGE(TAG, "MAC restart failed: %s", esp_err_to_name(err));
+    }
+    m_lastRestartUs = esp_timer_get_time();
+    m_restarting.store(false);
+    return err;
+}
+
 esp_err_t EthernetLink::startStatusTask()
 {
     if (xTaskCreate(&statusTaskEntry, "eth_status", kStatusTaskStack, this, kStatusTaskPrio,
@@ -521,12 +559,37 @@ void EthernetLink::statusLoop()
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(kStatusPollMs));
         if (m_haveIp.load(std::memory_order_relaxed)) {
-            continue; /* the lease is in: quiet, but still watching */
+            m_linkDownSinceUs = 0; /* the lease is in: quiet, but still watching */
+            continue;
         }
-        ESP_LOGI(TAG, "waiting for link + DHCP lease (is the RJ45 plugged in?)");
+
+        const int64_t nowUs = esp_timer_get_time();
+        if (m_linkDownSinceUs == 0) {
+            m_linkDownSinceUs = nowUs;
+        }
+        ESP_LOGI(TAG, "waiting for link + DHCP lease (is the RJ45 plugged in?) -- %lld s",
+                 static_cast<long long>((nowUs - m_linkDownSinceUs) / 1000000));
         if (tick++ % kPhyStatusEvery == 0) {
             logPhyStatus();
         }
+
+        /* Nothing else in this firmware ever touches the MAC again, so a PHY
+         * that stopped answering stays stopped until someone reboots the board
+         * by hand -- and the box is usually the far end of the link that would
+         * have told you about it. */
+        if (nowUs - m_linkDownSinceUs < kLinkDownRestartUs || m_restarting) {
+            continue;
+        }
+        if (m_restarts >= kMaxRestarts) {
+            if (!m_restartCapLogged) {
+                m_restartCapLogged = true;
+                ESP_LOGE(TAG, "link down after %" PRIu32 " restarts -- needs a power cycle",
+                         m_restarts);
+            }
+            continue;
+        }
+        restart("link down");
+        m_linkDownSinceUs = esp_timer_get_time();
     }
 }
 

@@ -48,6 +48,19 @@ public:
      * Call once, after esp_netif_init() and esp_event_loop_create_default(). */
     esp_err_t begin();
 
+    /* Stop and restart the MAC, without rebooting and without touching the
+     * clock. The anchor is esp_timer, which the MAC has nothing to do with, so
+     * unlike a PTP grandmaster there is no PHC to preserve here -- the cost of
+     * a restart is the ~2 s of link plus a re-lease, against a reboot's 20 s of
+     * stratum 16 and every counter on the status page going back to zero.
+     *
+     * Refuses while a restart is already in flight. Rate-limited by the caller
+     * where it is a watchdog, unlimited where it is a human on the test hook. */
+    esp_err_t restart(const char *why);
+
+    /* How many times the link has been restarted this boot. */
+    uint32_t restarts() const { return m_restarts; }
+
 private:
     EthernetLink() = default;
 
@@ -95,5 +108,14 @@ private:
     std::atomic<bool> m_haveIp{false};
     /* Only ever touched from the event task, so a plain bool is enough. */
     bool m_webStarted = false;
+    /* Restart bookkeeping: the in-flight guard is checked from a task, so it
+     * is atomic; the rest is only touched by whoever holds the guard. */
+    std::atomic<bool> m_restarting{false};
+    uint32_t          m_restarts     = 0;
+    int64_t           m_lastRestartUs = 0;
+    /* When the current run of "no lease" began, and whether the attempt cap has
+     * already been reported (it would otherwise repeat every poll). */
+    int64_t           m_linkDownSinceUs = 0;
+    bool              m_restartCapLogged = false;
     bool m_ntpStarted = false;
 };
