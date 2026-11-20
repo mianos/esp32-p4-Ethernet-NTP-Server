@@ -191,11 +191,16 @@ UART0 -- so the cable that programmes the box is the shell on it. That is the
 point: when the box is on a link with no DHCP server, or on an address it cannot
 reach, the cable is the way back in.
 
-`idf.py monitor` for it, or raw (the REPL expects CR, and the logs interleave):
+The port is a log stream by default: every line, no prompt, and commands still
+run. `console on` is the debug state -- prompt, log silenced so a session can be
+read -- and `console off` puts it back. Commands work in both; only the prompt
+and the log level differ. Nothing is persisted, so a reboot comes back logging.
+
+`idf.py monitor` for it, or raw (the REPL expects CR):
 
 ```console
 $ stty -F /dev/ttyACM0 115200 raw -echo -hupcl
-$ printf 'help\r' > /dev/ttyACM0
+$ printf 'console on\r' > /dev/ttyACM0
 ```
 
 | Command | Effect |
@@ -203,11 +208,17 @@ $ printf 'help\r' > /dev/ttyACM0
 | `net` | show mode, address, gateway, resolver, link |
 | `net static <cidr> <gw> [dns]` | set a static address, persist and apply it live |
 | `net dhcp` | back to the DHCP client |
-| `config` | print the stored config |
+| `console on` / `console off` | prompt on and log silenced, or back to the log stream |
+| `config` | print the stored config, pretty-printed (`config raw` for one line) |
 | `config set <key> <value>` | any key from the table under [HTTP API](#http-api) |
 | `config reset` | compiled-in defaults; the boot count survives |
 | `hostname`, `serve`, `timesource`, `ntpserver`, `log` | the single-value shorthands |
 | `nvs_list`, `nvs_get`, `version`, `free`, `heap`, `tasks`, `restart` | IDF's `cmd_nvs` / `cmd_system` |
+
+The prompt is switched by rewriting the console component's own prompt buffer on
+the live REPL. Suspending the REPL task instead does not work: it is blocked in a
+UART read whenever it is idle, and its outstanding read swallows input that the
+suspended task can never process.
 
 Every write goes through `Settings::applyJson()`, the same validation `POST
 /config` uses, so the console cannot reach a state the HTTP surface rejects: a

@@ -7,6 +7,11 @@
 #include "esp_console.h"
 #include "esp_log.h"
 
+/* A C header with no extern "C" guard of its own. */
+extern "C" {
+#include "console_private.h"
+}
+
 #include "cmd_nvs.h"
 #include "cmd_system.h"
 
@@ -28,6 +33,89 @@ struct Context {
 };
 
 Context s_ctx;
+
+/* The REPL runs under a fixed task name set by the console component, so it can
+ * be found and suspended from inside one of its own commands. */
+std::atomic<bool> s_watching{false};
+/* Set while the console has silenced the log for its own output. */
+bool            s_silenced  = false;
+esp_log_level_t s_savedLevel = ESP_LOG_INFO;
+
+/* Quiet console.
+ *
+ * The REPL task is suspended while this runs, so nothing prints a prompt and
+ * linenoise stops redrawing -- but the port stays interactive: a line is read,
+ * echoed, and handed to esp_console_run(), so every command still works. The
+ * resume phrase is checked first because `console on` has to resume the REPL
+ * rather than run inside this task.
+ *
+ * Nothing is persisted: a reboot always comes back with a live console. */
+/* The prompt is a char buffer inside the console component's own struct, handed
+ * to linenoise on every iteration, so rewriting it changes the next prompt.
+ *
+ * Suspending the REPL task to hide the prompt does not work: it is blocked in a
+ * UART read whenever it is idle, and that outstanding read swallows whatever
+ * arrives while it is suspended -- bytes vanish into a task that cannot run. The
+ * prompt buffer can be rewritten on the live REPL instead, which leaves the
+ * reading exactly where it was. */
+esp_console_repl_com_t *s_replCom  = nullptr;
+bool            s_quiet      = false;
+
+/* repl_core is the first member of the struct, so the handle we were given is
+ * its address. */
+void setPrompt(const char *text)
+{
+    if (s_replCom != nullptr) {
+        esp_console_setup_prompt(text, s_replCom);
+    }
+}
+
+/* Two states, and the logging one is the default: the port is a log stream with
+ * no prompt on it. `console on` is the debug state -- prompt, log silenced so
+ * the session is readable. Commands work in both; only the prompt differs. */
+int cmdConsole(void *, int argc, char **argv)
+{
+    const char *what = argc > 1 ? argv[1] : "";
+
+    if (std::strcmp(what, "on") == 0) {
+        if (!s_quiet) {
+            std::printf("console is already up\n");
+            return 0;
+        }
+        s_quiet = false;
+        if (!s_silenced) {
+            s_savedLevel = esp_log_level_get("*");
+            s_silenced   = true;
+        }
+        esp_log_level_set("*", ESP_LOG_NONE);
+        setPrompt("ntp>");
+        std::printf("\nconsole up, log silenced ('console off' restores)\n");
+        return 0;
+    }
+
+    if (std::strcmp(what, "off") == 0) {
+        if (s_quiet) {
+            std::printf("console is already down\n");
+            return 0;
+        }
+        s_quiet = true;
+        if (s_silenced) {
+            esp_log_level_set("*", s_savedLevel);
+            s_silenced = false;
+        }
+        setPrompt("");
+        std::printf("console down, log back at its level ('console on' for the prompt)\n");
+        return 0;
+    }
+
+    if (argc > 1) {
+        std::printf("usage: console [on | off]\n");
+        return 1;
+    }
+    std::printf("console %s%s\n", s_quiet ? "down (logging, no prompt)" : "up",
+                s_silenced ? ", log silenced" : "");
+    return 0;
+}
 
 void printAddressing()
 {
@@ -149,8 +237,23 @@ int cmdConfig(void *, int argc, char **argv)
         return 1;
     }
 
-    if (argc == 1) {
-        std::printf("%s\n", s_ctx.settings->toJson().ToString().c_str());
+    if (argc == 1 || (argc > 1 && std::strcmp(argv[1], "raw") == 0)) {
+        const std::string compact = s_ctx.settings->toJson().ToString();
+        if (argc > 1) {
+            std::printf("%s\n", compact.c_str());
+            return 0;
+        }
+        /* Readable, because this is the one place a person reads the whole
+         * config. cJSON is already a dependency of the settings store. */
+        cJSON *root   = cJSON_Parse(compact.c_str());
+        char  *pretty = root != nullptr ? cJSON_Print(root) : nullptr;
+        if (pretty != nullptr) {
+            std::printf("%s\n", pretty);
+            cJSON_free(pretty);
+        } else {
+            std::printf("%s\n", compact.c_str());
+        }
+        cJSON_Delete(root);
         return 0;
     }
 
@@ -167,7 +270,7 @@ int cmdConfig(void *, int argc, char **argv)
     }
 
     if (std::strcmp(argv[1], "set") != 0) {
-        std::printf("usage: config [reset | set <key> <value>]\n");
+        std::printf("usage: config [raw | reset | set <key> <value>]\n");
         return 1;
     }
     if (argc < 4) {
@@ -295,7 +398,10 @@ esp_err_t console::start()
     register_nvs();
 
     add("net", "Show or set addressing", "[dhcp | static <cidr> <gateway> [dns]]", cmdNet);
-    add("config", "Show, set or reset the stored config", "[reset | set <key> <value>]", cmdConfig);
+    add("config", "Show (pretty, or raw), set or reset the stored config",
+        "[raw | reset | set <key> <value>]", cmdConfig);
+    add("console", "Debug console on (prompt, log silenced) or off (log stream)",
+        "[on | off]", cmdConsole);
     add("hostname", "Show or set the DHCP hostname", "[name]", cmdHostname);
     add("serve", "Serve NTP on udp/123", "<on|off>", cmdServe);
     add("timesource", "Where the clock comes from", "<off|dhcp|static|gps|auto>", cmdTimesource);
@@ -323,5 +429,18 @@ esp_err_t console::start()
         ESP_LOGE(TAG, "repl: %s", esp_err_to_name(err));
         return err;
     }
-    return esp_console_start_repl(handle);
+    const esp_err_t started = esp_console_start_repl(handle);
+    if (started != ESP_OK) {
+        return started;
+    }
+
+    /* Boot into the logging state: no prompt on the port, commands still run.
+     * The prompt is blanked rather than the task suspended, and a blank prompt
+     * is what `console on` restores. */
+    s_replCom = reinterpret_cast<esp_console_repl_com_t *>(handle);
+    s_quiet   = true;
+    setPrompt("");
+    std::printf("logging -- 'console on' for the prompt\r\n");
+    std::fflush(stdout);
+    return ESP_OK;
 }
