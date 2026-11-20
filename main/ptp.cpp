@@ -169,10 +169,13 @@ constexpr uint8_t kFlagTraceable = 0x30; /* octet 1, time and frequency */
 
 constexpr int kTaskStack = 4096;
 
-/* Whether a transmit stamp is asked of the hardware. The read-back path is the
- * one that can leave a descriptor holding a pending timestamp, so it is worth
- * being able to run without it; the Follow_Up is then built from the counter
- * read just before the send, which is what any non-stamped master does. */
+/* Whether a transmit stamp is asked of the hardware, and only for the frames
+ * whose stamp is used: an NTP reply's arrival comes from the RX side and its
+ * transmit field has to be written before the frame leaves anyway, so it gains
+ * nothing from the read-back. The read-back is the path that can leave a
+ * descriptor holding a pending timestamp, so the exposure is kept to the one
+ * frame a second that needs it. The Follow_Up falls back to the counter read
+ * just before the send, which is what any non-stamped master does. */
 constexpr bool kTxStamp = false;
 
 volatile uint8_t gMode      = 0;
@@ -778,7 +781,7 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
     if (s_eth == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (!kTxStamp) {
+    if (!kTxStamp || stampNs == nullptr) {
         const esp_err_t plain = esp_eth_transmit_ctrl_vargs(s_eth, nullptr, 2, frame, len);
         if (plain != ESP_OK && plain != ESP_ERR_INVALID_STATE) {
             noteTxResult(plain);
@@ -961,7 +964,9 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
     }
 
     const size_t total = udpOff + udpLen;
-    const esp_err_t err = transmit(frame, total, stampNs);
+    /* No transmit stamp: the reply's arrival is the one that matters, and its
+     * transmit field has to be written before the frame goes. */
+    const esp_err_t err = transmit(frame, total, nullptr);
     if (s_stats.txStamps == 0) {
         ESP_LOGI(TAG, "first raw send: %u bytes to %u.%u.%u.%u:%u, %s",
                  static_cast<unsigned>(total), dstAddr[0], dstAddr[1], dstAddr[2], dstAddr[3],
@@ -972,10 +977,8 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
         ESP_LOGW(TAG, "transmit: %s", esp_err_to_name(err));
         return false;
     }
-    if (stampNs == nullptr || *stampNs == 0) {
-        fail(7);
-        return false;
-    }
+    /* Sent, stamped or not: the caller must not fall back to sendto() and put
+     * a second copy on the wire. */
     return true;
 }
 
