@@ -687,7 +687,7 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
         if (err == ESP_ERR_INVALID_STATE) {
             return err;
         }
-        if (++s_stats.txErrors < 4) {
+        if ((++s_stats.txErrors % 100) == 1) {
             ESP_LOGW(TAG, "transmit: %s", esp_err_to_name(err));
         }
         return err;
