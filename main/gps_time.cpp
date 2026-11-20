@@ -1085,6 +1085,11 @@ void GpsTime::bridgeTask()
 void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
 {
     const int64_t nowUs = edgeNs / 1000;
+    /* Stamped here rather than in the capture handler because this is the path
+     * both handlers share: the capture peripheral is not always the one in use
+     * (the GPIO fallback is what runs when the timer cannot be set up), and
+     * anything waiting on "an edge arrived" was waiting on the wrong one. */
+    m_lastEdgeUs = nowUs;
 
     portENTER_CRITICAL_ISR(&m_mux);
     /* The POST /gps/pps hook swallows the edge here rather than further up, so
@@ -1132,11 +1137,11 @@ bool IRAM_ATTR GpsTime::ppsCapIsr(mcpwm_cap_channel_handle_t, const mcpwm_captur
     const int64_t atUs = esp_timer_get_time();
 
     /* The software catch below runs this handler again a tick or two later.
-     * Real edges are a second apart, so anything this close is that echo. */
+     * Real edges are a second apart, so anything this close is that echo. The
+     * store itself is in recordEdge, which both handlers reach. */
     if (self->m_lastEdgeUs >= 0 && atUs - self->m_lastEdgeUs < kSoftCatchWindowUs) {
         return false;
     }
-    self->m_lastEdgeUs = atUs;
 
     int64_t edgeNs = atUs * 1000;
     if (self->m_capNowValid && self->m_capHz != 0) {
