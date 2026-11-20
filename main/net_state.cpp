@@ -71,11 +71,22 @@ std::string ipv6LinkLocal()
 
 std::string ipv6Global()
 {
-    esp_ip6_addr_t addr{};
-    if (s_netif == nullptr || esp_netif_get_ip6_global(s_netif, &addr) != ESP_OK) {
+    /* Not esp_netif_get_ip6_global(): that filters on lwIP's ip6_addr_isglobal(),
+     * which is 2000::/3 and so excludes a ULA. A segment numbered out of fd00::/64
+     * -- which is what a private pocket gets, exactly as the IPv4 side is
+     * numbered out of 10.99.0.0/29 -- would report nothing at all while working
+     * perfectly. Take the first address that is not link-local instead. */
+    if (s_netif == nullptr) {
         return {};
     }
-    return text6(addr);
+    esp_ip6_addr_t addrs[CONFIG_LWIP_IPV6_NUM_ADDRESSES] = {};
+    const int      count = esp_netif_get_all_ip6(s_netif, addrs);
+    for (int i = 0; i < count; ++i) {
+        if (esp_netif_ip6_get_addr_type(&addrs[i]) != ESP_IP6_ADDR_IS_LINK_LOCAL) {
+            return text6(addrs[i]);
+        }
+    }
+    return {};
 }
 #endif
 
