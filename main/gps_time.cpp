@@ -4192,6 +4192,11 @@ GpsTime::Status GpsTime::status() const
     st.holdAssertInS = m_holdAssertAtUs == 0
                            ? -1
                            : (static_cast<double>(m_holdAssertAtUs - esp_timer_get_time()) / 1e6);
+    st.lastEdgeAgeMs = m_lastEdgeUs < 0
+                           ? -1
+                           : (static_cast<double>(esp_timer_get_time() - m_lastEdgeUs) / 1e3);
+    st.holdReady     = m_fixType >= 2 && m_satCount >= 4 && m_lastEdgeUs > 0 &&
+                   esp_timer_get_time() - m_lastEdgeUs < 3000000;
     st.svinAgeS = m_svinAtUs != 0 ? static_cast<double>(esp_timer_get_time() - m_svinAtUs) / 1e6
                                   : -1;
     st.pinSel            = m_pinSel;

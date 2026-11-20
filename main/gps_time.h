@@ -385,6 +385,10 @@ public:
          * was restored and dropped on every boot. */
         bool     holdWanted = false;
         double   holdAssertInS = -1;
+        /* The three terms the retry waits on, so a hold that never gets sent can
+         * be told from one that is simply not due. */
+        bool     holdReady = false;
+        double   lastEdgeAgeMs = -1;
         double   svinAgeS   = -1;
         /* MON-HW's pin map: which module pins the receiver has assigned, their
          * direction and level. The antenna supervisor is a pin pair, so this is

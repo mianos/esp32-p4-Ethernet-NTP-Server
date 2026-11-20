@@ -771,6 +771,8 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
     doc.AddItem("pulse_on_second", gps.pulseOnSecond);
     doc.AddItem("hold_wanted", gps.holdWanted);
     doc.AddItem("hold_assert_in_s", gps.holdAssertInS);
+    doc.AddItem("hold_ready", gps.holdReady);
+    doc.AddItem("last_edge_age_ms", gps.lastEdgeAgeMs);
 
     /* Geometry and clock quality. Each carries its own age so a message that
      * stops is visible as a growing number rather than a stale one that still
@@ -899,7 +901,7 @@ static constexpr const char *kPolled[] = {
     "svin_var_mm2", "svin_obs", "svin_target_s", "svin_limit_mm", "svin_valid",
     "dispersion_us", "lock_window_s", "tp_jitter_ns", "root_delay_ns", "servo_steps",
     "servo_clamps", "edge_spikes", "tie_max_ns", "tie_rms_ns", "pvt_nano_ns", "pulse_offset_ns",
-    "pulse_on_second", "hold_wanted", "hold_assert_in_s", "gdop", "pdop", "hdop",
+    "pulse_on_second", "hold_wanted", "hold_assert_in_s", "hold_ready", "last_edge_age_ms", "gdop", "pdop", "hdop",
     "vdop", "dop_age_s", "clk_bias_ns", "clk_drift_ns_s", "t_acc_ns", "f_acc_ps_s",
     "nav_status_flags", "nav_status_flags2", "ttff_ms", "baud", "recent_frames",
     "io_rx_bytes", "io_tx_bytes", "io_parity", "io_framing", "io_overrun", "rbuf_pending",
