@@ -940,11 +940,24 @@ position are re-sent from NVS at start-up: a survey with its own parameters, a l
 as it was. Adopting the position into RAM is not the same as asking for it, and the
 two were once the same act — the hold was restored, never sent, and the receiver
 came up moving while `/config` still said `fixed` and `/gps/info` reported a hold
-that did not exist. Every boot spent the survey for nothing. The assertion is
-retried with a back-off (5 s doubling to 5 min) because a receiver that is still
-booting NAKs the frame, and it stops once the receiver is in fixed mode, while a
-survey is running, or when the stored mode is no longer `fixed`, so a `stop` is not
-undone by the retry.
+that did not exist. Every boot spent the survey for nothing.
+
+`CFG-TMODE2` restarts the pulse generator, so it is not sent at four seconds in
+with the receiver still acquiring: that cost five seconds of edges, two refusals
+and the fallback upstream taking the clock. The frame waits until there is a fix,
+satellites and a live edge, and a refusal after that backs off (5 s doubling to
+5 min). It stops once the receiver is in fixed mode, while a survey is running, or
+when the stored mode is no longer `fixed`, so a `stop` is not undone by the retry.
+
+**TIM-TP stops in fixed mode**, because it is a survey-time message and a held
+position has no survey to describe. The receiver still emits the pulse and the
+capture still trusts it, so what is lost is only the receiver's statement of where
+that pulse sits — bounded by the generator's step, not unknowable. The
+`unobserved` term therefore holds at the 5 µs quantisation clamp while the edge is
+trusted instead of climbing 10 µs a second to a 200 ms cap. Left climbing it
+demoted a box within a minute of the frames stopping, and because the term never
+comes back the box never promoted again: the upstream kept the clock while 40 µs
+of dispersion had been the truth.
 
 **Two message dialects, and how they were found.** The first attempt used
 `UBX-CFG-TMODE3` (0x06 0x71) and `UBX-NAV-SVIN` (0x01 0x3B). Both are wrong here and

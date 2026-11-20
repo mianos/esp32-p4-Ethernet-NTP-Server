@@ -82,6 +82,11 @@ constexpr int64_t kFirstRateUs = 15000000;
  * does not spend long moving. */
 constexpr int64_t kHoldRetryUs     = 5000000;
 constexpr int64_t kHoldRetryMaxUs  = 300000000;
+/* How long after adopting a hold the receiver is given before being asked for
+ * it. TMODE2 restarts the pulse generator; at four seconds in it is still
+ * acquiring, and the cost of doing it early was five seconds of edges, two
+ * refusals and the fallback upstream taking the clock. */
+constexpr int64_t kHoldSettleUs = 30000000;
 /* Silence that counts as a dead line rather than a quiet one. The receiver sends
 a message set at 1 Hz, so 5 s is five missed turns of it. */
 constexpr int64_t kFrameSilenceUs = 5000000;
@@ -575,16 +580,15 @@ void GpsTime::restoreTimeMode()
              * the position in RAM and the receiver in moving mode: the module
              * came up moving, was never told otherwise, and every boot spent the
              * survey for nothing while the box reported a hold it did not have.
-             * The attempt can fail here -- the receiver is often still booting
-             * this soon -- so a failure arms a retry rather than being final. */
-            if (sendFixedPosition()) {
-                ESP_LOGW(TAG, "position hold asserted at the receiver");
-            } else {
-                m_holdRetryUs    = kHoldRetryUs;
-                m_holdAssertAtUs = esp_timer_get_time() + m_holdRetryUs;
-                ESP_LOGW(TAG, "receiver did not take the hold yet: retrying in %lld s",
-                         static_cast<long long>(kHoldRetryUs / 1000000));
-            }
+             *
+             * The frame is not sent this instant, though. Sending TMODE2
+             * restarts the pulse generator, and at four seconds in the receiver
+             * is still acquiring: done here it cost five seconds of edges, two
+             * refusals and the upstream taking the clock. The periodic block
+             * sends it once there is a fix and a live edge to send it over. */
+            m_holdRetryUs    = kHoldRetryUs;
+            m_holdAssertAtUs = esp_timer_get_time() + kHoldSettleUs;
+            ESP_LOGW(TAG, "position hold will be asserted once the receiver has settled");
             return;
         }
         /* The mode says fixed but the position did not survive. Falling out of
@@ -1839,17 +1843,29 @@ void GpsTime::task()
          * because "stop" puts the module back to moving and only the settings
          * know that has happened -- without this test the retry would put a hold
          * back under a box that had been asked for a moving solution. A survey
-         * in progress wins for the same reason: TMODE2 fixed would end it. */
-        if (m_holdWanted && m_tmode != 2 && m_holdAssertAtUs != 0 && nowUs >= m_holdAssertAtUs &&
+         * in progress wins for the same reason: TMODE2 fixed would end it.
+         *
+         * It also waits for a fix, satellites and a live edge, because the frame
+         * restarts the pulse generator and there is nothing to restart before
+         * the receiver has begun: an unfixed module given TMODE2 spends the
+         * boot's first edges and can hand the clock to the fallback. Waiting
+         * does not cost a retry, so the deadline is simply moved on. */
+        if (m_holdWanted && m_tmode != 2 && m_holdAssertAtUs != 0 &&
             !m_svinActive && Settings::instance().gpsTimeMode() == "fixed") {
-            if (sendFixedPosition()) {
+            const bool ready = m_fixType >= 2 && m_satCount >= 4 && m_lastEdgeUs > 0 &&
+                               nowUs - m_lastEdgeUs < 3000000;
+            if (nowUs < m_holdAssertAtUs) {
+                /* Not due yet. */
+            } else if (!ready) {
+                m_holdAssertAtUs = nowUs + kHoldRetryUs;
+            } else if (sendFixedPosition()) {
                 m_holdAssertAtUs = 0;
                 m_holdRetryUs    = 0;
-                ESP_LOGW(TAG, "position hold asserted at the receiver after a retry");
+                ESP_LOGW(TAG, "position hold asserted at the receiver");
             } else {
                 m_holdRetryUs    = std::min(m_holdRetryUs * 2, kHoldRetryMaxUs);
                 m_holdAssertAtUs = nowUs + m_holdRetryUs;
-                ESP_LOGW(TAG, "position hold still refused: next try in %lld s",
+                ESP_LOGW(TAG, "receiver refused the position hold: next try in %lld s",
                          static_cast<long long>(m_holdRetryUs / 1000000));
             }
         }
@@ -3503,6 +3519,19 @@ int64_t GpsTime::unobservedNs() const
      * at 200 ms, six times the worst error seen and still finite. */
     if (m_timTpCfg != 1) {
         return 0;
+    }
+    /* In fixed mode the receiver stops sending TIM-TP: it is a survey-time
+     * message, and a held position has no survey to describe. The edge itself is
+     * still captured and still trusted, so what is missing is only the
+     * receiver's statement of where its own pulse sits -- bounded by the
+     * generator's step, not unknowable. Escalating here demoted a box whose
+     * clock was being disciplined by the same receiver, and since the term only
+     * grows and never comes back the box never promoted again: the upstream kept
+     * the clock while 40 µs of honest dispersion had been the truth. The
+     * quantisation clamp is the bound to state instead, and only while the edge
+     * is trusted -- an untrusted edge below returns to the escalation. */
+    if (m_tmode == 2 && m_lastEdgeTrusted) {
+        return kMaxQErrNs;
     }
     const int64_t silentS = (esp_timer_get_time() - m_qErrAtUs) / 1000000;
     if (silentS <= 30) {
