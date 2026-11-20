@@ -1418,6 +1418,28 @@ void GpsTime::task()
         if (nowUs >= m_nextCheckUs) {
             logLockChange();
             m_nextCheckUs = nowUs + 1000000;
+
+            /* Nothing heard for a while: is the receiver transmitting at all?
+             * The RX pin is sampled for transitions rather than the UART being
+             * asked, because the question is below the driver -- a pin that
+             * never moves is a wire or a dead port, a pin that moves while no
+             * frame parses is a rate or framing fault, and the two need
+             * different work. */
+            if (!m_frameSeen) {
+                int edges = 0;
+                int last  = gpio_get_level(static_cast<gpio_num_t>(kRxPin));
+                for (int i = 0; i < 400; ++i) {
+                    const int now = gpio_get_level(static_cast<gpio_num_t>(kRxPin));
+                    if (now != last) {
+                        ++edges;
+                        last = now;
+                    }
+                    esp_rom_delay_us(500);
+                }
+                ESP_LOGW(TAG, "GPIO%d idle probe at %u baud: %d transitions in 200 ms "
+                              "(level %d)",
+                         kRxPin, static_cast<unsigned>(m_baud), edges, last);
+            }
         }
         if (m_baudReq != 0) {
             const uint32_t want   = m_baudReq;
