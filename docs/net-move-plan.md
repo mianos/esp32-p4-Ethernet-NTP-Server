@@ -68,6 +68,31 @@ If the port will not come up or drops the link when the ME is awake:
    to disable or unprovision AMT, which needs the reboot that has been avoided;
 3. fall back to the cage once a 1000BASE-T module exists.
 
+### What happened on 2026-11-20
+
+The cable went in and the port came up first time: 100 Mb full duplex, carrier
+stable, no ME interference. The switch blamed above was the wrong suspect — the
+X710 cage was empty, not the platform.
+
+**DHCP on the link does not work for this box.** Its DISCOVERs reach the wire
+every 4 s (MSZ 1500, hostname, PRL, `Client-ID: ether`), and a throwaway
+container on the same bridge leased a probe address immediately, but the
+bridge's dnsmasq never answered the box. Most likely the unicast-OFFER case:
+lwIP leaves the broadcast flag clear, so dnsmasq replies to an address the client
+does not have yet, its ARP goes unanswered, and the OFFER dies. Unconfirmed --
+`--quiet-dhcp` hides dnsmasq's own log and there is no syslog on the host.
+
+Rather than keep at it, the console did what it exists for:
+
+```
+ntp> net static 10.99.0.2/29 10.99.0.1
+```
+
+The box has been on that address since, serving stratum 1 at ~0.3 ms with 0 %
+loss on the link and reachable from the LAN through the existing route. The
+bridge's DHCP stays on for anything else plugged in, and the box no longer
+depends on it.
+
 ## 3. Phase 1 — make the path work before the box moves
 
 | step | command |
@@ -82,6 +107,21 @@ If the port will not come up or drops the link when the ME is awake:
 No proxy devices: with a route, the containers and the Mac all reach the box by its
 own address and its replies carry its own source. That keeps the timestamps and the
 `servepath` attribution honest.
+
+### What happened
+
+- the `10.99.0.0/29 via 131.84.1.1` route was already on `hfc` and needed no
+  change; `mega` forwards between `br0` and `ntp0` and Incus's own NAT rule for
+  the bridge covers outbound, so no `hfc` masquerade was needed either;
+- the viewer's unit now names `10.99.0.2` instead of the hostname;
+- `esp32p4-ntp.mianos.com` moved from `131.84.1.107` to `10.99.0.2`;
+- there is no LAN NTP server to fall back to (`hfc` and `technit` both refuse
+  :123), so the box's `ntpServer` was set to `162.159.200.1` and `ipDns` to
+  `1.1.1.1` to keep `timeSource auto` a fallback rather than a dead end;
+- `ntp.mianos.com` still resolves to `mega`, whose chrony is synced from
+  `2.debian.pool.ntp.org` — **the LAN does not yet take time from the box**.
+  Changing that is a root edit of `/etc/chrony/chrony.conf` on `mega`:
+  `server 10.99.0.2 iburst prefer` with the pool kept below it.
 
 ## 4. Phase 2 — firmware: static addressing and a serial console
 
