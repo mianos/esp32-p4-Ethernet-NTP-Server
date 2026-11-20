@@ -363,6 +363,10 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         /* What dispersion rests on: the measured drift of the served time on
          * answers that went out, which is the number a client's bound is made
          * of. Auditable, so the claim can be checked against the log. */
+        json.AddItem("ntp_il_try", static_cast<double>(server.interleavedTried()));
+        json.AddItem("ntp_il_saved", static_cast<double>(server.interleavedSaved()));
+        json.AddItem("ntp_il_keyonly", static_cast<double>(server.interleavedKeyOnly()));
+        json.AddItem("ntp_il_hit", static_cast<double>(server.interleavedHit()));
         json.AddItem("ntp_serve_bound_us", ServePath::instance().boundUs());
         json.AddItem("ntp_interleaved_served",
                      static_cast<double>(server.interleavedServed()));

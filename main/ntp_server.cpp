@@ -272,8 +272,10 @@ constexpr size_t   kPairBytes      = 8;
 
 struct SavedPair {
     uint8_t  key[kAddressKeySize] = {};
-    uint8_t  receive[kPairBytes]  = {};
-    uint8_t  transmit[kPairBytes] = {};
+    uint8_t  wire[kPairBytes]     = {}; /* the T3 that went out, which is the cookie */
+    uint8_t  request[kPairBytes]  = {}; /* that request's T1, returned as the origin */
+    uint8_t  receive[kPairBytes]  = {}; /* that exchange's T2, returned as the receive */
+    uint8_t  transmit[kPairBytes] = {}; /* that exchange's T3, returned as the transmit */
     uint32_t atMs                 = 0;
     bool     used                 = false;
 };
@@ -289,13 +291,21 @@ void bumpFraction(uint8_t stamp[kPairBytes])
     }
 }
 
+/* The queue is keyed by the transmit timestamp that actually went on the wire,
+ * which is what the client echoes as its origin. A reply carries the previous
+ * exchange's stamps; the cookie names which exchange that was.
+ *
+ * Note that the wire transmit and the fresh one differ in exactly the mode this
+ * exists for: the reply hands back the saved T3, so the cookie the client will
+ * send is the saved one, not the one just taken. */
 class Interleaved {
 public:
     /* Does `origin` name a saved exchange with this address? The RFC forbids
-     * answering interleaved unless it does, and forbids answering twice to the
-     * same receive timestamp, so a match is consumed here. */
+     * answering in the mode unless it does, and forbids answering twice to the
+     * same exchange, so a match is consumed here. */
     bool take(const sockaddr_storage &from, const uint8_t origin[kPairBytes],
-              uint8_t transmitOut[kPairBytes], uint32_t nowMs)
+              uint8_t transmitOut[kPairBytes], uint8_t originOut[kPairBytes],
+              uint8_t receiveOut[kPairBytes], uint32_t nowMs)
     {
         if (isZero(origin, kPairBytes)) {
             return false;
@@ -308,27 +318,25 @@ public:
                 continue;
             }
             if (std::memcmp(slot.key, key, kAddressKeySize) != 0 ||
-                std::memcmp(slot.receive, origin, kPairBytes) != 0) {
+                std::memcmp(slot.wire, origin, kPairBytes) != 0) {
                 continue;
             }
             std::memcpy(transmitOut, slot.transmit, kPairBytes);
+            std::memcpy(originOut, slot.request, kPairBytes);
+            std::memcpy(receiveOut, slot.receive, kPairBytes);
             slot.used = false;
+            ++m_taken;
             return true;
         }
         return false;
     }
 
-    /* Every answered request saves its pair, interleaved or not: a client has
-     * to be able to become interleaved, and that needs one saved exchange. */
-    void save(const sockaddr_storage &from, uint8_t receive[kPairBytes],
-              const uint8_t transmit[kPairBytes], uint32_t nowMs)
+    /* Every answered request saves its exchange, interleaved or not: a client
+     * has to be able to become interleaved, and that needs one saved exchange. */
+    void save(const sockaddr_storage &from, const uint8_t wire[kPairBytes],
+              const uint8_t request[kPairBytes], const uint8_t transmit[kPairBytes],
+              const uint8_t receive[kPairBytes], uint32_t nowMs)
     {
-        /* The RFC requires receive timestamps unique within the queue, or two
-         * clients sharing one would get each other's transmit timestamp. */
-        for (int guard = 0; guard < 8 && hasReceive(receive); ++guard) {
-            bumpFraction(receive);
-        }
-
         SavedPair *victim = nullptr;
         for (SavedPair &slot : m_slots) {
             if (!slot.used) {
@@ -340,9 +348,12 @@ public:
             victim = &m_slots[m_next];
             m_next = (m_next + 1) % kPairSlots;
         }
+        ++m_saved;
         addressKey(from, victim->key);
-        std::memcpy(victim->receive, receive, kPairBytes);
+        std::memcpy(victim->wire, wire, kPairBytes);
+        std::memcpy(victim->request, request, kPairBytes);
         std::memcpy(victim->transmit, transmit, kPairBytes);
+        std::memcpy(victim->receive, receive, kPairBytes);
         victim->atMs = nowMs;
         victim->used = true;
     }
@@ -358,18 +369,11 @@ private:
         return true;
     }
 
-    bool hasReceive(const uint8_t receive[kPairBytes]) const
-    {
-        for (const SavedPair &slot : m_slots) {
-            if (slot.used && std::memcmp(slot.receive, receive, kPairBytes) == 0) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     SavedPair m_slots[kPairSlots];
-    size_t    m_next = 0;
+public:
+    uint32_t m_taken = 0;
+    uint32_t m_saved = 0;
+    size_t   m_next  = 0;
 };
 
 /* ---- Rate limiting ---- */
@@ -501,7 +505,8 @@ bool parseRequest(const uint8_t *packet, int len, Request &req)
 void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool kod,
                 const struct timespec &received, const struct timespec &transmitted,
                 const uint8_t *originStamp = nullptr, const uint8_t *transmitStamp = nullptr,
-                const struct timespec *transmitLive = nullptr)
+                const struct timespec *transmitLive = nullptr,
+                const uint8_t *receiveStamp = nullptr)
 {
     const uint8_t  stratum = kod ? 0 : ref.stratum;
     /* The reference's own leap indicator while it is locked, "not
@@ -543,7 +548,11 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
     } else {
         std::memcpy(out + kOriginOffset, req.transmit, kStampBytes);
     }
-    writeTimestamp(out + kReceiveOffset, received);
+    if (receiveStamp != nullptr) {
+        std::memcpy(out + kReceiveOffset, receiveStamp, kStampBytes);
+    } else {
+        writeTimestamp(out + kReceiveOffset, received);
+    }
     if (transmitStamp != nullptr) {
         std::memcpy(out + kTransmitOffset, transmitStamp, kStampBytes);
     } else if (transmitLive != nullptr) {
@@ -1174,15 +1183,23 @@ void NtpServer::serveLoop()
                      * answering in the mode unless both hold, and forbids
                      * reusing a receive timestamp, so the lookup consumes it. */
                     uint8_t savedTransmit[kStampBytes] = {};
-                    const bool interleavedMode =
-                        !kod && std::memcmp(req.receive, req.transmit, kStampBytes) != 0 &&
-                        pairs.take(from, req.origin, savedTransmit, nowMs);
+                    uint8_t savedOrigin[kStampBytes]   = {};
+                    uint8_t savedReceive[kStampBytes]  = {};
+                    bool interleavedMode = false;
+                    if (!kod && std::memcmp(req.receive, req.transmit, kStampBytes) != 0) {
+                        m_ilTry.fetch_add(1, std::memory_order_relaxed);
+                        interleavedMode = pairs.take(from, req.origin, savedTransmit, savedOrigin,
+                                                     savedReceive, nowMs);
+                        if (interleavedMode) {
+                            m_ilHit.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
 
                     uint8_t reply[kPacketBytes] = {};
                     if (interleavedMode) {
                         m_interleaved.fetch_add(1, std::memory_order_relaxed);
-                        buildReply(reply, req, ref, kod, received, transmitted, req.receive,
-                                   savedTransmit);
+                        buildReply(reply, req, ref, kod, received, transmitted, savedOrigin,
+                                   savedTransmit, nullptr, savedReceive);
                     } else {
                         buildReply(reply, req, ref, kod, received, transmitted, nullptr, nullptr,
                                    &transmitted);
@@ -1210,7 +1227,11 @@ void NtpServer::serveLoop()
                             bumpFraction(liveStamp);
                             std::memcpy(reply + kTransmitOffset, liveStamp, kStampBytes);
                         }
-                        pairs.save(from, receiveStamp, liveStamp, nowMs);
+                        /* The key is what the client will echo: the transmit
+                         * that actually went out, which in this mode is the
+                         * saved one rather than the fresh one. */
+                        pairs.save(from, interleavedMode ? savedTransmit : liveStamp,
+                                   req.transmit, liveStamp, receiveStamp, nowMs);
                         TxLag::instance().recordReply(replyCost);
                         ++answered;
                         ++winAnswered;
@@ -1242,6 +1263,8 @@ void NtpServer::serveLoop()
                 ESP_LOGI(TAG, "answered %u, KoD %u, dropped %u in the last %u s",
                          winAnswered, winKod, winDropped, kReportEveryMs / 1000);
             }
+            m_ilSaved.store(pairs.m_saved, std::memory_order_relaxed);
+            m_ilKeyOnly.store(pairs.m_taken, std::memory_order_relaxed);
             winAnswered = winKod = winDropped = 0;
             reportAt = nowMs + kReportEveryMs;
         }

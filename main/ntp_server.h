@@ -70,6 +70,12 @@ public:
     {
         return m_interleaved.load(std::memory_order_relaxed);
     }
+    /* Debug while interleaved mode is being exercised: how often a request
+     * claimed a saved exchange, and how often the claim matched. */
+    uint32_t interleavedTried() const { return m_ilTry.load(std::memory_order_relaxed); }
+    uint32_t interleavedHit() const { return m_ilHit.load(std::memory_order_relaxed); }
+    uint32_t interleavedSaved() const { return m_ilSaved.load(std::memory_order_relaxed); }
+    uint32_t interleavedKeyOnly() const { return m_ilKeyOnly.load(std::memory_order_relaxed); }
     /* Measured transmit-path delay, so a reader can see the correction the
      * replies carry. Zero means "not measured yet".
      *
@@ -152,6 +158,10 @@ private:
     std::atomic<uint32_t>      m_dropped{0};
     std::atomic<uint32_t>      m_control{0};
     std::atomic<uint32_t>      m_interleaved{0};
+    std::atomic<uint32_t>      m_ilTry{0};
+    std::atomic<uint32_t>      m_ilHit{0};
+    std::atomic<uint32_t>      m_ilSaved{0};
+    std::atomic<uint32_t>      m_ilKeyOnly{0};
     TxLag                      m_txLag;
     std::atomic<uint32_t>      m_ratePerMin{0};
     std::atomic<int64_t>       m_lastServedUs{-1};
