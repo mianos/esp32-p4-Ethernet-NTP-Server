@@ -411,17 +411,18 @@ int cmdStatus(void *, int, char **)
     std::printf("ipv6     : %s / %s\n", net_state::ipv6LinkLocal().c_str(),
                 global.empty() ? "(no global)" : global.c_str());
 
-    const GpsTime::Status gps = GpsTime::instance().status();
+    const GpsTime::Status     gps = GpsTime::instance().status();
+    const GpsTime::ReplyFacts rf  = GpsTime::instance().replyFacts();
     std::printf("fix      : %u, %u satellites, anchored %s\n", static_cast<unsigned>(gps.fixType),
-                static_cast<unsigned>(gps.satCount), gps.anchored ? "yes" : "no");
+                static_cast<unsigned>(gps.satellites), gps.anchored ? "yes" : "no");
     std::printf("mode     : %s%s\n", gps.timeMode.c_str(),
                 gps.holdValidated ? " (survey-validated)" : "");
     std::printf("serving  : owner %s for %u s, stratum %u%s, locked %s\n",
                 ClockSource::name(ClockSource::instance().owner()),
                 static_cast<unsigned>(ClockSource::instance().ageS()),
-                static_cast<unsigned>(gps.stratum), gps.demoted ? " (demoted)" : "",
+                static_cast<unsigned>(rf.stratum), rf.demoted ? " (demoted)" : "",
                 gps.locked ? "yes" : "no");
-    std::printf("dispersion: %.1f us\n", static_cast<double>(gps.dispersionNs) / 1000.0);
+    std::printf("dispersion: %.1f us\n", static_cast<double>(rf.dispersionNs) / 1000.0);
     return 0;
 }
 
@@ -458,7 +459,7 @@ int cmdGps(void *, int argc, char **argv)
     if (argc == 1) {
         const GpsTime::Status st = gps.status();
         std::printf("fix %u, %u satellites, anchored %s, mode %s\n",
-                    static_cast<unsigned>(st.fixType), static_cast<unsigned>(st.satCount),
+                    static_cast<unsigned>(st.fixType), static_cast<unsigned>(st.satellites),
                     st.anchored ? "yes" : "no", st.timeMode.c_str());
         std::printf("survey: %s, %.0f s of %.0f s, %u obs\n",
                     st.svinValid ? "valid" : "not validated", st.svinAgeS, st.svinTargetS,
