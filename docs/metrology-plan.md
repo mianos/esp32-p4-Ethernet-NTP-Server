@@ -86,7 +86,7 @@ within 1 µs of the anchor while PPS is present.
 
 This improves NTP for every client, which is why it comes before PTP.
 
-## 4. Phase 2 — PTP
+## 4. Phase 2 — PTP (shipped)
 
 Raw 802.3 frames over the MAC handle, bypassing lwIP. Two-step only
 (`Follow_Up`); one-step needs TX timestamp prediction the unit cannot do.
@@ -105,9 +105,15 @@ Raw 802.3 frames over the MAC handle, bypassing lwIP. Two-step only
 - Servo on the PHC: PPS is the truth, PTP is a check and a fallback. Never let a
   peer steer through a PPS edge that is present.
 
-Acceptance: `ptp4l -m -s` on a Linux host on the same switch holds < 500 ns p95
-for an hour, survives a PPS pull for the first minute of holdover, and a GPS-only
-client sees no regression.
+Acceptance: `ptp4l -2 -m -s` on a Linux host on the same switch holds < 500 ns
+p95 for an hour, survives a PPS pull for the first minute of holdover, and a
+GPS-only client sees no regression.
+
+Shipped as a two-step master and a slave, with hardware stamps and the announce
+quality derived from the reference. Still short of the acceptance above: the
+p95 has only been measured over software stamps on a veth (~200 us), and the
+MAC has an occasional transmit stall that a watchdog now clears. The 500 ns
+figure needs a host with a timestamping NIC bridged on the segment.
 
 ## 5. Phase 3 — one clock, stated properly
 

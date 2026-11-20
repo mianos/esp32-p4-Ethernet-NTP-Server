@@ -670,6 +670,12 @@ the requester's MAC rather than multicast. A slave reports; it does not steer
 The PHC is stepped with the system clock, because a counter left in 1970 would
 put every PTP timestamp 56 years out.
 
+The MAC has one known fault: now and then it stops transmitting altogether —
+ARP included, while the link still reads up — and nothing in the driver clears
+it. Twenty failed sends inside two seconds restarts the MAC, at most once per
+thirty seconds, and logs it, so a stall costs seconds instead of the box. A
+`link up` that answers nothing is that.
+
 ## Clock sources
 
 `timeSource` decides, and only that source owns `CLOCK_REALTIME` at any instant.
