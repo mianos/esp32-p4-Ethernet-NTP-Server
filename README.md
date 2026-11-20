@@ -600,6 +600,10 @@ $ sntp <box>                      # macOS, BSD, Linux (ntp package)
 $ chronyd -Q 'server <box> iburst'    # as root
 ```
 
+`docs/chrony.conf.example` is a client config for chrony: it names the box,
+leaves `prefer` off so a bad answer can be outvoted, and keeps internet sources
+below it.
+
 `tools/ntp_test.py <ip> [ipv6]` answers what is actually on the wire, including
 packets a real client never sends: mode 4 / mode 1 / vn 2 / truncated requests
 that must get silence, the origin echo, IPv6, and a burst that trips the limiter.
@@ -815,7 +819,8 @@ the box. See `viewer/README.md`.
 
 The HTTP and settings machinery (`webserver`, `jsonwrapper`,
 `nvsstoragemanager`, `settingsbase`) are mianesp components, not local copies.
-`docs/` holds the review template and the UBX notes.
+`docs/` holds the review template, the UBX notes, the board's vendor page and a
+chrony client example.
 
 ## Next step
 
@@ -824,8 +829,11 @@ an IEEE 1588 counter that can be read from the same edge and steered in ppb
 (`esp_eth_mac_adj_ptp_time()`, `esp_eth_mac_adj_ptp_freq()`), which would make
 the edge hardware-sampled and give the servo somewhere to put its estimate other
 than the reply path. The same unit is the only route to a hardware receive stamp:
-it is exposed as a steerable clock, not a per-frame one, and lwIP has no
-`SO_TIMESTAMP`, so `t2` needs a driver patch.
+`esp_eth_mac_enable_ts4all()` makes the driver pass one to `stack_input_info`, so
+`t2` needs a custom netif glue rather than a driver patch.
 
 The leap path is built and reads a live offset, but LI has only ever been 0 here;
 the next leap is the test.
+
+`docs/metrology-plan.md` is the longer version: the acceptance ladder behind
+those two, PTP, and the uncertainty budget.
