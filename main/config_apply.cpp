@@ -9,6 +9,8 @@
 #include "net_state.h"
 #include "ntp_server.h"
 #include "ntp_time.h"
+#include "ptp.h"
+#include "settings.h"
 #include "settings.h"
 
 namespace {
@@ -55,4 +57,16 @@ void config_apply::afterChange(const std::string &hostnameBefore, bool logChange
     NtpTime::instance().applySettings();
     /* And so does serveNtp: off stops the responder, on starts it. */
     NtpServer::instance().applySettings();
+    /* PTP is decided entirely by these three keys, so it is re-started rather
+     * than toggled: a changed domain or priority has to reach the Announce. */
+    const std::string &mode = settings.ptpMode();
+    ptp::Mode wanted = ptp::Mode::Off;
+    if (mode == "master") {
+        wanted = ptp::Mode::Master;
+    } else if (mode == "slave") {
+        wanted = ptp::Mode::Slave;
+    }
+    if (wanted != ptp::mode()) {
+        (void)ptp::start(wanted, settings.ptpDomain(), settings.ptpPriority1());
+    }
 }

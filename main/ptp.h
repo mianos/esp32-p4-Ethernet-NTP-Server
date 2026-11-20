@@ -33,6 +33,11 @@ esp_err_t attach(esp_eth_handle_t eth, esp_eth_mac_t *mac, esp_netif_t *netif);
 esp_err_t enable(bool restart = false);
 bool enabled();
 
+/* Move the counter onto CLOCK_REALTIME. A boot sets it while the clock is still
+ * 1970, so the counter is stepped with the clock -- PTP counts epoch seconds
+ * and a stamp 56 years out is not a small error. */
+esp_err_t stepToRealtime();
+
 /* Set from a task, read from the PPS interrupt: a plain word, so the handler
  * needs no call into flash. */
 extern volatile bool gHardwareOn;
@@ -76,12 +81,30 @@ bool takeRx(const uint8_t *addr, size_t addrLen, uint16_t port, Rx *out);
 bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const uint8_t dstMac[6],
              const uint8_t *payload, size_t len, int64_t *stampNs);
 
+enum class Mode : uint8_t { Off = 0, Master = 1, Slave = 2 };
+
+/* Start or stop answering PTP. Domain 0..127, priority1 0..255. Master only for
+ * now; the slave side shares the same frames and the same counter. */
+esp_err_t start(Mode mode, uint8_t domain, uint8_t priority1);
+void stop();
+Mode mode();
+const char *modeText(Mode value);
+
 struct Stats {
     uint32_t frames;   /* 0x88F7 frames seen */
+    uint32_t syncSent;
+    uint32_t announceSent;
+    uint32_t delayResp;
+    int64_t  lastPeerNs; /* when the last neighbour frame arrived */
+    int64_t  slaveOffsetNs; /* last measured offset against a master */
+    uint8_t  lastPeer[16];
+    uint8_t  lastPeerLen;
     uint32_t rxStamps; /* UDP/123 arrival stamps recorded */
     uint32_t txStamps; /* frames sent with a hardware stamp */
     uint32_t txMissing;
+    uint32_t txErrors;
     uint32_t hits;
+    uint32_t measured;
     int64_t  lastNs; /* most recent stamp of either kind */
 };
 Stats stats();

@@ -238,6 +238,9 @@ in NVS and survives a reboot.
 | `tz` | `AEST-10AEDT,M10.1.0,M4.1.0/3` | POSIX TZ for `localtime()`. Presentation only — NTP always serves UTC. |
 | `timeSource` | `dhcp` | `dhcp` takes the server from DHCP option 42, `static` polls `ntpServer`, `gps` disciplines from the receiver, `auto` is `gps` with the upstream behind it, `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
 | `ntpServer` | *(empty)* | Upstream host or address for `static`, and preferred over option 42 under `auto`. A hostname is resolved through the lease's DNS. An IPv6 literal is stored but cannot sync. |
+| `ptpMode` | `off` | `off`, `master` or `slave` ([PTP](#ptp)). |
+| `ptpDomain` | `0` | PTP domain, 0..127. |
+| `ptpPriority1` | `128` | priority1 the Announce carries, 0..255. |
 | `serveNtp` | `on` | `off` stops the responder within a second, `on` restarts it, no reboot. Serving an unlocked clock is safe: it answers stratum 16 with LI 3. |
 | `ipMode` | `dhcp` | `static` programs the three keys below instead of taking a lease. |
 | `ipAddress` | *(empty)* | `a.b.c.d/len`, len 1..30. Programmed only in `static` mode. |
@@ -287,8 +290,13 @@ wrong methods get the same JSON shape.
 | POST | `/gps/reset` | hot start; `{"cold":true}` also drops the almanac; `{"hardware":true}` re-initialises the receiver |
 | POST | `/gps/baud` | `{"baud":38400,"module":true}` |
 | POST | `/eth/restart` | restart the MAC |
+| POST | `/config` `ptpMode`/`ptpDomain`/`ptpPriority1` | PTP, see [PTP](#ptp) |
 | GET | `/firmware` | build and slot information |
 | POST | `/firmware` | write the body into the inactive slot and reboot into it |
+
+`/healthz` reports `ptp_mode`, and while PTP is on the domain and its counters:
+`ptp_sync_sent`, `ptp_announce_sent`, `ptp_delay_resp`, `ptp_frames`,
+`ptp_last_peer`, plus `ptp_offset_ns` and `ptp_slave_measured` as a slave.
 
 `/healthz` reports the clock source, the responder's live claim, the receiver's
 fix and the servo, and the hardware stamp path: `phc` (the 1588 counter is
@@ -626,6 +634,41 @@ client still fails, the problem is the client, not the path.
 
 Test the honesty path too: `timeSource=off` and `sntp` should say
 `Server not synchronized` while `/healthz` says `ntp_stratum: 16`.
+
+## PTP
+
+`ptpMode` makes the box speak IEEE 1588 on the same wire, from the same counter.
+`master` announces it and sends Sync / Follow_Up; `slave` follows an announced
+master and reports the offset. Off by default.
+
+| `POST /config` | |
+|---|---|
+| `"ptpMode":"master"` | announce, Sync every second, answer Delay_Req |
+| `"ptpMode":"slave"` | follow one master, send Delay_Req, report the offset |
+| `"ptpDomain":0..127` | domain, default 0 |
+| `"ptpPriority1":0..255` | the priority1 an Announce carries, default 128 |
+
+The console has `ptp [off|master|slave]` and prints the counters with no argument.
+
+Two-step only, because this MAC cannot insert a timestamp into a frame it is
+sending: a Sync goes out with the two-step flag and the Follow_Up behind it
+carries the stamp the MAC returned for that Sync. Stamps are TAI — the counter
+runs on UTC and every stamp has `currentUtcOffset` added, which is announced
+from the receiver's leap offset. A host keeping UTC therefore measures 37 s and
+`ptp4l` applies the announced offset itself.
+
+What an Announce claims is derived from the reference, not asserted: clockClass
+6 while locked and inside the dispersion budget, 7 while holding over, 52
+free-running, with the accuracy and `timeSource` to match. A box with no fix
+still announces, and says it is free-running.
+
+Limits worth knowing: no BMCA beyond a fixed master (one master on the LAN, no
+takeover), no unicast negotiation, no authentication, and Delay_Resp is sent to
+the requester's MAC rather than multicast. A slave reports; it does not steer
+`CLOCK_REALTIME` — the receiver still owns the clock.
+
+The PHC is stepped with the system clock, because a counter left in 1970 would
+put every PTP timestamp 56 years out.
 
 ## Clock sources
 

@@ -23,6 +23,7 @@
 #include "config_apply.h"
 #include "eth_link.h"
 #include "gps_time.h"
+#include "ptp.h"
 #include "net_addr.h"
 #include "net_state.h"
 #include "settings.h"
@@ -346,6 +347,31 @@ int cmdServe(void *, int argc, char **argv)
     return applyOne("serveNtp", value) ? 0 : 1;
 }
 
+int cmdPtp(void *, int argc, char **argv)
+{
+    if (s_ctx.settings == nullptr) {
+        std::printf("not started yet\n");
+        return 1;
+    }
+    if (argc < 2) {
+        const ptp::Stats st = ptp::stats();
+        std::printf("ptp %s, domain %u, priority1 %u\n", ptp::modeText(ptp::mode()),
+                    static_cast<unsigned>(s_ctx.settings->ptpDomain()),
+                    static_cast<unsigned>(s_ctx.settings->ptpPriority1()));
+        std::printf("frames %u  sync %u  announce %u  delay_resp %u  tx_errors %u\n",
+                    static_cast<unsigned>(st.frames), static_cast<unsigned>(st.syncSent),
+                    static_cast<unsigned>(st.announceSent), static_cast<unsigned>(st.delayResp),
+                    static_cast<unsigned>(st.txErrors));
+        return 0;
+    }
+    const std::string value = argv[1];
+    if (value != "off" && value != "master" && value != "slave") {
+        std::printf("usage: ptp [off|master|slave]\n");
+        return 1;
+    }
+    return applyOne("ptpMode", value) ? 0 : 1;
+}
+
 int cmdTimesource(void *, int argc, char **argv)
 {
     if (s_ctx.settings == nullptr) {
@@ -584,6 +610,7 @@ esp_err_t console::start()
         "[on | off]", cmdConsole);
     add("hostname", "Show or set the DHCP hostname", "[name]", cmdHostname);
     add("serve", "Serve NTP on udp/123", "<on|off>", cmdServe);
+    add("ptp", "PTP state, or off / master / slave", "[off|master|slave]", cmdPtp);
     add("timesource", "Where the clock comes from", "<off|dhcp|static|gps|auto>", cmdTimesource);
     add("ntpserver", "Upstream server for timeSource=static", "[host]", cmdNtpServer);
     add("log", "UDP log sink", "[<ip> <port>]", cmdLog);

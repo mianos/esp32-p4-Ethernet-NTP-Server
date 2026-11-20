@@ -1,3 +1,4 @@
+#include <cstdlib>
 /*
  * Device settings — a SettingsBase subclass (mianesp's settingsbase component).
  *
@@ -91,6 +92,12 @@ public:
      * which tells every client to ignore it, so leaving this on cannot mislead
      * anything -- it can only spend electricity. */
     bool serveNtp() const { return m_serveNtpOn.load(std::memory_order_relaxed); }
+
+    /* PTP: off, master or slave; the domain and the priority1 the Announce
+     * carries. Read by the responder at start and by the console. */
+    const std::string &ptpMode() const { return m_ptpMode; }
+    uint8_t ptpDomain() const { return static_cast<uint8_t>(std::strtoul(m_ptpDomain.c_str(), nullptr, 10)); }
+    uint8_t ptpPriority1() const { return static_cast<uint8_t>(std::strtoul(m_ptpPriority1.c_str(), nullptr, 10)); }
 
     /* Where the receiver's time mode was left, so a power cut does not cost it.
      * The grid goes off, and a locked position or a survey in progress lives in
@@ -186,6 +193,9 @@ private:
     std::string m_timeSource = "dhcp";
     std::string m_ntpServer;
     std::string m_serveNtp   = "on";
+    std::string m_ptpMode     = "off";
+    std::string m_ptpDomain   = "0";
+    std::string m_ptpPriority1 = "128";
     std::string m_gpsTimeMode = "moving";
     std::string m_gpsFixedPos;
     std::string m_gpsSurvey;

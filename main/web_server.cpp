@@ -327,6 +327,28 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
     json.AddItem("hw_rx_stamps", static_cast<double>(stamps.rxStamps));
     json.AddItem("hw_tx_stamps", static_cast<double>(stamps.txStamps));
     json.AddItem("hw_tx_missing", static_cast<double>(stamps.txMissing));
+    json.AddItem("hw_tx_errors", static_cast<double>(stamps.txErrors));
+    /* PTP. The mode is the setting; the counters say whether anything is
+     * actually going out, which is the part a setting cannot. */
+    json.AddItem("ptp_mode", ptp::modeText(ptp::mode()));
+    if (ptp::mode() != ptp::Mode::Off) {
+        json.AddItem("ptp_domain", static_cast<double>(Settings::instance().ptpDomain()));
+        json.AddItem("ptp_sync_sent", static_cast<double>(stamps.syncSent));
+        json.AddItem("ptp_announce_sent", static_cast<double>(stamps.announceSent));
+        json.AddItem("ptp_delay_resp", static_cast<double>(stamps.delayResp));
+        if (ptp::mode() == ptp::Mode::Slave) {
+            json.AddItem("ptp_offset_ns", static_cast<double>(stamps.slaveOffsetNs));
+            json.AddItem("ptp_slave_measured", static_cast<double>(stamps.measured));
+        }
+        json.AddItem("ptp_frames", static_cast<double>(stamps.frames));
+        if (stamps.lastPeerNs != 0) {
+            char peer[24] = {};
+            std::snprintf(peer, sizeof(peer), "%02x:%02x:%02x:%02x:%02x:%02x", stamps.lastPeer[0],
+                          stamps.lastPeer[1], stamps.lastPeer[2], stamps.lastPeer[3],
+                          stamps.lastPeer[4], stamps.lastPeer[5]);
+            json.AddItem("ptp_last_peer", peer);
+        }
+    }
     if (server.running()) {
         const TimeReference ref = server.reference();
         json.AddItem("ntp_stratum", static_cast<double>(ref.stratum));

@@ -296,6 +296,21 @@ esp_err_t EthernetLink::begin()
         return err;
     }
 
+    /* The receive path is ours from here: it records the arrival stamp of a
+     * UDP/123 datagram and splits 0x88F7 frames off before lwIP, which is what
+     * makes a hardware reply stamp possible at all. The PHC then stamps every
+     * frame. Neither failing is fatal -- without them the responder keeps its
+     * software stamps -- so both are warnings.
+     *
+     * Before the address is applied, because a static address posts GOT_IP
+     * during that call and the PTP start hangs off it: a start that arrives
+     * before the counter exists is refused. */
+    if (ptp::attach(m_eth, m_mac, m_netif) == ESP_OK) {
+        if (ptp::enable() != ESP_OK) {
+            ESP_LOGW(TAG, "hardware timestamping unavailable: software stamps only");
+        }
+    }
+
     err = esp_event_handler_register(ETH_EVENT, ESP_EVENT_ANY_ID, &ethEventHandler, this);
     if (err == ESP_OK) {
         err = esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, &gotIpHandler, this);
@@ -353,16 +368,6 @@ esp_err_t EthernetLink::begin()
              static_cast<unsigned>(REG_READ(EMAC_MACFRAMEFILTER_REG)));
 #endif
 
-    /* The receive path is ours from here: it records the arrival stamp of a
-     * UDP/123 datagram and splits 0x88F7 frames off before lwIP, which is what
-     * makes a hardware t2 possible at all. The PHC then stamps every frame.
-     * Neither failing is fatal -- without them the responder keeps its software
-     * stamps -- so both are warnings. */
-    if (ptp::attach(m_eth, m_mac, m_netif) == ESP_OK) {
-        if (ptp::enable() != ESP_OK) {
-            ESP_LOGW(TAG, "hardware timestamping unavailable: software stamps only");
-        }
-    }
     return startStatusTask();
 }
 
@@ -686,6 +691,15 @@ void EthernetLink::onAddressUp(const esp_netif_ip_info_t &ip_info)
     /* The responder binds :123 -- also an address-dependent thing. It serves
      * whatever the clock is: stratum 3 from the upstream, or 16 with the leap
      * indicator at 3 while the clock is not locked (i.e. "ignore me"). */
+    /* PTP needs no address, but it is started from the same place as the other
+     * servers: one site owns what this box offers, and a stored mode has to be
+     * honoured at boot as well as by POST /config. */
+    const std::string &ptpMode = Settings::instance().ptpMode();
+    if (ptp::mode() == ptp::Mode::Off && (ptpMode == "master" || ptpMode == "slave")) {
+        (void)ptp::start(ptpMode == "master" ? ptp::Mode::Master : ptp::Mode::Slave,
+                         Settings::instance().ptpDomain(), Settings::instance().ptpPriority1());
+    }
+
     if (!m_ntpStarted) {
         if (NtpServer::instance().begin() == ESP_OK) {
             m_ntpStarted = true;

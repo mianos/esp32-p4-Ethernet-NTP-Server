@@ -26,7 +26,8 @@ constexpr const char *kNvsKey       = "config";
 constexpr const char *kKeys[] = {"hostname",  "tz",           "timeSource", "ntpServer",
                                  "serveNtp",  "gpsFixedPos",  "logHost",    "logPort",
                                  "ipMode",    "ipAddress",    "ipGateway",  "ipDns",
-                                 "gpsTimeMode", "gpsSurvey", "antDelayNs", "gpsUserDelayNs", "gpsBaud"};
+                                 "gpsTimeMode", "gpsSurvey", "antDelayNs", "gpsUserDelayNs", "gpsBaud",
+                                 "ptpMode", "ptpDomain", "ptpPriority1"};
 
 }  // namespace
 
@@ -45,6 +46,9 @@ Settings::Settings(NvsStorageManager &nvs)
     field("timeSource", m_timeSource);
     field("ntpServer", m_ntpServer);
     field("serveNtp", m_serveNtp);
+    field("ptpMode", m_ptpMode);
+    field("ptpDomain", m_ptpDomain);
+    field("ptpPriority1", m_ptpPriority1);
     field("gpsTimeMode", m_gpsTimeMode);
     field("gpsFixedPos", m_gpsFixedPos);
     field("gpsSurvey", m_gpsSurvey);

@@ -3918,7 +3918,14 @@ void GpsTime::steer()
         m_stepped = true;
         portENTER_CRITICAL(&m_mux);
         ++m_servoSteps;
+        /* The counter has to move with the clock, and the anchor's stamp in it
+         * is now stale by the step: dropping it sends now() back to the
+         * monotonic path until the next edge pairs. */
+        m_anchorPhcNs = 0;
         portEXIT_CRITICAL(&m_mux);
+        if (ptp::hardware()) {
+            (void)ptp::stepToRealtime();
+        }
 
         /* A step is a phase discontinuity the fit cannot see coming and the
          * step detector below cannot catch: that one compares samples and
