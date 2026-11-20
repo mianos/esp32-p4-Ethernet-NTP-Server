@@ -47,8 +47,12 @@ void printAddressing()
 }
 
 /* The one write path: a document, applyJson(), save, and the shared hook
- * sequence. Returns false when the key or the value was rejected, which is what
- * applyJson signals by leaving the blob identical. */
+ * sequence.
+ *
+ * Success is judged on the key's value afterwards, not on the blob having
+ * changed. Setting something to what it already was is a legitimate no-op --
+ * `net static` re-issued with the stored address has to keep going and set the
+ * mode -- while a value applyJson refused leaves a different one behind. */
 bool applyOne(const char *key, const std::string &value)
 {
     if (s_ctx.settings == nullptr) {
@@ -56,17 +60,23 @@ bool applyOne(const char *key, const std::string &value)
         return false;
     }
 
-    const std::string before = s_ctx.settings->toJson().ToString();
-    const std::string host   = s_ctx.settings->hostname();
+    const std::string host = s_ctx.settings->hostname();
 
     JsonWrapper doc;
     doc.AddItem(key, value);
     s_ctx.settings->applyJson(doc);
 
-    if (s_ctx.settings->toJson().ToString() == before) {
+    /* The only field applyJson is allowed to shorten. */
+    const std::string wanted = std::strcmp(key, "hostname") == 0
+                                   ? value.substr(0, Settings::kMaxHostnameLen)
+                                   : value;
+    std::string   now;
+    s_ctx.settings->toJson().GetField(key, now);
+    if (now != wanted) {
         std::printf("'%s' = '%s' unknown or rejected -- nothing changed\n", key, value.c_str());
         return false;
     }
+
     s_ctx.settings->save();
     s_ctx.settings->log();
     config_apply::afterChange(host, std::strcmp(key, "logHost") == 0 ||

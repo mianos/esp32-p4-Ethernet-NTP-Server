@@ -74,13 +74,25 @@ The cable went in and the port came up first time: 100 Mb full duplex, carrier
 stable, no ME interference. The switch blamed above was the wrong suspect — the
 X710 cage was empty, not the platform.
 
-**DHCP on the link does not work for this box.** Its DISCOVERs reach the wire
-every 4 s (MSZ 1500, hostname, PRL, `Client-ID: ether`), and a throwaway
-container on the same bridge leased a probe address immediately, but the
-bridge's dnsmasq never answered the box. Most likely the unicast-OFFER case:
-lwIP leaves the broadcast flag clear, so dnsmasq replies to an address the client
-does not have yet, its ARP goes unanswered, and the OFFER dies. Unconfirmed --
-`--quiet-dhcp` hides dnsmasq's own log and there is no syslog on the host.
+**DHCP on the link does not work for this box, and it is the ME.** Its DISCOVERs
+reach the wire every 4 s (MSZ 1500, hostname, PRL, `Client-ID: ether`) and the
+bridge's dnsmasq answers every one of them within 0.4 ms with a well-formed
+OFFER -- Your-IP, mask, server-id, lease. The box never reacts to any of them:
+no REQUEST, no DECLINE, and no ARP probe for the offered address, which is the
+first thing lwIP's own `DHCP_DOES_ARP_CHECK` would send if the OFFER had reached
+the stack at all.
+
+So the OFFERs are being eaten between the wire and lwIP, and the loss is
+protocol-selective rather than broadcast-selective: broadcast ARP gets through in
+both directions, 3/3 either way, while broadcast DHCP does not. A software
+bridge with no ME on it leases to the same container instantly. Client state is
+ruled out too -- it survived a reboot, with the client starting clean.
+
+That is AMT: the ME holds a DHCP client on the shared MAC and consumes the
+exchange. Turning AMT off in MEBx would restore DHCP; the box does not need it.
+The unicast-OFFER theory was wrong -- `raw.dnsmasq=dhcp-broadcast` makes no
+difference to whether the box gets an address, though it stays on because it
+makes the exchange visible to a sniffer.
 
 Rather than keep at it, the console did what it exists for:
 
@@ -91,7 +103,7 @@ ntp> net static 10.99.0.2/29 10.99.0.1
 The box has been on that address since, serving stratum 1 at ~0.3 ms with 0 %
 loss on the link and reachable from the LAN through the existing route. The
 bridge's DHCP stays on for anything else plugged in, and the box no longer
-depends on it.
+depends on it -- which, given the above, it never could.
 
 ## 3. Phase 1 — make the path work before the box moves
 
