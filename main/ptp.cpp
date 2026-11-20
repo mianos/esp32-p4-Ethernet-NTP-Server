@@ -681,6 +681,12 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
     eth_mac_time_t stamp = {};
     const esp_err_t err  = esp_eth_transmit_ctrl_vargs(s_eth, &stamp, 2, frame, len);
     if (err != ESP_OK) {
+        /* A frame offered while the driver still says the link is down is not a
+         * fault: the task starts on the address, which is up a moment before
+         * the driver's own link flag is. Only the rest are counted. */
+        if (err == ESP_ERR_INVALID_STATE) {
+            return err;
+        }
         if (++s_stats.txErrors < 4) {
             ESP_LOGW(TAG, "transmit: %s", esp_err_to_name(err));
         }
