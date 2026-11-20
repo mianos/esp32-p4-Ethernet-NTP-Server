@@ -203,10 +203,10 @@ $ stty -F /dev/ttyACM0 115200 raw -echo -hupcl
 $ printf 'console on\r' > /dev/ttyACM0
 ```
 
-Everything the HTTP surface can *do*, the cable can do, because the cable is
-what is left when the network is the fault: address it, restart the MAC, stop a
-survey that will not converge, hold the clock off a receiver that has gone
-quiet, and put the config back.
+Everything the HTTP surface can do to the box, the cable can do, because the
+cable is what is left when the network is the fault: address it, restart the
+MAC, stop a survey that will not converge, hold the clock off a receiver that
+has gone quiet, and put the config back.
 
 **Addressing** — the one change that can strand the box, so it prints what it
 did and the new state.
@@ -279,10 +279,12 @@ linenoise also fires `ESC[6n` cursor probes that arrive back as input and get
 executed as commands. The cost of the reader is line editing: backspace works,
 arrows and history do not.
 
-Every write goes through `Settings::applyJson()`, the same validation `POST
-/config` uses, so the console cannot reach a state the HTTP surface rejects: a
-bad address is refused at the prompt rather than stored. `log_level` is
-`cmd_system`'s own, per tag.
+Every *setting* the console writes goes through `Settings::applyJson()`, the
+same validation `POST /config` uses, so a bad address is refused at the prompt
+rather than stored. The action commands (`gps survey`, `gps reset` and the rest)
+queue work on the GPS task through the same request functions the HTTP handlers
+call, so there is one implementation of each and the console cannot do anything
+the network could not.
 
 The console is unauthenticated. It is whatever the USB cable can reach, and
 `config` prints the whole blob -- there are no secrets in it, and keeping it that
