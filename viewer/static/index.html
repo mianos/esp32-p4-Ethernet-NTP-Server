@@ -636,7 +636,9 @@ function niceStep(span, target) {
   const raw = span / target;
   const magnitude = Math.pow(10, Math.floor(Math.log10(raw)));
   const norm = raw / magnitude;
-  const mult = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  /* 1.5 / 3 / 7 rather than 1 / 2 / 5: rounding 2.4 up to a step of 5 halves the
+   * number of gridlines, which is how a 36 ppm window ended up with two labels. */
+  const mult = norm <= 1.5 ? 1 : norm <= 3 ? 2 : norm <= 7 ? 5 : 10;
   return mult * magnitude;
 }
 
