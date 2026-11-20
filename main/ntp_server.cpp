@@ -1001,22 +1001,41 @@ void NtpServer::reportServePath(int64_t nowUs)
              static_cast<unsigned>(m_serveWhy[0]), static_cast<unsigned>(m_serveWhy[1]),
              static_cast<unsigned>(m_serveWhy[2]), static_cast<unsigned>(m_serveWhy[3]));
     m_serveWhy[0] = m_serveWhy[1] = m_serveWhy[2] = m_serveWhy[3] = 0;
+    /* One claim for the minute, from the median client rather than the widest.
+     * The range a client reports says as much about that client as about us: a
+     * slow poller, a busy machine or a stepping clock can double it, and with
+     * the maximum they all set the claim for everyone. The median keeps the
+     * honest majority. */
+    int64_t  halves[kServeSlots] = {};
+    int      clients             = 0;
+    uint32_t samples             = 0;
     for (auto &s : m_serve) {
         if (s.count == 0) {
             continue;
         }
-        const uint8_t *ip = reinterpret_cast<const uint8_t *>(&s.addr);
-        /* Half the range, because that is the number that belongs in a bound:
-         * the centre is where the replies went, and the aim is to say how far
-         * from it they can be. A constant client offset cancels in the range. */
-        const int64_t halfNs = (s.maxNs - s.minNs) / 2;
+        const uint8_t *ip    = reinterpret_cast<const uint8_t *>(&s.addr);
+        const int64_t  halfNs = (s.maxNs - s.minNs) / 2;
         ESP_LOGI(TAG, "servepath %u.%u.%u.%u n %u half %.1f us centre %.1f us", ip[0], ip[1],
                  ip[2], ip[3], static_cast<unsigned>(s.count),
                  static_cast<double>(halfNs) / 1000.0,
                  static_cast<double>(s.minNs + s.maxNs) / 2000.0);
-        ServePath::instance().observe(halfNs, s.count);
+        halves[clients++] = halfNs;
+        samples += s.count;
         s.count = 0;
     }
+    if (clients == 0) {
+        return;
+    }
+    for (int i = 1; i < clients; ++i) {
+        const int64_t v = halves[i];
+        int           j = i;
+        while (j > 0 && halves[j - 1] > v) {
+            halves[j] = halves[j - 1];
+            --j;
+        }
+        halves[j] = v;
+    }
+    ServePath::instance().observe(halves[clients / 2], samples);
 }
 
 void NtpServer::serveLoop()
