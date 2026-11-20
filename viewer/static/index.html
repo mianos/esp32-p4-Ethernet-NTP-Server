@@ -681,8 +681,14 @@ function longChart(host, points, key, unit, axis) {
    * to run past the last gridline. Digits follow from the step, which is what
    * keeps a hundredth-of-a-ppm window legible. */
   const bottom = lo - pad, top = hi + pad;
-  const step = niceStep(top - bottom, 4);
-  const digits = Math.min(6, Math.max(0, -Math.floor(Math.log10(step))));
+  const step = niceStep(top - bottom, 3);
+  const digits = Math.min(4, Math.max(0, -Math.floor(Math.log10(step))));
+  /* 0.002 steps make every third label read -30.250, and the trailing zero is
+   * noise on what is already a long number. Trim what the step does not need. */
+  const label = (v) => {
+    const text = v.toFixed(digits);
+    return digits === 0 ? text : text.replace(/\.?0+$/, '');
+  };
   const t0 = at[0].t, t1 = at[at.length - 1].t;
   const x = (t) => L + ((t - t0) / ((t1 - t0) || 1)) * (W - L - R);
   const y = (v) => T + (1 - (v - bottom) / ((top - bottom) || 1)) * (H - T - B);
@@ -692,7 +698,7 @@ function longChart(host, points, key, unit, axis) {
     const tick = i * step;
     svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(tick), y2: y(tick), class: 'grid' }));
     svg.appendChild(Object.assign(svgEl('text', { x: L - 4, y: y(tick) + 3, class: 'axis' }),
-      { textContent: `${tick.toFixed(digits)}` }));
+      { textContent: label(tick) }));
   }
   const band = at.map((p) => `${x(p.t).toFixed(1)},${y(p.hi).toFixed(1)}`)
     .concat(at.slice().reverse().map((p) => `${x(p.t).toFixed(1)},${y(p.lo).toFixed(1)}`));
