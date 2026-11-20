@@ -26,7 +26,7 @@ constexpr const char *kNvsKey       = "config";
 constexpr const char *kKeys[] = {"hostname",  "tz",           "timeSource", "ntpServer",
                                  "serveNtp",  "gpsFixedPos",  "logHost",    "logPort",
                                  "ipMode",    "ipAddress",    "ipGateway",  "ipDns",
-                                 "gpsTimeMode", "gpsSurvey", "antDelayNs", "gpsUserDelayNs"};
+                                 "gpsTimeMode", "gpsSurvey", "antDelayNs", "gpsUserDelayNs", "gpsBaud"};
 
 }  // namespace
 
@@ -53,6 +53,7 @@ Settings::Settings(NvsStorageManager &nvs)
     field("logHost", m_logHost);
     field("logPort", m_logPort);
     field("boots", m_boots);
+    field("gpsBaud", m_gpsBaud);
     field("ipMode", m_ipMode);
     field("ipAddress", m_ipAddress);
     field("ipGateway", m_ipGateway);
@@ -150,6 +151,15 @@ bool Settings::validAddressing(const char *key, const std::string &value)
         ESP_LOGW(TAG, "gpsTimeMode '%s' ignored: expected moving, fixed or survey", value.c_str());
         return false;
     }
+    if (std::strcmp(key, "gpsBaud") == 0) {
+        if (value.size() <= 6 && !value.empty() &&
+            value.find_first_not_of("0123456789") == std::string::npos) {
+            return true;
+        }
+        ESP_LOGW(TAG, "gpsBaud '%s' ignored: expected a number", value.c_str());
+        return false;
+    }
+
     /* Only the two quad-shaped keys are checked here; everything else in
      * kKeys validates itself or not at all. */
     if (std::strcmp(key, "ipGateway") != 0 && std::strcmp(key, "ipDns") != 0) {

@@ -141,6 +141,14 @@ public:
      *
      * The address is stored as "a.b.c.d/len": one string, one parser, and no
      * way to save a netmask that disagrees with the prefix. */
+    /* The UART rate the receiver was last heard on. The module keeps its own
+     * rate across a power cut, so this is what lets a boot go straight to it
+     * instead of walking the scan while the receiver is still starting; the
+     * scan stays as the fallback for a module that has been reset to something
+     * else. Written by GpsTime, read once in its begin(). */
+    const std::string &gpsBaud() const { return m_gpsBaud; }
+    void setGpsBaud(const std::string &v) { m_gpsBaud = v; }
+
     const std::string &ipMode() const { return m_ipMode; }
     const std::string &ipAddress() const { return m_ipAddress; }
     const std::string &ipGateway() const { return m_ipGateway; }
@@ -186,6 +194,7 @@ private:
     std::string m_logHost;
     std::string m_logPort    = "5514";
     std::string m_boots      = "0";
+    std::string m_gpsBaud    = "38400";
     std::string m_ipMode     = "dhcp";
     std::string m_ipAddress;
     std::string m_ipGateway;

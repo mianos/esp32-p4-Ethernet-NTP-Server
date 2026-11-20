@@ -780,6 +780,9 @@ private:
     bool     m_ackLogged    = false;
     bool     m_noDataLogged = false;
     int      m_baudIndex    = 0;
+    /* Where the scan starts and where a wrap returns to: the rate the receiver
+     * was last heard on. Bounds-checked against kBauds at begin(). */
+    int      m_preferredIndex = 0;
     uint32_t m_baud         = 0;
     bool     m_begun        = false;
     int64_t  m_nextScanUs   = 0;

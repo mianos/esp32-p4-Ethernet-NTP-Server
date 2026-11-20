@@ -1197,8 +1197,23 @@ esp_err_t GpsTime::begin()
         return ESP_OK;
     }
 
+    /* Start at the rate this receiver was last heard on rather than at the
+     * head of the list. The module keeps its own rate across a power cut, so
+     * assuming the head means every boot walks the scan while the receiver is
+     * still starting -- and a boot that arrives here with the module slow to
+     * talk loses the correct rate and takes minutes to come back to it. */
+    const std::string stored = Settings::instance().gpsBaud();
+    m_preferredIndex         = 0;
+    for (int i = 0; i < static_cast<int>(sizeof(kBauds) / sizeof(kBauds[0])); ++i) {
+        if (stored == std::to_string(kBauds[i])) {
+            m_preferredIndex = i;
+            break;
+        }
+    }
+    m_baudIndex = m_preferredIndex;
+
     uart_config_t config         = {};
-    config.baud_rate             = static_cast<int>(kBauds[0]);
+    config.baud_rate             = static_cast<int>(kBauds[m_preferredIndex]);
     config.data_bits             = UART_DATA_8_BITS;
     config.parity                = UART_PARITY_DISABLE;
     config.stop_bits             = UART_STOP_BITS_1;
@@ -1281,7 +1296,7 @@ esp_err_t GpsTime::begin()
      * useful. */
     m_decoder.listen(this);
     m_begun       = true;
-    m_baud        = kBauds[0];
+    m_baud        = kBauds[m_preferredIndex];
     m_nextScanUs  = esp_timer_get_time() + kFirstRateUs;
     m_nextCheckUs = esp_timer_get_time() + 1000000;
 
@@ -1398,7 +1413,7 @@ void GpsTime::task()
 
         if (!m_frameSeen && nowUs >= m_nextScanUs) {
             advanceBaud();
-            m_nextScanUs = nowUs + (m_baudIndex == 0 ? kFirstRateUs : kScanAfterUs);
+            m_nextScanUs = nowUs + (m_baudIndex == m_preferredIndex ? kFirstRateUs : kScanAfterUs);
         }
         if (nowUs >= m_nextCheckUs) {
             logLockChange();
@@ -1834,9 +1849,11 @@ void GpsTime::advanceBaud()
 
     ++m_baudIndex;
     if (m_baudIndex >= kCount) {
-        /* One pass only, then start again: a module that is powered up later
-         * still gets found, without a warning every twenty seconds forever. */
-        m_baudIndex = 0;
+        /* One pass only, then back to the rate this receiver was last heard on,
+         * so the next pass starts where the module most likely still is. A
+         * module powered up later is still found, without a warning every
+         * twenty seconds forever. */
+        m_baudIndex = m_preferredIndex;
         if (!m_noDataLogged) {
             ESP_LOGW(TAG, "no UBX frames at any baud rate: check module TX -> GPIO%d "
                           "(esp RX) and PPS -> GPIO%d", kRxPin, static_cast<int>(kPpsPin));
@@ -2341,6 +2358,14 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     if (!m_frameSeen) {
         m_frameSeen = true;
         ESP_LOGI(TAG, "UBX frames arriving at %u baud", static_cast<unsigned>(m_baud));
+        /* The rate the receiver is actually on, so the next boot starts here
+         * instead of scanning for it. Saved only on a change: a rate that keeps
+         * working must not rewrite NVS every time it is re-found. */
+        if (Settings::instance().gpsBaud() != std::to_string(m_baud)) {
+            Settings::instance().setGpsBaud(std::to_string(m_baud));
+            Settings::instance().save();
+            ESP_LOGI(TAG, "keeping %u baud as the boot rate", static_cast<unsigned>(m_baud));
+        }
     }
 
     /* The first dozen frames by class and id. Short lines, and only at
