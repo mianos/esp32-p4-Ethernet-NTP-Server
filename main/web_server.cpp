@@ -379,10 +379,12 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("ntp_kod", static_cast<double>(counters.kod));
         json.AddItem("ntp_dropped", static_cast<double>(counters.dropped));
         json.AddItem("ntp_rate_per_min", counters.perMinute);
-        /* The transmit-path correction the replies carry, and how many were
-         * answered in interleaved mode. Zero / zero on a client that does not
-         * ask for it. */
+        /* The socket transmit-lag estimator, and how many replies actually had
+         * it applied: the raw send path is fast enough not to, so on a healthy
+         * box the correction describes the sendto() fallback and the count says
+         * nothing is using it. */
         json.AddItem("ntp_tx_correction_us", server.txLagUs());
+        json.AddItem("ntp_tx_corrected", static_cast<double>(server.txCorrected()));
         json.AddItem("ntp_tx_scatter_us", server.txScatterUs());
         /* What dispersion rests on: the measured drift of the served time on
          * answers that went out, which is the number a client's bound is made

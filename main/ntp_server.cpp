@@ -1261,6 +1261,7 @@ void NtpServer::serveLoop()
                      * the socket figure there over-corrects by its own size,
                      * which is the whole 300 us arriving as a 150 us offset. */
                     if (!hardware) {
+                        m_txCorrected.fetch_add(1, std::memory_order_relaxed);
                         transmitted.tv_nsec += TxLag::instance().lagNs();
                         while (transmitted.tv_nsec >= 1000000000L) {
                             transmitted.tv_nsec -= 1000000000L;

@@ -73,6 +73,10 @@ public:
     /* Debug while interleaved mode is being exercised: how often a request
      * claimed a saved exchange, and how often the claim matched. */
     uint32_t interleavedTried() const { return m_ilTry.load(std::memory_order_relaxed); }
+    /* Replies whose transmit stamp had the socket-lag correction applied. With
+     * the raw send that is none of them, and the healthz figure is then a
+     * description of the fallback rather than of the wire. */
+    uint32_t txCorrected() const { return m_txCorrected.load(std::memory_order_relaxed); }
     uint32_t interleavedHit() const { return m_ilHit.load(std::memory_order_relaxed); }
     uint32_t interleavedSaved() const { return m_ilSaved.load(std::memory_order_relaxed); }
     uint32_t interleavedKeyOnly() const { return m_ilKeyOnly.load(std::memory_order_relaxed); }
@@ -159,6 +163,7 @@ private:
     std::atomic<uint32_t>      m_control{0};
     std::atomic<uint32_t>      m_interleaved{0};
     std::atomic<uint32_t>      m_ilTry{0};
+    std::atomic<uint32_t>      m_txCorrected{0};
     std::atomic<uint32_t>      m_ilHit{0};
     std::atomic<uint32_t>      m_ilSaved{0};
     std::atomic<uint32_t>      m_ilKeyOnly{0};
