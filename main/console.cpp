@@ -9,15 +9,19 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "esp_app_desc.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 
 #include "cmd_nvs.h"
 #include "cmd_system.h"
 
+#include "clock_source.h"
 #include "config_apply.h"
 #include "eth_link.h"
+#include "gps_time.h"
 #include "net_addr.h"
 #include "net_state.h"
 #include "settings.h"
@@ -386,6 +390,133 @@ int cmdLog(void *, int argc, char **argv)
     return applyOne("logHost", argv[1]) && applyOne("logPort", argv[2]) ? 0 : 1;
 }
 
+/* What the box is doing, in one screen. The console's value is that it works
+ * when the network does not, so the first thing it should be able to do is say
+ * what is wrong -- without this you read the log and guess. Read-only: every
+ * line here is something the HTTP surface also reports. */
+int cmdStatus(void *, int, char **)
+{
+    if (s_ctx.settings == nullptr) {
+        std::printf("not started yet\n");
+        return 1;
+    }
+    const esp_app_desc_t *desc = esp_app_get_description();
+    std::printf("version  : %s\n", desc != nullptr ? desc->version : "?");
+    std::printf("uptime   : %lld s, %s boots\n",
+                static_cast<long long>(esp_timer_get_time() / 1000000),
+                s_ctx.settings->boots().c_str());
+    std::printf("link     : %s\n", net_state::linkUp() ? "up" : "down");
+    printAddressing();
+    const std::string global = net_state::ipv6Global();
+    std::printf("ipv6     : %s / %s\n", net_state::ipv6LinkLocal().c_str(),
+                global.empty() ? "(no global)" : global.c_str());
+
+    const GpsTime::Status gps = GpsTime::instance().status();
+    std::printf("fix      : %u, %u satellites, anchored %s\n", static_cast<unsigned>(gps.fixType),
+                static_cast<unsigned>(gps.satCount), gps.anchored ? "yes" : "no");
+    std::printf("mode     : %s%s\n", gps.timeMode.c_str(),
+                gps.holdValidated ? " (survey-validated)" : "");
+    std::printf("serving  : owner %s for %u s, stratum %u%s, locked %s\n",
+                ClockSource::name(ClockSource::instance().owner()),
+                static_cast<unsigned>(ClockSource::instance().ageS()),
+                static_cast<unsigned>(gps.stratum), gps.demoted ? " (demoted)" : "",
+                gps.locked ? "yes" : "no");
+    std::printf("dispersion: %.1f us\n", static_cast<double>(gps.dispersionNs) / 1000.0);
+    return 0;
+}
+
+/* The link, and the recovery for it. A wedged MAC is the one fault that takes
+ * the HTTP surface with it, so it needs a way back that does not use it. */
+int cmdEth(void *, int argc, char **argv)
+{
+    if (s_ctx.link == nullptr) {
+        std::printf("not started yet\n");
+        return 1;
+    }
+    if (argc == 1) {
+        std::printf("link:%s  restarts:%u\n", net_state::linkUp() ? "up" : "down",
+                    static_cast<unsigned>(s_ctx.link->restarts()));
+        printAddressing();
+        return 0;
+    }
+    if (std::strcmp(argv[1], "restart") != 0) {
+        std::printf("usage: eth [restart]\n");
+        return 1;
+    }
+    const esp_err_t err = s_ctx.link->restart("console");
+    std::printf("restart: %s (restarts now %u)\n", esp_err_to_name(err),
+                static_cast<unsigned>(s_ctx.link->restarts()));
+    return err == ESP_OK ? 0 : 1;
+}
+
+/* The receiver's own controls. The settings behind them are reachable through
+ * `config set`; what is not is *starting* something -- and a survey that will
+ * never converge is exactly what wants stopping from a cable. */
+int cmdGps(void *, int argc, char **argv)
+{
+    GpsTime &gps = GpsTime::instance();
+    if (argc == 1) {
+        const GpsTime::Status st = gps.status();
+        std::printf("fix %u, %u satellites, anchored %s, mode %s\n",
+                    static_cast<unsigned>(st.fixType), static_cast<unsigned>(st.satCount),
+                    st.anchored ? "yes" : "no", st.timeMode.c_str());
+        std::printf("survey: %s, %.0f s of %.0f s, %u obs\n",
+                    st.svinValid ? "valid" : "not validated", st.svinAgeS, st.svinTargetS,
+                    static_cast<unsigned>(st.svinObs));
+        return 0;
+    }
+    if (std::strcmp(argv[1], "survey") == 0) {
+        const char *what = argc > 2 ? argv[2] : "";
+        if (std::strcmp(what, "stop") == 0) {
+            gps.requestSurvey(false);
+            std::printf("survey stop queued: back to a moving position\n");
+            return 0;
+        }
+        if (std::strcmp(what, "fix") == 0) {
+            gps.requestFixPosition();
+            std::printf("lock queued: the receiver's own mean becomes the held position\n");
+            return 0;
+        }
+        std::printf("usage: gps survey <stop|fix>  (parameters: config set gpsSurvey H,MM)\n");
+        return 1;
+    }
+    if (std::strcmp(argv[1], "reset") == 0) {
+        const char *what = argc > 2 ? argv[2] : "soft";
+        if (std::strcmp(what, "soft") == 0) {
+            gps.requestReset();
+        } else if (std::strcmp(what, "hard") == 0) {
+            gps.requestReset(false, true);
+        } else if (std::strcmp(what, "power") == 0) {
+            gps.requestReset(false, false, true);
+        } else if (std::strcmp(what, "cold") == 0) {
+            gps.requestReset(true);
+        } else {
+            std::printf("usage: gps reset [soft|hard|power|cold]\n");
+            return 1;
+        }
+        std::printf("reset (%s) queued\n", what);
+        return 0;
+    }
+    if (std::strcmp(argv[1], "ant") == 0) {
+        const char *what = argc > 2 ? argv[2] : "";
+        if (std::strcmp(what, "on") != 0 && std::strcmp(what, "off") != 0) {
+            std::printf("usage: gps ant <on|off>\n");
+            return 1;
+        }
+        gps.requestAntennaBias(std::strcmp(what, "on") == 0);
+        std::printf("antenna bias %s queued\n", what);
+        return 0;
+    }
+    if (std::strcmp(argv[1], "defaults") == 0) {
+        gps.requestDefaults();
+        std::printf("receiver configuration clear queued\n");
+        return 0;
+    }
+    std::printf("usage: gps [survey <stop|fix> | reset [soft|hard|power|cold] | ant <on|off> | "
+                "defaults]\n");
+    return 1;
+}
+
 void add(const char *name, const char *help, const char *hint,
          esp_console_cmd_func_with_context_t func)
 {
@@ -428,6 +559,10 @@ esp_err_t console::start()
     add("timesource", "Where the clock comes from", "<off|dhcp|static|gps|auto>", cmdTimesource);
     add("ntpserver", "Upstream server for timeSource=static", "[host]", cmdNtpServer);
     add("log", "UDP log sink", "[<ip> <port>]", cmdLog);
+    add("status", "One screen: link, addressing, fix, serving", "", cmdStatus);
+    add("eth", "Link state, or restart the MAC", "[restart]", cmdEth);
+    add("gps", "Receiver state, survey, reset, antenna",
+        "[survey <stop|fix> | reset [soft|hard|power|cold] | ant <on|off> | defaults]", cmdGps);
 
     /* Whichever transport the console is configured for. It is UART0 on this
      * board -- the USB-C port is a CH343 bridge wired to it, the same cable
