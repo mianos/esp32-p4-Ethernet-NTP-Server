@@ -3562,7 +3562,12 @@ int64_t GpsTime::unobservedNs() const
      * the clock while 40 µs of honest dispersion had been the truth. The
      * quantisation clamp is the bound to state instead, and only while the edge
      * is trusted -- an untrusted edge below returns to the escalation. */
-    if (m_tmode == 2 && m_lastEdgeTrusted) {
+    /* The edge has to be current as well as trusted. m_lastEdgeTrusted is only
+     * written when an edge is processed, so it keeps its last value across an
+     * outage -- and a free-running box claiming the quantisation clamp while
+     * nothing is arriving is the underclaim the escalation was added for. */
+    if (m_tmode == 2 && m_lastEdgeTrusted && m_lastEdgeUs > 0 &&
+        esp_timer_get_time() - m_lastEdgeUs < 2000000) {
         return kMaxQErrNs;
     }
     const int64_t silentS = (esp_timer_get_time() - m_qErrAtUs) / 1000000;
