@@ -85,16 +85,30 @@ own address and its replies carry its own source. That keeps the timestamps and 
 
 ## 4. Phase 2 — firmware: static addressing and a serial console
 
-Both exist to remove the DHCP server from the wire and keep the box recoverable when
-the network is wrong. The USB cable stays in `esp-builder`'s `/dev/ttyACM0` whatever
-happens to the Ethernet, so the console is the rollback.
+The console exists to remove the DHCP server from the wire and to keep the box
+recoverable when the network is wrong. The USB cable stays in `esp-builder`'s
+`/dev/ttyACM0` whatever happens to the Ethernet, so the console is the rollback.
 
-**Console.** The primary console is UART0, wired to nothing reachable; USB-Serial/JTAG
-is only the *secondary*, and `esp_console_new_repl_usb_serial_jtag()` is compiled out
-under that config. So: make USB-SJT the primary
-(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, secondary NONE), add `esp_console`, start a
-REPL at init. Logs and the prompt then share the one port the box has, which is what
-`idf_monitor` already assumes.
+`~/wa/console` (the turret project, an IDF `system/console` derivative) already
+solves the machinery, and it supports this chip — `ESP32-P4` is in its supported
+list and its transport `#if` chain has a P4-viable branch. Port the structure, not
+the Pelco code:
+
+| take | from |
+|---|---|
+| `#warning` when a secondary console is left on | `main/main.c:20-24` |
+| transport `#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)` arm | `main/main.c:331-348` |
+| commands as `func_w_context` over a `cmd_context_t`, not globals | `main/main.c:270-329` |
+| `cmd_system` / `cmd_nvs` as path dependencies | `main/idf_component.yml` |
+| `ESP_CONSOLE_REPL_CONFIG_DEFAULT()`, `esp_console_start_repl()` | `main/main.c:236-350` |
+| prompt / `max_cmdline_length` / stack as repl config | `main/main.c:237-239` |
+
+**Transport.** Primary console becomes USB-Serial/JTAG with the secondary NONE
+(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`).
+UART0 goes back to being unused, which is what it already is in practice. No
+partition change: history needs a `fat` partition and the box is on
+`CONFIG_PARTITION_TABLE_TWO_OTA_LARGE`, so `CONFIG_CONSOLE_STORE_HISTORY` stays off
+until someone actually misses it — a table change cannot be delivered by OTA.
 
 **Settings** (`settings.h`, validated in `applyJson`, defaults that never brick):
 
@@ -105,30 +119,54 @@ REPL at init. Logs and the prompt then share the one port the box has, which is 
 | `ipGateway` | — | dotted quad, optional |
 | `ipDns` | — | dotted quad, optional |
 
-A `static` mode whose address does not parse falls back to DHCP with a loud log, so a
-half-written config is a slow box, never a dark one.
+A `static` mode whose address does not parse falls back to DHCP with a loud log, so
+a half-written config is a slow box, never a dark one.
 
 **`eth_link.cpp`.** Parse once; if static, `esp_netif_dhcpc_stop()` and
 `esp_netif_set_ip_info()` before `esp_eth_start()`, plus `esp_netif_set_dns_info()`
 when set. The netif's default `ETHERNET_EVENT_CONNECTED` action starts the DHCP client
 again, so the CONNECTED handler re-asserts: stop it, re-check the address, then call
-the address-up path. `onGotIp()` splits into `onAddressUp(ip_info)` so both paths start
-HTTP, NTP and `net_log` identically. Both servers bind `INADDR_ANY`, so a live
+the address-up path. `onGotIp()` splits into `onAddressUp(ip_info)` so both paths
+start HTTP, NTP and `net_log` identically. Both servers bind `INADDR_ANY`, so a live
 re-address needs no restart.
 
-**Console command.**
+**Commands.** One generic path plus the shorthands worth typing:
 
 ```
-net                       # show mode, address, gateway, dns, link
-net dhcp                  # persist ipMode=dhcp, stop dhcpc, re-request
-net static <cidr> <gw> [dns]
+net                                   # mode, address, gateway, dns, link state
+net dhcp                              # persist ipMode=dhcp, stop dhcpc, re-request
+net static <cidr> <gw> [dns]          # validate, persist, apply live
+config                                # the settings JSON
+config set <key> <value>              # any registered key, through applyJson
+config reset                          # defaults
+hostname <name> | serve <on|off> | timesource <off|dhcp|static|gps|auto>
+ntpserver <host> | log <ip> <port> | loglevel <x>
+version | free | uptime | tasks | restart
+nvs_list | nvs_get                     # from cmd_nvs
 ```
 
-Persists through `Settings::save()`, applies live, prints the resulting address.
+Everything routes through `Settings::applyJson()` + the existing onChange hooks, so
+the console cannot invent a state the HTTP surface does not also validate. `restart`
+uses `cmd_system`; it is the one command that costs the box a reboot, so it is worth
+having and worth not automating.
+
+**REPL config.** prompt `ntp>`, `max_cmdline_length` 512, `task_stack_size` 6144
+(the 4096 default is thin for stdio plus argtable). Start it from `app_main` right
+after `Settings::begin()` and *before* `EthernetLink::begin()`, so the console is up
+even if the Ethernet init hangs. Failure to create the REPL is logged, not fatal —
+a box with no console must still boot.
 
 **HTTP.** `ipMode`/`ipAddress`/`ipGateway`/`ipDns` join `POST /config`, with an
 `EthernetLink::applySettings()` beside the existing hostname hook. `/healthz` gains
 `ip_mode`.
+
+**Interleaving.** Logs and the prompt share one port, so raw `cat` garbles and
+`idf_monitor` is the interactive tool. Capture stays on `net_log`'s UDP mirror, which
+is unaffected.
+
+**Trust.** USB is the only door: no auth on the console, and `config` prints the
+whole blob. That is fine while nothing secret is in it; it is a reason not to put a
+secret there without adding a redaction.
 
 Sequence: build, flash over the LAN, commit, **rebuild and reflash so the version is
 never `-dirty`** — all while the box is still on the switch.
@@ -161,6 +199,8 @@ works, because the USB path never depended on the network.
 | `hfc` ruleset is live-only and dies with the container | medium | snapshot it first, restore on the way back |
 | viewer and OTA silently break | medium | Phase 1 lands before the cut and is tested from the Mac |
 | LAN time clients left on `.107` | medium | they move to `10.99.0.2` in Phase 1, not after |
+| console shares the port with the logs | low | `idf_monitor` for interaction, `net_log` for capture |
+| a console that can change anything is a physical-access backdoor | low | no secrets in settings; `config` prints the blob |
 | AMT shares the port and its MAC | low | unprovisioned AMT is inert; note it if the ME is ever enabled |
 | IP101 is 100 Mb, the port is 1G | low | autoneg settles at 100; throughput is irrelevant to NTP |
 
