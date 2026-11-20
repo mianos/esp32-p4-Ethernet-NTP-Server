@@ -23,6 +23,9 @@
 #include "freertos/task.h"
 
 #include "eth_link.h"
+
+#include "soc/emac_reg.h"
+#include "soc/soc.h"
 #include "net_addr.h"
 #include "net_log.h"
 #include "net_state.h"
@@ -331,12 +334,22 @@ esp_err_t EthernetLink::begin()
     /* After start, not before: the MAC is programmed during start and that
      * clears the filter bits, so a promiscuous set beforehand is thrown away. */
 #if CONFIG_LWIP_IPV6
+    /* Two filter bits, and only one of them has an ioctl. PRMODE passes frames
+     * whatever their address; the separate PM bit is the one that passes
+     * *multicast*, and promiscuous does not imply it. Without PM the MAC drops
+     * ff02::1 and the solicited-node groups, so the board has a link-local,
+     * answers a unicast ping, and never hears an advertisement or a neighbour
+     * solicitation -- SLAAC cannot work and neither can anything else. The HAL
+     * has a wrapper for PM (emac_ll_pass_all_multicast_enable) but no ioctl
+     * reaches it, so the register is written here. */
     bool promiscuous = true; /* the ioctl takes void *, not const */
     const esp_err_t promiscuousErr = esp_eth_ioctl(m_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous);
     if (promiscuousErr != ESP_OK) {
-        ESP_LOGW(TAG, "promiscuous mode: %s (IPv6 multicast may be filtered)",
-                 esp_err_to_name(promiscuousErr));
+        ESP_LOGW(TAG, "promiscuous mode: %s", esp_err_to_name(promiscuousErr));
     }
+    REG_WRITE(EMAC_MACFRAMEFILTER_REG, REG_READ(EMAC_MACFRAMEFILTER_REG) | EMAC_PM_M);
+    ESP_LOGI(TAG, "MAC frame filter 0x%08x: multicast passes",
+             static_cast<unsigned>(REG_READ(EMAC_MACFRAMEFILTER_REG)));
 #endif
     return startStatusTask();
 }
