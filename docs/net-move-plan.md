@@ -9,8 +9,8 @@ shared switch and put it on a wire with exactly one peer.
 | | |
 |---|---|
 | `enp2s0f0` | **the named spare port**: Intel X710 port 0, `8086:1572`, `i40e`, MAC `58:47:ca:7b:62:18`, `portname p0`, alias `enp2s0f0np0` |
-| | an **SFP+ cage**, not an RJ45 — it is empty unless a module is in it, and the netdev is `state DOWN`, `qdisc noop` |
-| `enp2s0f1` | X710 port 1, carries `br0` at `131.84.1.1/24` |
+| | an **SFP+ cage**, not an RJ45. **Confirmed empty** 2026-11-20: brought up in a scratch container, `Supported ports: [ ]`, `Port: Other`, `ethtool -m` refused, carrier 0 |
+| `enp2s0f1` | X710 port 1, carries `br0` at `131.84.1.1/24`, linked at **10 Gb/s** — so the machine has no spare 1G module to borrow |
 | `enp90s0` | I226-LM onboard RJ45, admin DOWN, spare; the AMT SKU, and the ME (`/dev/mei0`, FW 16.1.25.2049) can own its link |
 | `enp89s0` | I226-V onboard, bound to `igc`, **no netdev at all** (`/sys/.../0000:57:00.0/net/` empty), so the name `/etc/network/interfaces` hotplugs does not exist |
 | router | `hfc` (container), `131.84.1.2`, masquerade is `ip saddr 131.84.0.0/16`, `DEFAULT_FORWARD_POLICY=ACCEPT`, ruleset is live-only (`nftables.service` disabled) |
