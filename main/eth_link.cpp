@@ -323,19 +323,21 @@ esp_err_t EthernetLink::begin()
      * SLAAC and NDP both need ff02::1 and the solicited-node groups, so the
      * choice is promiscuous or no IPv6 at all. The port is the box's own, so the
      * extra frames are the segment's broadcast traffic and nothing else. */
-#if CONFIG_LWIP_IPV6
-    bool promiscuous = true; /* the ioctl takes void *, not const */
-    err = esp_eth_ioctl(m_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "promiscuous mode: %s (IPv6 multicast may be filtered)", esp_err_to_name(err));
-    }
-#endif
-
     err = esp_eth_start(m_eth);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_eth_start failed: %s", esp_err_to_name(err));
         return err;
     }
+    /* After start, not before: the MAC is programmed during start and that
+     * clears the filter bits, so a promiscuous set beforehand is thrown away. */
+#if CONFIG_LWIP_IPV6
+    bool promiscuous = true; /* the ioctl takes void *, not const */
+    const esp_err_t promiscuousErr = esp_eth_ioctl(m_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous);
+    if (promiscuousErr != ESP_OK) {
+        ESP_LOGW(TAG, "promiscuous mode: %s (IPv6 multicast may be filtered)",
+                 esp_err_to_name(promiscuousErr));
+    }
+#endif
     return startStatusTask();
 }
 
