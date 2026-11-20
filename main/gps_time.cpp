@@ -1882,8 +1882,13 @@ void GpsTime::task()
          * the receiver has begun: an unfixed module given TMODE2 spends the
          * boot's first edges and can hand the clock to the fallback. Waiting
          * does not cost a retry, so the deadline is simply moved on. */
-        if (m_holdWanted && m_tmode != 2 && m_holdAssertAtUs != 0 &&
-            !m_svinActive && Settings::instance().gpsTimeMode() == "fixed") {
+        if (m_holdAssertAtUs != 0 && m_tmode == 2 && !m_svinActive) {
+            /* The receiver is already holding -- the poll said so at boot, or a
+             * previous attempt took -- so nothing is outstanding. Left armed the
+             * deadline reads as overdue forever in /gps/info. */
+            m_holdAssertAtUs = 0;
+        } else if (m_holdWanted && m_tmode != 2 && m_holdAssertAtUs != 0 &&
+                   !m_svinActive && Settings::instance().gpsTimeMode() == "fixed") {
             const bool ready = m_fixType >= 2 && m_satCount >= 4 && m_lastEdgeUs > 0 &&
                                nowUs - m_lastEdgeUs < 3000000;
             if (nowUs < m_holdAssertAtUs) {
