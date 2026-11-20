@@ -316,6 +316,21 @@ esp_err_t EthernetLink::begin()
         return err;
     }
 
+    /* Multicast has to be let through by hand. esp_eth exposes no multicast
+     * hash, only promiscuous mode, and with the MAC filtering to its own address
+     * the board never hears a router advertisement or a neighbour solicitation:
+     * it has a link-local, answers unicast, and is otherwise invisible to IPv6.
+     * SLAAC and NDP both need ff02::1 and the solicited-node groups, so the
+     * choice is promiscuous or no IPv6 at all. The port is the box's own, so the
+     * extra frames are the segment's broadcast traffic and nothing else. */
+#if CONFIG_LWIP_IPV6
+    const bool promiscuous = true;
+    err = esp_eth_ioctl(m_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "promiscuous mode: %s (IPv6 multicast may be filtered)", esp_err_to_name(err));
+    }
+#endif
+
     err = esp_eth_start(m_eth);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_eth_start failed: %s", esp_err_to_name(err));
