@@ -1,6 +1,7 @@
 #include "console.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -508,6 +509,32 @@ int cmdGps(void *, int argc, char **argv)
         std::printf("antenna bias %s queued\n", what);
         return 0;
     }
+    if (std::strcmp(argv[1], "gnss") == 0) {
+        if (argc < 3) {
+            std::printf("usage: gps gnss <hex mask>\n");
+            return 1;
+        }
+        char         *end = nullptr;
+        const long    mask = std::strtol(argv[2], &end, 16);
+        if (end == argv[2] || mask <= 0 || mask > 0xFF) {
+            std::printf("'%s' is not a hex mask, 1..ff\n", argv[2]);
+            return 1;
+        }
+        gps.requestGnss(static_cast<uint8_t>(mask));
+        std::printf("constellation mask 0x%02lx queued\n", mask);
+        return 0;
+    }
+    if (std::strcmp(argv[1], "suppress") == 0) {
+        if (argc < 3) {
+            std::printf("usage: gps suppress <seconds>  (0 to stop)\n");
+            return 1;
+        }
+        const uint32_t seconds = static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10));
+        gps.suppressPps(seconds);
+        std::printf("edges %s\n", seconds == 0 ? "counted again" : "ignored: this is a holdover "
+                                                                    "and the reply says so");
+        return 0;
+    }
     if (std::strcmp(argv[1], "defaults") == 0) {
         gps.requestDefaults();
         std::printf("receiver configuration clear queued\n");
@@ -562,8 +589,9 @@ esp_err_t console::start()
     add("log", "UDP log sink", "[<ip> <port>]", cmdLog);
     add("status", "One screen: link, addressing, fix, serving", "", cmdStatus);
     add("eth", "Link state, or restart the MAC", "[restart]", cmdEth);
-    add("gps", "Receiver state, survey, reset, antenna",
-        "[survey <stop|fix> | reset [soft|hard|power|cold] | ant <on|off> | defaults]", cmdGps);
+    add("gps", "Receiver state, survey, reset, antenna, mask, holdover test",
+        "[survey <stop|fix> | reset [soft|hard|power|cold] | ant <on|off> | gnss <hex> | "
+        "suppress <s> | defaults]", cmdGps);
 
     /* Whichever transport the console is configured for. It is UART0 on this
      * board -- the USB-C port is a CH343 bridge wired to it, the same cable
