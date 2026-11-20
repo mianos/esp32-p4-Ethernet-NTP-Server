@@ -628,6 +628,15 @@ esp_err_t enable(bool restart)
         return ESP_OK;
     }
 
+    /* A second ptp_enable() on an already running block leaves the timestamp
+     * unit unable to produce anything -- the frames still go out, without
+     * stamps, and the responder stops being able to send a Sync at all. A
+     * restart disables it first and puts the counter back on the clock
+     * afterwards, since ptp_start() zeroes it. */
+    if (restart && s_enabled && s_mac != nullptr) {
+        (void)esp_eth_mac_ptp_disable(s_mac);
+    }
+
     eth_mac_ptp_config_t config = {};
     /* The crystal, at 40 MHz: 25 ns is the finest the counter can be stepped and
      * is also what its increment is set to. The 80 MHz PLL is the alternative
@@ -662,6 +671,9 @@ esp_err_t enable(bool restart)
     }
     uint32_t stampBit = EMAC_HAL_TDES0_TX_TS_ENABLE;
     esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS), &stampBit);
+    if (restart) {
+        (void)stepToRealtime();
+    }
 
     /* Start it at CLOCK_REALTIME so a stamp is an epoch instant and can be read
      * by eye. Before the clock is set this is 1970, which the anchor corrects
