@@ -37,6 +37,12 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 # defines it as a list of IPv4 addresses.
 CONFIG_LWIP_IPV6=y
 CONFIG_LWIP_IPV6_AUTOCONFIG=y
+# MLD is what makes the board join the all-nodes multicast group, and without it
+# it hears no router advertisement: the link-local is created, the Solicitation
+# is answered only by accident, and the board sits there IPv6-less while its
+# neighbour on the same bridge autoconfigures in eight seconds. Off by default
+# in lwIP, and the reason an earlier note claimed SLAAC "just works".
+CONFIG_LWIP_IPV6_MLD=y
 CONFIG_LWIP_IPV6_NUM_ADDRESSES=3
 
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
