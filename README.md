@@ -203,17 +203,73 @@ $ stty -F /dev/ttyACM0 115200 raw -echo -hupcl
 $ printf 'console on\r' > /dev/ttyACM0
 ```
 
+Everything the HTTP surface can *do*, the cable can do, because the cable is
+what is left when the network is the fault: address it, restart the MAC, stop a
+survey that will not converge, hold the clock off a receiver that has gone
+quiet, and put the config back.
+
+**Addressing** — the one change that can strand the box, so it prints what it
+did and the new state.
+
 | Command | Effect |
 |---|---|
 | `net` | show mode, address, gateway, resolver, link |
 | `net static <cidr> <gw> [dns]` | set a static address, persist and apply it live |
 | `net dhcp` | back to the DHCP client |
+| `eth` | link state, MAC restart count, addressing |
+| `eth restart` | restart the MAC, the recovery for a wedged link (same as `POST /eth/restart`) |
+
+**State** — read-only, and only what `/healthz` already publishes.
+
+| Command | Effect |
+|---|---|
+| `status` | one screen: version, uptime, link, addressing, IPv6, fix, mode, owner, stratum, dispersion |
+
+**Service** — what the box offers and where it takes time from.
+
+| Command | Effect |
+|---|---|
+| `serve <on|off>` | answer UDP/123 |
+| `timesource <off|dhcp|static|gps|auto>` | where the clock comes from |
+| `ntpserver [host]` | upstream for `timeSource=static` |
+| `hostname [name]` | DHCP hostname |
+| `log [<ip> <port>]` | UDP log sink |
 | `console on` / `console off` | prompt on and log silenced, or back to the log stream |
+
+**Config** — every key, and the reset.
+
+| Command | Effect |
+|---|---|
 | `config` | print the stored config, pretty-printed (`config raw` for one line) |
 | `config set <key> <value>` | any key from the table under [HTTP API](#http-api) |
 | `config reset` | compiled-in defaults; the boot count survives |
-| `hostname`, `serve`, `timesource`, `ntpserver`, `log` | the single-value shorthands |
-| `nvs_list`, `nvs_get`, `version`, `free`, `heap`, `tasks`, `restart` | IDF's `cmd_nvs` / `cmd_system` |
+
+**Receiver** — the actions the settings cannot express. `gps` alone prints fix,
+satellites, survey progress and mode.
+
+| Command | Effect |
+|---|---|
+| `gps survey stop` | back to a moving position; the last mean is kept for `fix` |
+| `gps survey fix` | lock the receiver's own mean as the held position |
+| `gps reset [soft\|hard\|power\|cold]` | reset the receiver; `hard` re-initialises the front end, `cold` also drops the almanac |
+| `gps ant <on\|off>` | antenna bias, for swapping an antenna under the same settings |
+| `gps gnss <hex>` | constellation mask, `1`..`ff` |
+| `gps suppress <s>` | ignore PPS edges for `s` seconds — a deliberate holdover, `0` to stop |
+| `gps defaults` | clear the receiver's configuration to its own defaults |
+
+**Board and NVS** — IDF's own commands, `cmd_system` and `cmd_nvs`.
+
+| Command | Effect |
+|---|---|
+| `help [cmd]`, `version`, `restart`, `free`, `heap`, `tasks` | usage, build, reboot, memory, task list |
+| `log_level <level> [tag]` | log level, all tags or one — per-tag is why the stream can be quieted without `console on` |
+| `nvs_namespace <ns>`, `nvs_list`, `nvs_get`, `nvs_set`, `nvs_erase`, `nvs_erase_namespace` | read and write the NVS partition directly |
+
+Not on the console, deliberately: **firmware upload** (`POST /firmware` needs
+the network it is delivered over, and a serial reflash is the fallback anyway)
+and **static IPv6** (SLAAC only — the address comes from the router). The PPS
+bench knobs `pulse_ms`, `period_us` and `delay_ns` are also HTTP-only; the
+delay is a setting (`antDelayNs`) and the other two are not.
 
 The console component's REPL task is created but never started: it stays parked
 on its notification while one reader task owns the port and dispatches lines
