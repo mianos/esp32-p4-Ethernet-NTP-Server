@@ -89,19 +89,21 @@ The console exists to remove the DHCP server from the wire and to keep the box
 recoverable when the network is wrong. The USB cable stays in `esp-builder`'s
 `/dev/ttyACM0` whatever happens to the Ethernet, so the console is the rollback.
 
-`~/wa/console` (the turret project, an IDF `system/console` derivative) already
-solves the machinery, and it supports this chip — `ESP32-P4` is in its supported
-list and its transport `#if` chain has a P4-viable branch. Port the structure, not
-the Pelco code:
+The reference is IDF's own console component and its two examples, both in the
+tree on `esp-builder`: `examples/system/console/basic` for the REPL lifecycle and
+`examples/system/console/advanced/components` for the ready-made `cmd_system` and
+`cmd_nvs`. Take the structure from those; `cmd_wifi` is pointless here, the box has
+no radio.
 
 | take | from |
 |---|---|
-| `#warning` when a secondary console is left on | `main/main.c:20-24` |
-| transport `#if defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)` arm | `main/main.c:331-348` |
-| commands as `func_w_context` over a `cmd_context_t`, not globals | `main/main.c:270-329` |
-| `cmd_system` / `cmd_nvs` as path dependencies | `main/idf_component.yml` |
-| `ESP_CONSOLE_REPL_CONFIG_DEFAULT()`, `esp_console_start_repl()` | `main/main.c:236-350` |
-| prompt / `max_cmdline_length` / stack as repl config | `main/main.c:237-239` |
+| why the secondary console must be off | `examples/system/console/basic/main/console_example_main.c:29-30` (`#warning`) |
+| transport `#if` chain, P4-viable branch included | same file, `:105-121` |
+| `cmd_system` (`restart`, `free`, `tasks`, `uptime`, `version`) | `examples/system/console/advanced/components/cmd_system` |
+| `cmd_nvs` (`nvs_list`, `nvs_get`) | `examples/system/console/advanced/components/cmd_nvs` |
+| the two FreeRTOS options `tasks` needs | `examples/system/console/advanced/sdkconfig.defaults:14-15` |
+| `esp_console_cmd_register()` with `func_w_context` | `components/console/esp_console.h` |
+| component dependency | `PRIV_REQUIRES console`, path deps in `main/idf_component.yml` |
 
 **Transport.** Primary console becomes USB-Serial/JTAG with the secondary NONE
 (`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, `CONFIG_ESP_CONSOLE_SECONDARY_NONE=y`).
@@ -150,8 +152,9 @@ the console cannot invent a state the HTTP surface does not also validate. `rest
 uses `cmd_system`; it is the one command that costs the box a reboot, so it is worth
 having and worth not automating.
 
-**REPL config.** prompt `ntp>`, `max_cmdline_length` 512, `task_stack_size` 6144
-(the 4096 default is thin for stdio plus argtable). Start it from `app_main` right
+**REPL config.** `ESP_CONSOLE_REPL_CONFIG_DEFAULT()`, then prompt `ntp>`,
+`max_cmdline_length` 512 and `task_stack_size` 6144 — the 4096 default is thin for
+stdio plus argtable. Start it from `app_main` right
 after `Settings::begin()` and *before* `EthernetLink::begin()`, so the console is up
 even if the Ethernet init hangs. Failure to create the REPL is logged, not fatal —
 a box with no console must still boot.
@@ -200,6 +203,7 @@ works, because the USB path never depended on the network.
 | viewer and OTA silently break | medium | Phase 1 lands before the cut and is tested from the Mac |
 | LAN time clients left on `.107` | medium | they move to `10.99.0.2` in Phase 1, not after |
 | console shares the port with the logs | low | `idf_monitor` for interaction, `net_log` for capture |
+| console runtime and `cmd_system` cost flash and stack | low | ~40 KB and 6 KB, against 1700 K slots and 8 KB of main stack |
 | a console that can change anything is a physical-access backdoor | low | no secrets in settings; `config` prints the blob |
 | AMT shares the port and its MAC | low | unprovisioned AMT is inert; note it if the ME is ever enabled |
 | IP101 is 100 Mb, the port is 1G | low | autoneg settles at 100; throughput is irrelevant to NTP |
