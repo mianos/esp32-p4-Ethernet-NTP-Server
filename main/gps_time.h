@@ -547,6 +547,10 @@ public:
     bool startSurveyFromSettings();
     void restoreTimeMode();
     void saveTimeMode();
+    /* Tell the receiver to hold the adopted position. Separate from adopting it:
+     * the two used to be the same act and only one of them was happening at
+     * boot. */
+    bool sendFixedPosition();
 
     /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort.
      *
@@ -1013,6 +1017,13 @@ private:
      * still booting then, so its answer describes the state *before* the hold
      * has been put back and reading it would undo the re-assert. */
     bool             m_skipAdopt    = false;
+    /* When the hold next gets asserted at the receiver, and the interval to wait
+     * after the last failure. A receiver still booting NAKs the frame, and a
+     * receiver left moving spends the survey the hold came from while the box
+     * still believes it is holding -- so the assertion is retried rather than
+     * attempted once and forgotten. */
+    int64_t          m_holdAssertAtUs = 0;
+    int64_t          m_holdRetryUs    = 0;
     volatile bool   m_resetReq     = false;
     volatile bool   m_resetCold    = false;
     volatile bool   m_resetHard    = false;

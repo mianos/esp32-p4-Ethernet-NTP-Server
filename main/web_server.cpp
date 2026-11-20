@@ -289,10 +289,12 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         }
         /* What the last holdover actually cost, measured when the edge came
          * back: how long it was, and how far the servo's prediction was out.
-         * Absent until there has been one. */
+         * Absent until there has been one, and both are named for it -- the
+         * error used to be `gps_holdover_error_us`, which read as a live figure
+         * and was alarming to find sitting on a box that was anchored. */
         if (gps.lastHoldoverUs > 0) {
-            json.AddItem("gps_holdover_s", static_cast<double>(gps.lastHoldoverUs) / 1e6);
-            json.AddItem("gps_holdover_error_us",
+            json.AddItem("gps_last_holdover_s", static_cast<double>(gps.lastHoldoverUs) / 1e6);
+            json.AddItem("gps_last_holdover_error_us",
                          static_cast<double>(gps.lastHoldoverErrNs) / 1000.0);
         }
     } else {

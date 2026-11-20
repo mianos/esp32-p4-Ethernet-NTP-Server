@@ -75,6 +75,13 @@ constexpr int64_t kScanAfterUs = 4000000;
  * covers a module boot plus a config burst; a wrong rate only costs 15 s of one
  * pass, and the pass starts again afterwards. */
 constexpr int64_t kFirstRateUs = 15000000;
+/* How soon a position hold that would not take is tried again, and the ceiling
+ * the interval backs off to. The first attempt lands right after configureModule
+ * at boot, when the receiver may still be booting; five minutes is often enough
+ * for a module that was mid-restart and short enough that a boot which failed it
+ * does not spend long moving. */
+constexpr int64_t kHoldRetryUs     = 5000000;
+constexpr int64_t kHoldRetryMaxUs  = 300000000;
 /* Silence that counts as a dead line rather than a quiet one. The receiver sends
 a message set at 1 Hz, so 5 s is five missed turns of it. */
 constexpr int64_t kFrameSilenceUs = 5000000;
@@ -523,6 +530,22 @@ void GpsTime::saveTimeMode()
     settings.save();
 }
 
+bool GpsTime::sendFixedPosition()
+{
+    uint8_t tm[28] = {};
+    tm[0]          = 2; /* fixed */
+    for (int i = 0; i < 3; ++i) {
+        text::putLe(tm + 4 + 4 * i, m_fixedMean[i]);
+    }
+    text::putLe(tm + 16, m_fixedAcc);
+    if (sendAndWait(0x06, 0x3D, tm, sizeof(tm)) != 1) {
+        return false;
+    }
+    m_tmode      = 2;
+    m_holdWanted = true;
+    return true;
+}
+
 void GpsTime::restoreTimeMode()
 {
     /* The module's RAM died with the supply, so what was wanted is read back
@@ -548,6 +571,20 @@ void GpsTime::restoreTimeMode()
             adoptFixedPosition(x, y, z, acc, val != 0);
             ESP_LOGW(TAG, "position hold restored from NVS%s",
                      m_holdValidated ? ", survey-validated" : "");
+            /* Adopting is not asking. This block used to end here, which left
+             * the position in RAM and the receiver in moving mode: the module
+             * came up moving, was never told otherwise, and every boot spent the
+             * survey for nothing while the box reported a hold it did not have.
+             * The attempt can fail here -- the receiver is often still booting
+             * this soon -- so a failure arms a retry rather than being final. */
+            if (sendFixedPosition()) {
+                ESP_LOGW(TAG, "position hold asserted at the receiver");
+            } else {
+                m_holdRetryUs    = kHoldRetryUs;
+                m_holdAssertAtUs = esp_timer_get_time() + m_holdRetryUs;
+                ESP_LOGW(TAG, "receiver did not take the hold yet: retrying in %lld s",
+                         static_cast<long long>(kHoldRetryUs / 1000000));
+            }
             return;
         }
         /* The mode says fixed but the position did not survive. Falling out of
@@ -621,18 +658,14 @@ void GpsTime::reassertFix()
 
     adoptFixedPosition(x, y, z, acc, val != 0);
 
-    uint8_t tm[28] = {};
-    tm[0]          = 2; /* fixed */
-    for (int i = 0; i < 3; ++i) {
-        text::putLe(tm + 4 + 4 * i, m_fixedMean[i]);
-    }
-    text::putLe(tm + 16, m_fixedAcc);
-    if (sendAndWait(0x06, 0x3D, tm, sizeof(tm)) == 1) {
-        m_tmode = 2;
+    if (sendFixedPosition()) {
         ESP_LOGW(TAG, "position hold put back after the reset%s",
                  m_holdValidated ? ", survey-validated" : "");
     } else {
-        ESP_LOGW(TAG, "position hold could not be put back");
+        m_holdRetryUs    = kHoldRetryUs;
+        m_holdAssertAtUs = esp_timer_get_time() + m_holdRetryUs;
+        ESP_LOGW(TAG, "position hold could not be put back: retrying in %lld s",
+                 static_cast<long long>(kHoldRetryUs / 1000000));
     }
 }
 
@@ -1799,6 +1832,25 @@ void GpsTime::task()
                      * answer with the mode the reset left behind. */
                     reassertFix();
                 }
+            }
+        }
+        /* The hold is asserted again if the receiver is not holding and the
+         * settings still want it. The stored mode is read rather than a member,
+         * because "stop" puts the module back to moving and only the settings
+         * know that has happened -- without this test the retry would put a hold
+         * back under a box that had been asked for a moving solution. A survey
+         * in progress wins for the same reason: TMODE2 fixed would end it. */
+        if (m_holdWanted && m_tmode != 2 && m_holdAssertAtUs != 0 && nowUs >= m_holdAssertAtUs &&
+            !m_svinActive && Settings::instance().gpsTimeMode() == "fixed") {
+            if (sendFixedPosition()) {
+                m_holdAssertAtUs = 0;
+                m_holdRetryUs    = 0;
+                ESP_LOGW(TAG, "position hold asserted at the receiver after a retry");
+            } else {
+                m_holdRetryUs    = std::min(m_holdRetryUs * 2, kHoldRetryMaxUs);
+                m_holdAssertAtUs = nowUs + m_holdRetryUs;
+                ESP_LOGW(TAG, "position hold still refused: next try in %lld s",
+                         static_cast<long long>(m_holdRetryUs / 1000000));
             }
         }
         if (m_defaultsReq) {

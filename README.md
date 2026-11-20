@@ -935,6 +935,17 @@ logged as such, rather than being discovered a day later.
 until both conditions are met. A finished survey is logged once, with its accuracy,
 rather than locked automatically — the accuracy is worth a look first.
 
+**What survives a reboot.** Nothing in the receiver's RAM does, so the mode and the
+position are re-sent from NVS at start-up: a survey with its own parameters, a lock
+as it was. Adopting the position into RAM is not the same as asking for it, and the
+two were once the same act — the hold was restored, never sent, and the receiver
+came up moving while `/config` still said `fixed` and `/gps/info` reported a hold
+that did not exist. Every boot spent the survey for nothing. The assertion is
+retried with a back-off (5 s doubling to 5 min) because a receiver that is still
+booting NAKs the frame, and it stops once the receiver is in fixed mode, while a
+survey is running, or when the stored mode is no longer `fixed`, so a `stop` is not
+undone by the retry.
+
 **Two message dialects, and how they were found.** The first attempt used
 `UBX-CFG-TMODE3` (0x06 0x71) and `UBX-NAV-SVIN` (0x01 0x3B). Both are wrong here and
 wrong in a way that looks almost like working: TMODE3 was *acknowledged* and then
@@ -1292,7 +1303,7 @@ holdover ran, and then the edge back:
 "gps_pps_age_ms":84885   "dispersion_us":86.529
 "gps_pps_age_ms":112963  "dispersion_us":114.529
 # the first edge back, 121 s later
-"gps_holdover_s":120.9964  "gps_holdover_error_us":-2.94
+"gps_last_holdover_s":120.9964  "gps_last_holdover_error_us":-2.94
 ```
 
 One microsecond a second from 2.5 µs at the edge, which is the 1 ppm wander term
@@ -1311,7 +1322,7 @@ a log line and a stratum-16 reference — not a boot failure. That matters on a
 headless board whose only other interface is the RJ45.
 
 A holdover does not get to be quiet: the first anchor after a gap logs the gap and
-the error, `/healthz` keeps `gps_holdover_s` and `gps_holdover_error_us` from the
+the error, `/healthz` keeps `gps_last_holdover_s` and `gps_last_holdover_error_us` from the
 last one, and the servo logs a step in the reference (100 ms or more) with the
 window discarded, because that is the one failure that would otherwise look like a
 healthy clock.
@@ -1357,8 +1368,8 @@ $ curl -s -X POST -H 'Content-Type: application/json' -d '{"suppress_s":150}' \
 {"pps_suppressed_s":150,"locked":true,"stratum":1,"holdover_s":0}
 
 $ curl -s http://192.0.2.20/healthz | tr ',' '\n' | grep holdover
-"gps_holdover_s":150.9955
-"gps_holdover_error_us":-2.032
+"gps_last_holdover_s":150.9955
+"gps_last_holdover_error_us":-2.032
 ```
 
 `suppress_s` is capped at an hour. `/healthz` reports the time left as
@@ -1458,7 +1469,7 @@ The servo and the notice fields:
   is announced, and `leap_in_s` only while one is — together these are the first
   byte of every reply;
 - `gps_pps_suppressed_s` exists only while `POST /gps/pps` has a test armed, and
-  `gps_holdover_s` / `gps_holdover_error_us` only after the first holdover, so
+  `gps_last_holdover_s` / `gps_last_holdover_error_us` only after the first holdover, so
   nothing in this group can be mistaken for a permanent state.
 
 ## Serving NTP (UDP/123)
