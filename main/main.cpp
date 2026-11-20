@@ -42,6 +42,7 @@
 #include "nvs_flash.h"
 
 #include "clock_source.h"
+#include "console.h"
 #include "eth_link.h"
 #include "gps_time.h"
 #include "ntp_time.h"
@@ -74,6 +75,13 @@ extern "C" void app_main()
 
     initNvs();
     Settings::instance().begin();
+
+    /* The console comes up before anything that can hang, because it is the way
+     * back in when a stored address is wrong or the link never comes up. Not
+     * fatal: a box without a console still has to boot and serve. */
+    if (console::start() != ESP_OK) {
+        ESP_LOGW(TAG, "console unavailable; continuing without it");
+    }
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());

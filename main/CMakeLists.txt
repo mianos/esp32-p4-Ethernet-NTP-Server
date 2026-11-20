@@ -1,6 +1,6 @@
-idf_component_register(SRCS "clock_source.cpp" "eth_link.cpp" "gps_time.cpp" "main.cpp" "net_log.cpp" "ntp_control.cpp" "net_state.cpp" "ntp_server.cpp" "ntp_time.cpp" "serve_path.cpp" "settings.cpp" "tx_lag.cpp" "ubx.cpp" "web_server.cpp"
+idf_component_register(SRCS "clock_source.cpp" "config_apply.cpp" "console.cpp" "eth_link.cpp" "gps_time.cpp" "main.cpp" "net_addr.cpp" "net_log.cpp" "ntp_control.cpp" "net_state.cpp" "ntp_server.cpp" "ntp_time.cpp" "serve_path.cpp" "settings.cpp" "tx_lag.cpp" "ubx.cpp" "web_server.cpp"
                        REQUIRES settingsbase webserver jsonwrapper nvsstoragemanager
-                       PRIV_REQUIRES esp_eth esp_netif esp_http_server nvs_flash
+                       PRIV_REQUIRES console esp_eth esp_netif esp_http_server nvs_flash
                                      esp_app_format app_update esp_timer lwip
                                      esp_driver_uart esp_driver_gpio esp_driver_mcpwm
                        INCLUDE_DIRS ".")

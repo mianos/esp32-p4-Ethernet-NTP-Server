@@ -77,7 +77,6 @@ private:
     static bool readJsonBodyTimed(httpd_req_t *req, JsonWrapper &out);
 
     /* Point the DHCP client's option-12 name at a renamed device. */
-    static void apply_hostname(const std::string &hostname);
 
     bool m_started = false;
 };

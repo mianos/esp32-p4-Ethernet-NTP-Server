@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 
 #include "clock_source.h"
+#include "config_apply.h"
 #include "eth_link.h"
 #include "gps_time.h"
 #include "net_log.h"
@@ -162,24 +163,6 @@ void NtpWebServer::register_routes()
     }
 }
 
-/* The DHCP client embeds the hostname in its requests (option 12), but it only
- * builds them at DISCOVER/REQUEST time, so a change here reaches the lease on
- * the next renewal. */
-void NtpWebServer::apply_hostname(const std::string &hostname)
-{
-    esp_netif_t *netif = net_state::netif();
-    if (netif == nullptr) {
-        return;
-    }
-
-    esp_err_t err = esp_netif_set_hostname(netif, hostname.c_str());
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "set hostname '%s': %s", hostname.c_str(), esp_err_to_name(err));
-        return;
-    }
-    ESP_LOGI(TAG, "hostname now %s (DHCP sends it on the next lease)", hostname.c_str());
-}
-
 void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
 {
     json.AddItem("time_set", clockIsSet());
@@ -201,6 +184,9 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
 
     json.AddItem("hostname", settings.hostname());
     json.AddItem("link_up", net_state::linkUp());
+    /* Which addressing mode is configured, so a box on a static address says so
+     * rather than being inferred from a lease that will never arrive. */
+    json.AddItem("ip_mode", Settings::instance().ipMode());
 
     esp_netif_ip_info_t ip_info;
     esp_netif_t        *netif = net_state::netif();
@@ -402,24 +388,16 @@ esp_err_t NtpWebServer::config_post_handler(httpd_req_t *req)
 
     /* Started here rather than from an onChange hook: applyJson also runs at
      * boot during load, before lwIP is up. */
-    if (doc.ContainsField("logHost") || doc.ContainsField("logPort")) {
-        net_log::start();
-    }
+    const bool logChanged = doc.ContainsField("logHost") || doc.ContainsField("logPort");
     if (settings.toJson().ToString() != before) {
         settings.save();
     }
     settings.log();
 
-    if (settings.hostname() != hostname_before) {
-        apply_hostname(settings.hostname());
-    }
-    /* A changed timeSource/ntpServer takes effect now, not at the next boot.
-     * The arbiter goes first: leaving "auto" has to hand the clock back before
-     * NtpTime decides whether a client should be running at all. */
-    ClockSource::instance().applySettings();
-    NtpTime::instance().applySettings();
-    /* And so does serveNtp: off stops the responder, on starts it. */
-    NtpServer::instance().applySettings();
+    /* Shared with the console: a changed address, hostname or timeSource has to
+     * take effect now rather than at the next boot, and both surfaces have to
+     * do it in the same order. */
+    config_apply::afterChange(hostname_before, logChanged);
     ESP_LOGI(TAG, "POST /config from %s", caller.c_str());
 
     return sendJson(req, settings.toJson(), 200);
@@ -429,14 +407,16 @@ esp_err_t NtpWebServer::config_reset_post_handler(httpd_req_t *req)
 {
     const std::string caller = callerAddress(req);
 
-    Settings &settings = Settings::instance();
+    Settings          &settings        = Settings::instance();
+    const std::string hostname_before = settings.hostname();
+    /* Defaults do not include the boot count: it describes the device, not the
+     * configuration, and a reset that zeroes it hides the reboot it precedes. */
+    const std::string boots = settings.boots();
     settings.resetToDefaults(); /* fires the tz change callback */
+    settings.setBoots(boots);
     settings.save();
     settings.log();
-    apply_hostname(settings.hostname());
-    ClockSource::instance().applySettings();
-    NtpTime::instance().applySettings();
-    NtpServer::instance().applySettings(); /* serveNtp is back to its default */
+    config_apply::afterChange(hostname_before, true);
     ESP_LOGW(TAG, "POST /config/reset from %s: back to compiled-in defaults", caller.c_str());
 
     JsonWrapper resp;

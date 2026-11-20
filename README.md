@@ -179,10 +179,48 @@ curl -X POST -d '{"logHost":"192.0.2.20"}' http://<box>/config
 nc -ukl 5514
 ```
 
-The console is unchanged and still gets every byte. The hook only formats and
-pushes at a ring; a task drains it and sends, so a busy netif cannot stall the
-GPS task and a full ring drops lines rather than the log call waiting. Off by
-default, and `""` clears it.
+The console still gets every byte too. The hook only formats and pushes at a
+ring; a task drains it and sends, so a busy netif cannot stall the GPS task and a
+full ring drops lines rather than the log call waiting. Off by default, and `""`
+clears it.
+
+## The serial console
+
+The USB-C port is the console *and* the flashing port -- one CH343 bridge to
+UART0 -- so the cable that programmes the box is the shell on it. That is the
+point: when the box is on a link with no DHCP server, or on an address it cannot
+reach, the cable is the way back in.
+
+`idf.py monitor` for it, or raw (the REPL expects CR, and the logs interleave):
+
+```console
+$ stty -F /dev/ttyACM0 115200 raw -echo -hupcl
+$ printf 'help\r' > /dev/ttyACM0
+```
+
+| Command | Effect |
+|---|---|
+| `net` | show mode, address, gateway, resolver, link |
+| `net static <cidr> <gw> [dns]` | set a static address, persist and apply it live |
+| `net dhcp` | back to the DHCP client |
+| `config` | print the stored config |
+| `config set <key> <value>` | any key from the table under [HTTP API](#http-api) |
+| `config reset` | compiled-in defaults; the boot count survives |
+| `hostname`, `serve`, `timesource`, `ntpserver`, `log` | the single-value shorthands |
+| `nvs_list`, `nvs_get`, `version`, `free`, `heap`, `tasks`, `restart` | IDF's `cmd_nvs` / `cmd_system` |
+
+Every write goes through `Settings::applyJson()`, the same validation `POST
+/config` uses, so the console cannot reach a state the HTTP surface rejects: a
+bad address is refused at the prompt rather than stored. `log_level` is
+`cmd_system`'s own, per tag.
+
+The console is unauthenticated. It is whatever the USB cable can reach, and
+`config` prints the whole blob -- there are no secrets in it, and keeping it that
+way is cheaper than redacting.
+
+`config reset` clears `gpsFixedPos`, `antDelayNs` and `gpsUserDelayNs` with
+everything else, because they are settings like any other. A surveyed and
+calibrated box needs those put back, so record them before a reset.
 
 ## Expected log (captured from this board)
 
@@ -495,6 +533,10 @@ are not registered are ignored, so an older/newer client will not break it:
 | `timeSource` | `dhcp`                         | `dhcp` takes the upstream NTP server from DHCP option 42, `static` polls `ntpServer`, `gps` disciplines the clock from the u-blox receiver over UART plus its PPS line ([GPS](#gps-u-blox-lea-8--pps)), `auto` is `gps` with the upstream behind it ([fallback](#fallback-when-the-receiver-stops)), `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
 | `ntpServer` | *(empty)*                       | Upstream NTP host or address, used when `timeSource` is `static` and preferred over the lease's server when it is `auto`. An IPv6 literal is stored but cannot sync — lwIP's SNTP client resolves A records only ([IPv6](#ipv6)). |
 | `serveNtp` | `on`                            | `off` stops the UDP/123 responder within a second and starts it again on `on`, no reboot. Serving an unlocked clock is safe by construction: it answers stratum 16 with LI 3, which tells clients to ignore it. |
+| `ipMode` | `dhcp`                            | `static` programs the address below instead of taking a lease. It exists for a link with no DHCP server on it; a `static` whose address does not parse falls back to DHCP at boot and says so. |
+| `ipAddress` | *(empty)*                      | `a.b.c.d/len` with len 1..30. Programmed only when `ipMode` is `static`. |
+| `ipGateway` | *(empty)*                      | Dotted quad, optional even in `static` mode: a box with an address and no route is still on the wire. |
+| `ipDns` | *(empty)*                          | Dotted quad, optional. Empty clears the resolver rather than inheriting the lease's. |
 
 ```console
 $ curl -s -X POST -H 'Content-Type: application/json' \

@@ -58,6 +58,13 @@ public:
      * where it is a watchdog, unlimited where it is a human on the test hook. */
     esp_err_t restart(const char *why);
 
+    /* Program the netif from the addressing settings and bring the address up.
+     * Called at boot and by every surface that changes them (POST /config, the
+     * console). Falls back to DHCP rather than failing hard when a stored static
+     * value does not parse; atBoot suppresses the client restart, which the
+     * netif's own connected action would duplicate. */
+    esp_err_t applySettings(bool atBoot = false);
+
     /* How many times the link has been restarted this boot. */
     uint32_t restarts() const { return m_restarts; }
 
@@ -97,6 +104,7 @@ private:
 
     void onEthEvent(int32_t event_id);
     void onGotIp(const ip_event_got_ip_t &event);
+    void onAddressUp(const esp_netif_ip_info_t &ip_info);
 #if CONFIG_LWIP_IPV6
     void onGotIp6(const ip_event_got_ip6_t &event);
 #endif
@@ -118,4 +126,7 @@ private:
     int64_t           m_linkDownSinceUs = 0;
     bool              m_restartCapLogged = false;
     bool m_ntpStarted = false;
+    /* Set while the active address came from the settings rather than a lease:
+     * it picks the log wording and keeps the two paths honest. */
+    bool m_staticAddr = false;
 };

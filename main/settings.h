@@ -125,6 +125,30 @@ public:
     const std::string &logHost() const { return m_logHost; }
     const std::string &logPort() const { return m_logPort; }
     const std::string &boots() const { return m_boots; }
+    /* Settable so a config reset can put the count back: the counter is the one
+     * thing in the blob that records the device rather than the config, and
+     * losing it hides the reboot that a reset usually precedes. */
+    void setBoots(const std::string &v) { m_boots = v; }
+
+    /* How the interface is addressed. "dhcp" is what the box has always done
+     * and stays the default; "static" exists for a link with no DHCP server on
+     * it, where the alternative is not having the link at all.
+     *
+     * These are the only settings that can strand a device, so they are
+     * validated where they are written -- settings.cpp rejects what does not
+     * parse, eth_link.cpp falls back to DHCP if it still somehow does not --
+     * and the console is the way back in.
+     *
+     * The address is stored as "a.b.c.d/len": one string, one parser, and no
+     * way to save a netmask that disagrees with the prefix. */
+    const std::string &ipMode() const { return m_ipMode; }
+    const std::string &ipAddress() const { return m_ipAddress; }
+    const std::string &ipGateway() const { return m_ipGateway; }
+    const std::string &ipDns() const { return m_ipDns; }
+    void setIpMode(const std::string &v) { m_ipMode = v; }
+    void setIpAddress(const std::string &v) { m_ipAddress = v; }
+    void setIpGateway(const std::string &v) { m_ipGateway = v; }
+    void setIpDns(const std::string &v) { m_ipDns = v; }
     void setGpsTimeMode(const std::string &v) { m_gpsTimeMode = v; }
     void setGpsFixedPos(const std::string &v) { m_gpsFixedPos = v; }
     void setGpsSurvey(const std::string &v) { m_gpsSurvey = v; }
@@ -139,6 +163,10 @@ private:
     static constexpr const char *TAG = "settings";
 
     Settings(NvsStorageManager &nvs);
+
+    /* Per-key validation for the addressing settings; false means the value in
+     * the request is dropped and the stored one is kept. */
+    static bool validAddressing(const char *key, const std::string &value);
 
     /* setenv()/tzset() from the stored POSIX TZ string. Garbage there simply
      * leaves localtime() on UTC, so it needs no validation of its own. */
@@ -158,6 +186,10 @@ private:
     std::string m_logHost;
     std::string m_logPort    = "5514";
     std::string m_boots      = "0";
+    std::string m_ipMode     = "dhcp";
+    std::string m_ipAddress;
+    std::string m_ipGateway;
+    std::string m_ipDns;
 
     /* "off", "dhcp", "static", "gps": anything else is Off. Used to seed
      * m_timeSourceEnum in begin() and on every change. */

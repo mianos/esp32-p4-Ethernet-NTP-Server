@@ -85,6 +85,9 @@ own address and its replies carry its own source. That keeps the timestamps and 
 
 ## 4. Phase 2 — firmware: static addressing and a serial console
 
+Built, flashed and exercised on 2026-11-20; the README section *The serial
+console* is the operator-facing half and the source is main/console.cpp.
+
 The console exists to remove the DHCP server from the wire and to keep the box
 recoverable when the network is wrong. The USB cable stays in `esp-builder`'s
 `/dev/ttyACM0` whatever happens to the Ethernet, so the console is the rollback.

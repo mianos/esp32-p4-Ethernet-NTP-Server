@@ -1,4 +1,16 @@
 dependencies:
+  cmd_nvs:
+    dependencies: []
+    source:
+      path: ../../esp-idf/examples/system/console/advanced/components/cmd_nvs
+      type: local
+    version: '*'
+  cmd_system:
+    dependencies: []
+    source:
+      path: ../../esp-idf/examples/system/console/advanced/components/cmd_system
+      type: local
+    version: '*'
   espressif/cjson:
     component_hash: e788323270d90738662d66fffa910bfe1fba019bba087f01557e70c40485b469
     dependencies:
@@ -64,11 +76,13 @@ dependencies:
       type: git
     version: 8af0f72ffc80f2bdfcee9c9717780622dccfbc27
 direct_dependencies:
+- cmd_nvs
+- cmd_system
 - espressif/cjson
 - jsonwrapper
 - nvsstoragemanager
 - settingsbase
 - webserver
-manifest_hash: 1d615406fbdf56a3d361a0a5c3b7e6c452d92bc1d32ba9824b4e050a47f64237
+manifest_hash: da16a976655828eb9eb163b69861d2cdb7ee2d734f690eede1b31801c50e81ec
 target: esp32p4
 version: 3.0.0

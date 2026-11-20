@@ -4,9 +4,11 @@ CONFIG_IDF_TARGET="esp32p4"
 CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
 
 # Console/logs on UART0. The board's USB-C port is a CH343 USB-UART bridge
-# (VID 0x1A86, PID 0x55D3, CDC-ACM -> /dev/tty.usbmodem*), wired to the P4's
-# UART0. It is the same port esptool flashes over, so one cable does both.
-# (The P4's native USB-Serial/JTAG is *not* on that connector.)
+# (VID 0x1A86, PID 0x55D3, CDC-ACM -> /dev/ttyACM*), wired to the P4's UART0. It
+# is the same port esptool flashes over, so one cable does both -- which is also
+# why the console REPL lives there: it is the only reachable port.
+# (The P4's native USB-Serial/JTAG is *not* on that connector: there is no 303a
+# device on the bus, only the 1a86 one.)
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200
 
@@ -76,3 +78,7 @@ CONFIG_MCPWM_CTRL_FUNC_IN_IRAM=y
 # seconds. Requests still succeed on the retry, so it read as log noise
 # rather than the shortage it is.
 CONFIG_LWIP_MAX_SOCKETS=16
+
+# `tasks` in the console needs both; nothing else in the firmware does.
+CONFIG_FREERTOS_USE_TRACE_FACILITY=y
+CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y

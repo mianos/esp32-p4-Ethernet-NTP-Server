@@ -19,9 +19,11 @@
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "eth_link.h"
+#include "net_addr.h"
 #include "net_log.h"
 #include "net_state.h"
 #include "ntp_server.h"
@@ -34,6 +36,53 @@ namespace {
 
 /* The device logs under one tag whichever file emits the line. */
 constexpr const char *TAG = "eth_demo";
+
+/* Addressing is changed from the httpd task and from the console task, while
+ * the driver's event task may be walking the same netif. Recursive, because
+ * applySettings() calls onAddressUp() and the CONNECTED path can nest there. */
+SemaphoreHandle_t s_addrLock = nullptr;
+
+struct AddressLock {
+    AddressLock() { xSemaphoreTakeRecursive(s_addrLock, portMAX_DELAY); }
+    ~AddressLock() { xSemaphoreGiveRecursive(s_addrLock); }
+};
+
+/* The stored static address as esp_netif wants it, or false if it does not
+ * parse. The gateway is optional and a bad one is dropped rather than fatal:
+ * a box with an address and no default route is still reachable on the wire. */
+bool buildIpInfo(const Settings &settings, esp_netif_ip_info_t &info)
+{
+    esp_ip4_addr_t addr{};
+    uint8_t        prefix = 0;
+    if (!net_addr::parseCidr(settings.ipAddress(), addr, prefix)) {
+        return false;
+    }
+    info.ip      = addr;
+    info.netmask = net_addr::maskFromPrefix(prefix);
+    info.gw      = {};
+    const std::string &gw = settings.ipGateway();
+    if (!gw.empty() && !net_addr::parseQuad(gw, info.gw)) {
+        ESP_LOGW(TAG, "gateway '%s' does not parse -- left unset", gw.c_str());
+        info.gw = {};
+    }
+    return true;
+}
+
+/* Resolver: set, or cleared when the setting is empty (a DHCP lease would
+ * otherwise leave its own behind). */
+void applyResolver(const std::string &text)
+{
+    esp_netif_t *netif = net_state::netif();
+    if (netif == nullptr) {
+        return;
+    }
+    esp_netif_dns_info_t dns{};
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    if (!text.empty() && !net_addr::parseQuad(text, dns.ip.u_addr.ip4)) {
+        ESP_LOGW(TAG, "resolver '%s' does not parse -- left unset", text.c_str());
+    }
+    esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns);
+}
 
 /* ---- Board wiring (Waveshare ESP32-P4-ETH, IP101GRI) --------------------
  * Reference design values. MDC/MDIO are the SMI (management) bus, the rest
@@ -222,6 +271,12 @@ EthernetLink &EthernetLink::instance()
 
 esp_err_t EthernetLink::begin()
 {
+    s_addrLock = xSemaphoreCreateRecursiveMutex();
+    if (s_addrLock == nullptr) {
+        ESP_LOGE(TAG, "no memory for the addressing mutex");
+        return ESP_ERR_NO_MEM;
+    }
+
     esp_err_t err = installDriver();
     if (err != ESP_OK) {
         return err;
@@ -248,6 +303,16 @@ esp_err_t EthernetLink::begin()
 #endif
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "event handler registration failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* Addressing before the MAC: with the DHCP client stopped and a valid
+     * static address in place, the netif's own connected action posts GOT_IP
+     * for it, so the rest of the bring-up needs no static case at all. Under
+     * DHCP this is a no-op and the default action starts the client at link-up,
+     * which is why the boot-time call passes atBoot. */
+    err = applySettings(true);
+    if (err != ESP_OK) {
         return err;
     }
 
@@ -340,6 +405,57 @@ esp_err_t EthernetLink::attachNetif()
         return ESP_FAIL;
     }
     return esp_netif_attach(m_netif, glue);
+}
+
+esp_err_t EthernetLink::applySettings(bool atBoot)
+{
+    if (m_netif == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const Settings     &settings = Settings::instance();
+    const bool          wantStatic = settings.ipMode() == "static";
+    esp_netif_ip_info_t info{};
+    const bool          usable = wantStatic && buildIpInfo(settings, info);
+
+    AddressLock lock;
+
+    if (usable) {
+        /* Tolerated: the client is normally already stopped by the previous
+         * static apply, and this is what actually keeps a stored DHCP request
+         * from overwriting the address a second later. */
+        esp_netif_dhcpc_stop(m_netif);
+        esp_err_t err = esp_netif_set_ip_info(m_netif, &info);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_netif_set_ip_info: %s -- falling back to DHCP", esp_err_to_name(err));
+            esp_netif_dhcpc_start(m_netif);
+            m_staticAddr = false;
+            return err;
+        }
+        esp_netif_set_default_netif(m_netif);
+        applyResolver(settings.ipDns());
+        m_staticAddr = true;
+        /* set_ip_info() does not reliably post GOT_IP the way a lease does, so
+         * the address-up path is entered directly -- and it is also where the
+         * address gets logged, so there is only one line per change. */
+        onAddressUp(info);
+        return ESP_OK;
+    }
+
+    if (wantStatic) {
+        ESP_LOGW(TAG, "ipMode=static but '%s' does not parse -- staying on DHCP",
+                 settings.ipAddress().c_str());
+    }
+    m_staticAddr = false;
+    if (atBoot) {
+        /* The connected action starts the client; starting it here as well
+         * would only race that. */
+        return ESP_OK;
+    }
+    /* ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED is the normal case for a request
+     * that changed something else. */
+    esp_netif_dhcpc_start(m_netif);
+    return ESP_OK;
 }
 
 esp_err_t EthernetLink::restart(const char *why)
@@ -484,10 +600,17 @@ void EthernetLink::gotIpHandler(void *arg, esp_event_base_t, int32_t, void *even
 
 void EthernetLink::onGotIp(const ip_event_got_ip_t &event)
 {
-    const esp_netif_ip_info_t &ip_info = event.ip_info;
+    onAddressUp(event.ip_info);
+}
 
+/* The address is up, however it got here: a lease, or a static one the console
+ * or POST /config programmed. Everything below hangs off having an address, so
+ * both enter it through here rather than through two copies. */
+void EthernetLink::onAddressUp(const esp_netif_ip_info_t &ip_info)
+{
     m_haveIp.store(true, std::memory_order_relaxed);
-    ESP_LOGI(TAG, "DHCP lease: ip " IPSTR "  mask " IPSTR "  gw " IPSTR,
+    ESP_LOGI(TAG, "%s: ip " IPSTR "  mask " IPSTR "  gw " IPSTR,
+             m_staticAddr ? "static address" : "DHCP lease",
              IP2STR(&ip_info.ip), IP2STR(&ip_info.netmask), IP2STR(&ip_info.gw));
     ESP_LOGI(TAG, "ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP");
 
@@ -569,7 +692,7 @@ void EthernetLink::statusLoop()
         if (m_linkDownSinceUs == 0) {
             m_linkDownSinceUs = nowUs;
         }
-        ESP_LOGI(TAG, "waiting for link + DHCP lease (is the RJ45 plugged in?) -- %lld s",
+        ESP_LOGI(TAG, "waiting for link + address (is the RJ45 plugged in?) -- %lld s",
                  static_cast<long long>((nowUs - m_linkDownSinceUs) / 1000000));
         if (tick++ % kPhyStatusEvery == 0) {
             logPhyStatus();

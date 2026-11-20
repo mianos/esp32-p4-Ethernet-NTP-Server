@@ -1,6 +1,8 @@
 #include "net_log.h"
 #include "settings.h"
 
+#include "net_addr.h"
+
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -22,7 +24,9 @@ constexpr const char *kNvsKey       = "config";
  * lets the receiver stop solving for itself, which is what the interface
  * description asks for before any timing claim. */
 constexpr const char *kKeys[] = {"hostname",  "tz",           "timeSource", "ntpServer",
-                                 "serveNtp",  "gpsFixedPos",  "logHost",    "logPort"};
+                                 "serveNtp",  "gpsFixedPos",  "logHost",    "logPort",
+                                 "ipMode",    "ipAddress",    "ipGateway",  "ipDns",
+                                 "gpsTimeMode", "gpsSurvey", "antDelayNs", "gpsUserDelayNs"};
 
 }  // namespace
 
@@ -49,6 +53,10 @@ Settings::Settings(NvsStorageManager &nvs)
     field("logHost", m_logHost);
     field("logPort", m_logPort);
     field("boots", m_boots);
+    field("ipMode", m_ipMode);
+    field("ipAddress", m_ipAddress);
+    field("ipGateway", m_ipGateway);
+    field("ipDns", m_ipDns);
 
     /* A new TZ string takes effect immediately, including after POST
      * /config/reset. Safe to attach here: it only touches this object and the C
@@ -117,6 +125,44 @@ void Settings::applyTimezone() const
     tzset();
 }
 
+bool Settings::validAddressing(const char *key, const std::string &value)
+{
+    if (std::strcmp(key, "ipMode") == 0) {
+        if (value == "dhcp" || value == "static") {
+            return true;
+        }
+        ESP_LOGW(TAG, "ipMode '%s' ignored: expected dhcp or static", value.c_str());
+        return false;
+    }
+    if (std::strcmp(key, "ipAddress") == 0) {
+        esp_ip4_addr_t addr{};
+        uint8_t        prefix = 0;
+        if (value.empty() || net_addr::parseCidr(value, addr, prefix)) {
+            return true;
+        }
+        ESP_LOGW(TAG, "ipAddress '%s' ignored: expected a.b.c.d/len with len 1..30", value.c_str());
+        return false;
+    }
+    if (std::strcmp(key, "gpsTimeMode") == 0) {
+        if (value == "moving" || value == "fixed" || value == "survey") {
+            return true;
+        }
+        ESP_LOGW(TAG, "gpsTimeMode '%s' ignored: expected moving, fixed or survey", value.c_str());
+        return false;
+    }
+    /* Only the two quad-shaped keys are checked here; everything else in
+     * kKeys validates itself or not at all. */
+    if (std::strcmp(key, "ipGateway") != 0 && std::strcmp(key, "ipDns") != 0) {
+        return true;
+    }
+    esp_ip4_addr_t addr{};
+    if (value.empty() || net_addr::parseQuad(value, addr)) {
+        return true;
+    }
+    ESP_LOGW(TAG, "%s '%s' ignored: expected a dotted quad", key, value.c_str());
+    return false;
+}
+
 void Settings::applyJson(const JsonWrapper &doc)
 {
     /* SettingsBase applies whatever keys it sees, so cap the values on the way
@@ -137,6 +183,12 @@ void Settings::applyJson(const JsonWrapper &doc)
         if (value.size() > limit) {
             ESP_LOGW(TAG, "'%s' truncated to %u characters", key, static_cast<unsigned>(limit));
             value.resize(limit);
+        }
+        /* Addressing is validated here rather than in eth_link.cpp, so a bad
+         * value never reaches NVS and never survives a reboot. An empty string
+         * is a legitimate way to clear a gateway or a resolver. */
+        if (!validAddressing(key, value)) {
+            continue;
         }
         capped.AddItem(key, value);
     }

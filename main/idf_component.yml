@@ -19,5 +19,12 @@ dependencies:
     path: components/webserver
     version: main
 
+  ## The console's ready-made system and NVS commands, straight from the IDF
+  ## tree. Path dependencies, so they follow the installed IDF version.
+  cmd_system:
+    path: ${IDF_PATH}/examples/system/console/advanced/components/cmd_system
+  cmd_nvs:
+    path: ${IDF_PATH}/examples/system/console/advanced/components/cmd_nvs
+
   ## cJSON left the IDF core in v6; jsonwrapper depends on it too.
   espressif/cjson: "^1.7.19"
