@@ -53,8 +53,13 @@ private:
     static constexpr int64_t kStartNs = 150000;
     /* A client that steps its clock must not set the claim for the day. */
     static constexpr int64_t kCapNs = 500000;
-    /* Forgotten at this rate: 150 us gone in about an hour. */
-    static constexpr int64_t kDecayNsPerMin = 2000;
+    /* Forgotten proportionally, so an excursion of any size fades in about the
+     * same time instead of a 40 ms one taking all day. 4 % a minute is most of
+     * the way back in half an hour. */
+    static constexpr double kDecayPerMin = 0.04;
+    /* The first minutes after a boot are the servo converging and every client
+     * rediscovering the box, so a range taken there is a boot fact. */
+    static constexpr int64_t kSettleUs = 180000000;
     static constexpr int64_t kPeriodUs      = 60000000;
     static constexpr uint32_t kMinSamples   = 4;
 
