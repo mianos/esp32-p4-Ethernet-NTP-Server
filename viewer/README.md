@@ -1,23 +1,23 @@
 # esp32p4-ntp sky view
 
 A local page for the P4 timing box: satellite sky plot, receiver health, signal
-and framing counters. It reads the box's own JSON and draws it; it does not
-configure anything.
+and framing counters, and long-term charts. It reads the box's own JSON and draws
+it; it does not configure anything.
 
-It lives here rather than in its own repository because it reads this
-firmware's JSON: a field renamed in `web_server.cpp` breaks it, and the two
-are easier kept in step side by side.
+It lives here rather than in its own repository because it reads this firmware's
+JSON: a field renamed in `web_server.cpp` breaks it.
 
     ./setup.sh          # once
     ./run.sh            # http://127.0.0.1:8765/
 
+`BOX_HOST` points it at another box; see [Environment](#environment).
+
 ## Why a server and not a page that fetches the box directly
 
-The box's httpd has a single worker. A browser hitting it per tab, per refresh,
-means the poll rate depends on how many tabs are open, and the plot changes
-shape with load. Here one process polls on a fixed 2 s timer and every tab reads
-the same snapshot, so the cost against the box is constant and the page renders
-at a steady rate.
+The box's httpd has a single worker, so a browser hitting it per tab means the
+poll rate depends on how many tabs are open and the plot changes shape with load.
+Here one process polls on a fixed timer and every tab reads the same snapshot, so
+the cost against the box is constant.
 
 The last good answer is kept and its age shown when a poll fails, so a dropped
 poll dims a label instead of blanking the page.
@@ -29,14 +29,14 @@ C/N0, angle is azimuth with north up, and the rings are 30° of elevation. In-us
 satellites are ringed in white, unhealthy ones dashed.
 
 Colour is switchable. **C/N0** is signal strength. **Residual** is the receiver's
-pseudorange residual, which is multipath itself rather than a proxy for it --
+pseudorange residual, which is multipath itself rather than a proxy for it —
 they disagree exactly where it matters, because a strong reflection is loud and
 wrong. The `Res` column carries the same number in centimetres.
 
 Before there is a fix the receiver sends elevation `-91` with azimuth `0`. That
 is a sentinel, not a position, so rather than stacking every satellite on the
-horizon at due north the plot says "geometry pending" and lists the rows
-without positions.
+horizon at due north the plot says "geometry pending" and lists the rows without
+positions.
 
 ## Beyond signal
 
@@ -44,8 +44,8 @@ without positions.
   fix with invalid time is the state that quietly serves rubbish, so it gets its
   own cell rather than being folded into "synced".
 - **Responder** — answered, per-minute rate, KoD, dropped, distinct clients,
-  last-served age, leap, root delay and dispersion. A rate-limited client and
-  one that stopped asking both leave a request count flat; these separate them.
+  last-served age, leap, root delay and dispersion. A rate-limited client and one
+  that stopped asking both leave a request count flat; these separate them.
 - **Receiver** — offset, rate, jitter, tAcc (the receiver's own accuracy
   estimate), root delay, dispersion, servo steps, rate clamps and edge spikes.
   Steps and clamps show a servo fighting the oscillator; a mean offset hides it.
@@ -75,49 +75,39 @@ without positions.
 | `RECORD_S` | `1` — floor on the interval between rows |
 | `RETENTION_D` | `90` days |
 
-## Why it used to shell out to nc
-
-On the Mac this was written on, python and curl both failed to reach a LAN
-address with `EHOSTUNREACH` while `/usr/bin/nc` connected fine — the two back
-to back, one always failing and the other always working. It was the binaries,
-not the network, so the poller shelled out to `nc`.
-
-On a container that quirk is gone and every poll was paying for a fork, so it
-uses `httpx` now. `nc` is no longer needed at runtime.
-
 ## Long-term samples, and adev.py
 
-The sparkline keeps 300 s, which is what the firmware's own 300 s fit is over
-and therefore the most the live page can honestly draw. Anything longer needs
+The sparkline keeps 300 s, which is what the firmware's own 300 s fit is over and
+therefore the most the live page can honestly draw. Anything longer needs
 storage.
 
 Two things are stored and they are not the same kind. `samples` is drained from
 the box's own 900-epoch ring by cursor: those rows carry the receiver's second
 and a sequence, so a viewer restart costs nothing the ring still holds and an
-overrun is written down as a gap. `rx` is our own observation at poll time --
-noise, AGC, C/N0 -- which has no epoch of its own and cannot be restored after
-the fact.
+overrun is written down as a gap. `rx` is our own observation at poll time —
+noise, AGC, C/N0 — which has no epoch of its own and cannot be restored after the
+fact.
 
 `samples` columns: `epoch` (primary key, absolute), `boot`, `seq`, `kind`
 (0 measured, 1 gap), `offset_ns`, `rate_ppm`, `jitter_ns`, `flags`, `sats`.
 
 A gap row is written down rather than left out, because interpolating across one
-invents stability at the longest averaging times, which is where nobody can
-check it by eye. Two things produce one: an epoch the ring had already dropped,
-and a failed poll of our own.
+invents stability at the longest averaging times, which is where nobody can check
+it by eye. Two things produce one: an epoch the ring had already dropped, and a
+failed poll of our own.
 
 `adev.py` reads that file and prints overlapping Allan deviation. Frequency by
 default, since the 1 µs stamp makes phase ADEV a picture of the timer below a
-minute; `--phase` gives the phase form for comparison. Gaps split the series
-into runs and no window spans a hole.
+minute; `--phase` gives the phase form for comparison. Gaps split the series into
+runs and no window spans a hole.
 
 ```
 ./adev.py --db samples.db --max-tau 86400
 ./adev.py --db samples.db --phase --max-tau 600
 ```
 
-Two things the numbers need beside them: with the servo running this measures
-the loop, not the crystal, and tau under 300 s is inside the fit window, so it
+Two things the numbers need beside them: with the servo running this measures the
+loop, not the crystal, and tau under 300 s is inside the fit window, so it
 reports smoothing rather than the oscillator.
 
 ## Notes

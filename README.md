@@ -1,223 +1,179 @@
 # esp32p4-ntp
 
-An NTP server on the ESP32-P4: **Ethernet bring-up + DHCP + ping**, the device's
-HTTP surface (`/healthz`, `/config`, `/config/reset`, `/ntp/sync`, `/gps/pps`)
-using the same REST conventions as the other
-[mianesp](https://github.com/mianos/mianesp) devices, **a stratum-1 reference of
-its own** — a u-blox LEA-M8T on UART1, disciplined by its PPS line, with a frequency
-servo that turns a three-second holdover into a ten-minute one (measured on this
-board: 2 µs across 151 s of missing edges), and the upstream SNTP client kept as
-the other source ([GPS](#gps-u-blox-lea-8--pps)) — and **a responder that serves
-that clock to the LAN on UDP/123** — over IPv4 and IPv6, with a stratum that
-admits what it does and does not know
-([Serving NTP](#serving-ntp-udp123)). The HTTP surface and settings are
-mianesp's own components (`webserver`, `jsonwrapper`, `nvsstoragemanager`,
-`settingsbase`), not local copies of them.
+A stratum-1 NTP server on an ESP32-P4. A u-blox LEA-M8T on UART1 supplies the
+date and time, its PPS line on an interrupt supplies the second boundary, and a
+frequency servo holds the clock over without an edge for ten minutes. The board
+serves NTPv3/v4 on UDP/123 over IPv4 and IPv6 and answers what it can and cannot
+measure truthfully.
 
-Target board: **Waveshare ESP32-P4-ETH** (ESP32-P4NRW32, 32 MB flash,
-IP101GRI 10/100 PHY, RJ45). It came up as an `/dev/cu.usbmodem*` node over the
-USB-C cable (chip reported by esptool: ESP32-P4 rev v3.2).
+It also carries the HTTP surface of the other [mianesp](https://github.com/mianos/mianesp)
+devices — `/healthz`, `/config`, OTA — and a serial console on the flashing
+cable, so a box with no working network is still configurable.
 
-The P4 has an on-chip 10/100 Ethernet MAC but **no PHY**, so the board's
-IP101GRI is driven over RMII. Pins are hard-coded in `main/eth_link.cpp`:
+Target board: **Waveshare ESP32-P4-ETH** (ESP32-P4NRW32, 32 MB flash, IP101GRI
+10/100 PHY, RJ45). The P4 has an Ethernet MAC and no PHY, so the board's IP101 is
+driven over RMII.
 
-| Signal      | GPIO | Notes                                  |
-|-------------|------|----------------------------------------|
-| MDC         | 31   | SMI clock                              |
-| MDIO        | 52   | SMI data                               |
-| PHY nRST    | 51   | active low                             |
-| RMII REF_CLK| 50   | 50 MHz **input** from the PHY          |
-| RMII TX_EN  | 49   |                                        |
-| RMII TXD0   | 34   |                                        |
-| RMII TXD1   | 35   |                                        |
-| RMII RXD0   | 29   |                                        |
-| RMII RXD1   | 30   |                                        |
-| RMII CRS_DV | 28   |                                        |
+## What you need
 
-PHY address 1 (IP101 default, confirmed: ID reads `0x02430c54`). The whole
-table is verified working on this board — DHCP would not complete otherwise —
-but if you ever swap boards, the `kEthPins` table at the top of
-`main/eth_link.cpp` is the only thing to change.
+- that board, its RJ45 on a LAN with a DHCP server, and a clear sky view
+- a u-blox LEA-M8T timing module, on a carrier that brings out UART, PPS and the
+  antenna connector — the firmware was written against a WD22UGRC
+- **a supply on the carrier's `V_ANT` pin (pin 1)**. The board switches antenna
+  power through a transistor pair; it does not generate it. Pin 2 is the module's
+  own Vcc, which is separate. With nothing on pin 1 the preamp is a 10–20 dB
+  attenuator: worse than a passive antenna, not better.
+- an active GNSS antenna. A passive one works and sees less.
+- a USB-C cable, for the first flash and for the console
 
-## Status: working
+No RTC, no display, no button. `timeSource=dhcp` or `static` runs without a
+receiver at all, as a stratum-3 server.
 
-Verified on this unit (2026-11-11): PHY `0x02430c54` at MDIO addr 1, link up,
-DHCP lease `192.0.2.20/24` gw `192.0.2.1`, `ping` 4/4 replies at ~0.6 ms. HTTP
-endpoints answered on the same lease; `/config` survives a reboot (NVS), and
-`/config/reset` restores the compiled-in defaults. The clock steps from the
-DHCP-provided NTP server (option 42) about 2.7 s after the lease, and `/healthz`
-then reports `time_set: true` with a real date.
+## Wiring
 
-Updates go over the network once the two-slot partition table is in place: this
-unit was moved `factory` → `ota_0` by USB, then `ota_0` → `ota_1` → `ota_0` by
-`POST /firmware` over the RJ45, including the fix that turned a rejected
-payload into a `400` rather than a `500`. Settings survived all of it.
+Ethernet is the board's own RJ45 through its own PHY, so there is nothing to
+wire: plug it in. The RMII pins are fixed in the `kEthPins` table at the top of
+`main/eth_link.cpp`:
 
-IPv6 came up beside IPv4 on the same netif with no change to the HTTP handlers:
-`fe80::200:5eff:fe00:5301` link-local plus the SLAAC global
-`2001:db8:1:1:200:5eff:fe00:5301` advertised on the LAN, `ping6` to both, and
-`/healthz` served over `http://[2001:db8:...]/healthz` as well as over IPv4 —
-see [IPv6](#ipv6).
+| Signal      | GPIO | Notes                     |
+|-------------|------|---------------------------|
+| MDC         | 31   | SMI clock                 |
+| MDIO        | 52   | SMI data                  |
+| PHY nRST    | 51   | active low                |
+| RMII REF_CLK| 50   | 50 MHz input from the PHY |
+| RMII TX_EN  | 49   |                           |
+| RMII TXD0   | 34   |                           |
+| RMII TXD1   | 35   |                           |
+| RMII RXD0   | 29   |                           |
+| RMII RXD1   | 30   |                           |
+| RMII CRS_DV | 28   |                           |
 
-The responder serves NTP to both families from one dual-stack socket, and says
-what it is: with the upstream clock fresh it answers `li=0 stratum=3
-refid=192.0.2.1`, and macOS `sntp` takes it
-(`+0.014526 +/- 0.002399 192.0.2.20`). Booted with `timeSource=off` it answers
-`li=3 stratum=16 refid=INIT` and `sntp` refuses it with `Server not
-synchronized` — which is the point ([Serving NTP](#serving-ntp-udp123)).
+PHY address 1, the IP101 default. If you swap boards, that table is the only
+thing to change.
 
-With the u-blox receiver wired (PPS on GPIO14, UART1 on 15/16) and
-`timeSource=gps`, it is a stratum-1 server instead: `li=0 stratum=1
-refid=GPS` over both families, locked 1.4 s after boot — before the lease
-lands — and `/healthz` reported `gps_fix:3`, `gps_sats:5`,
-`gps_pps_age_ms:301` while this was being written, and `offset_us:29` at
-`/gps/info`. Asked at
-the same moment, macOS `sntp` put the board and the upstream server 2 ms apart
-(`+0.136669 ± 0.001914` vs `+0.138697 ± 0.006242`): the two references agree to
-within the LAN's own measurement noise, and the board's clock is the one that is
-not drifting ([GPS](#gps-u-blox-lea-8--pps)).
+The receiver goes on UART1 and one interrupt pin. These are `kTxPin`, `kRxPin`
+and `kPpsPin` at the top of `main/gps_time.cpp`:
 
-The servo and the holdover it buys were measured rather than assumed
-(2026-11-13). `esp_timer` on this unit runs 29.97 ppm slow; the fit says so in
-about a minute, with 0.3 µs of residual. With the PPS suppressed for 151 s — the
-same path a loose wire takes — the clock came back **2 µs** out, and the same test
-before the rate was known came back 4.5 ms out. Suppressed for 701 s it came back
-**4 µs** out, having demoted itself at ten minutes exactly as designed.
-`POST /gps/pps` is that test, and
-it stays in the firmware because a holdover nobody has exercised is a promise.
-`NAV-TIMELS` is parsed too: this receiver reports a GPS-UTC offset of 18 s and no
-pending leap, which is what every reply's leap indicator is built from.
+| Module pin | GPIO | Direction | Carries |
+|---|---|---|---|
+| TX  | 16 | into the P4  | `NAV-PVT` and `NAV-TIMELS` once a second: UTC date and time, fix, satellites, leap offset |
+| RX  | 15 | out of the P4 | configuration frames at boot |
+| PPS | 14 | into the P4, rising edge | the top of the second |
 
-## Build / flash
+The UART says *which* second it is; the PPS says *when* that second started.
+Neither alone is a clock: a NAV-PVT frame lands tens of milliseconds after the
+boundary, and the edge carries no date. They are paired — a frame within 900 ms
+of an unpaired edge becomes an anchor — and every timestamp served is that anchor
+plus elapsed monotonic time, so an `adjtime()` in flight can never reach a reply.
+
+The module's timepulse is asserted at every boot: 1 Hz, `alignToTow`, rising
+edge, UTC grid, 100 ms wide. A pulse somebody moved in `u-center` is the one
+fault that makes the server confidently wrong rather than merely stale, so it is
+sent rather than assumed, and `/healthz` reports a refusal as `gps_tp5_rejected`.
+
+## Build and flash
+
+ESP-IDF v6 with the `esp32p4` target. `build.sh` uses `$IDF_PATH` if it is set
+and otherwise `~/.espressif/v6.0.1/esp-idf`:
 
 ```sh
-cd esp32p4-ntp
+./build.sh            # build
 ./build.sh flash      # build + flash over USB
 ./build.sh monitor    # build + flash + serial log (Ctrl-] to quit)
-curl --data-binary @build/esp32p4_ntp.bin http://<ip>/firmware   # update over Ethernet
+./build.sh erase      # erase the whole flash
 ```
 
-USB is only needed the first time (or to recover): it is the only transport the
-ROM bootloader speaks, so the two-slot partition table has to be written with a
-cable. After that, `POST /firmware` installs builds over the network — see
-[Updating over Ethernet](#updating-over-ethernet-ota).
+`PORT=` picks the serial node if the guess is wrong. On macOS use the
+`/dev/cu.*` node: `/dev/tty.*` intermittently reports `EBUSY`.
 
-`build.sh` uses the ESP-IDF install `$IDF_PATH` points at (exported by
-`idf.py export`, or set it yourself) and auto-detects the board's serial node
-from `/dev/cu.usbmodem*`, so override with `PORT=...` if it picks the wrong one.
-Use the `/dev/cu.*` node on macOS: `/dev/tty.*` intermittently reports `EBUSY`
-here.
+The first build fetches the mianesp components over git, so it needs an SSH key
+with read access to `mianos/mianesp`. They land in `managed_components/`, which
+is git-ignored and cached after the first build; `espressif/cjson` comes from the
+component registry and needs network once.
 
-The lwIP SNTP/DHCP options, the IPv6/SLAAC options and the partition table
-(`TWO_OTA_LARGE`: `nvs`, `otadata`, `phy_init`, `ota_0` 1700 K, `ota_1` 1700 K)
-live in `sdkconfig.defaults`, which only seeds a *fresh* `sdkconfig`; an
-existing one keeps its old values, so after pulling a change like this run
-`rm sdkconfig` (or `idf.py menuconfig`) before building. `nvs` sits at `0x9000`
-in both the old single-app table and this one, so settings survive the swap.
+`sdkconfig.defaults` holds the required options — lwIP SNTP/DHCP-option-42,
+IPv6/SLAAC, and the two-OTA partition table (`nvs`, `otadata`, `phy_init`,
+two 1700 K app slots). It only seeds a *fresh* `sdkconfig`; after pulling a
+change like that, `rm sdkconfig` or run `idf.py menuconfig` before building.
+`nvs` sits at the same offset in both partition tables, so settings survive.
 
+USB is only needed the first time, or to recover. After that, updates go over the
+network — see [Updating over the network](#updating-over-the-network).
 
-Console output goes to **UART0**, which on this board is wired to the USB-C
-port's CH343 USB-UART bridge (VID `0x1A86`, PID `0x55D3`, enumerates as
-`/dev/tty.usbmodem*`), i.e. the same cable used for flashing. The P4's
-native USB-Serial/JTAG is not on that connector, which is why
-`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` yields a completely silent log.
+## First boot
 
-## What it does
+The console is UART0, which on this board is the USB-C port's CH343 bridge: the
+cable that flashes it is the shell on it. `idf.py monitor` opens both.
 
-1. `esp_eth_mac_new_esp32()` + RMII pin map → EMAC up.
-2. `esp_eth_phy_new_generic()` → standard IEEE 802.3 PHY driver (IP101
-   autonegotiates 10/100, full/half duplex).
-3. `ESP_NETIF_DEFAULT_ETH()` → DHCP client starts automatically, and IPv6 comes
-   up beside it: a `fe80::` link-local on every link-up, plus a global address
-   from the router's advertisements (see [IPv6](#ipv6)).
-4. lwIP answers **ICMP echo** once the netif has an address, over IPv4 and IPv6,
-   so the board is pingable with no application code.
-5. Diagnostics kept on purpose: at boot it scans the 32 MDIO addresses and
-   prints the PHY ID, and while there is no IP it prints `BMSR` every 5 s
-   (`link` / `autoneg_done`). If MDIO is miswired you get
-   `phy: MDIO read failed` instead — a one-line answer to "are my pins right?".
-6. Starts an HTTP server on port 80 with an address on the first DHCP lease
-   (see [HTTP API](#http-api)). `esp_http_server` binds `in6addr_any` once lwIP
-   has IPv6, so that one server is reachable over both families.
-7. Starts a u-blox receiver's reference — UART1 plus the PPS interrupt — and,
-   when `timeSource=gps`, serves its clock: a stratum-1 reference on the board
-   itself ([GPS](#gps-u-blox-lea-8--pps)). With `timeSource=dhcp`/`static` the
-   SNTP **client** (`NtpTime`) steps the clock instead, from the server DHCP
-   option 42 named or one configured by hand, so the responder still has real
-   time to serve ([Clock (test mode)](#clock-test-mode)).
-
-The app code is C++ (`.cpp` + classes) on top of those components: `Settings`
-is a `settingsbase`/`SettingsBase` subclass, the HTTP handlers are
-`NtpWebServer : webserver`/`WebServer`, and `Settings`, `NtpTime`, `GpsTime`,
-`NtpServer`, `NtpWebServer` and `EthernetLink` are singletons reached through
-`instance()`, with httpd's, esp_event's and the GPIO interrupts' C callbacks as
-static members that take the instance from the `arg` pointer. `webserver` is the
-network-agnostic base — the WiFi endpoints (`/reset`, `/set_hostname`) live in
-`wifiwebserver`, which this firmware does not pull, because the P4 has no radio.
-
-`EthernetLink` is also where the C idioms go: the board's pads are one
-`constexpr RmiiPins kEthPins` table copied in by `applyPinMap()`, the MAC and
-PHY instances are `std::unique_ptr`s with `del()` deleters (released to the
-driver once it owns them, so a failed bring-up has no cleanup branches), PHY
-registers read as `std::optional<uint32_t>`, and the MAC arrives as a
-`std::string`.
-
-Each subsystem owns a `.[ch]pp` pair, so `main/main.cpp` holds `app_main()` and
-nothing else — and `app_main()` is just boot order: NVS, settings, netif, clock,
-link. The Ethernet link, which is the longest of those, is `eth_link.cpp`; the
-boot sequence reads as five calls because of it.
-
-## Watching it over the network
-
-There is no radio, so a serial cable is the only way to see the console on the
-bench -- but once the box is somewhere awkward the LAN is what is left. Setting
-`logHost` (a dotted quad, not a name) and `logPort` duplicates `ESP_LOG` to UDP
-and a phone on the WiFi can follow it:
+A healthy boot looks like this (addresses and MAC are placeholders; the box
+prints its own):
 
 ```
-curl -X POST -d '{"logHost":"192.0.2.20"}' http://<box>/config
-nc -ukl 5514
+I (385) eth_demo: esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, NTP from GPS/PPS or upstream
+I (395) settings: hostname=esp32p4-ntp tz=AEST-10AEDT,M10.1.0,M4.1.0/3 timeSource=gps ntpServer=(unset) serveNtp=on
+I (395) gps_time: UART1 9600 8N1 (esp TX 15 -> module RX, esp RX 16 <- module TX), PPS on GPIO14
+I (585) gps_time: UBX frames arriving at 9600 baud
+I (585) gps_time: module accepted the configuration (NAV-PVT + NAV-TIMELS at 1 Hz, NMEA off)
+I (705) gps_time: 3D fix, 18 satellites, UTC 2026-11-13T12:17:19+1100 (nano 495480)
+I (705) gps_time: clock set from the GPS (2026-11-13T12:17:19+1100)
+I (955) eth_demo: MDIO addr 1: PHY ID 0x02430c54 (IP101 = 0x0243xxxx)
+I (1405) gps_time: locked: stratum 1 from here on (PPS edges so far: 1, rate +0 ppb)
+I (2965) eth_demo: link up   (MAC 02:00:5e:00:53:01)
+I (4395) eth_demo: IPv6 link-local: fe80::200:5eff:fe00:5301
+I (7395) eth_demo: IPv6 global: 2001:db8::20
+I (7465) eth_demo: DHCP lease: ip 192.0.2.20  mask 255.255.255.0  gw 192.0.2.1
+I (7475) WebServer: Starting server on port: 80
+I (7535) ntp_server: serving on udp/123 (dual-stack), reference: GPS/PPS, 3D fix, 18 satellites, stratum 1
 ```
 
-The console still gets every byte too. The hook only formats and pushes at a
-ring; a task drains it and sends, so a busy netif cannot stall the GPS task and a
-full ring drops lines rather than the log call waiting. Off by default, and `""`
-clears it.
+The clock is real before the network is: the first edge is paired with the fix in
+the same breath, so the responder is already a stratum-1 server when the lease
+arrives. `rate +0 ppb` is honest — a rate needs a minute of anchors before it
+means anything.
 
-## The serial console
+The address the lease prints is the one to use. `curl http://<box>/healthz` and
+`ping` should both answer; `<box>` is that address in every example below. A ping
+reply proves the whole path — PHY, RMII clocking, DHCP, lwIP, ICMP.
 
-The USB-C port is the console *and* the flashing port -- one CH343 bridge to
-UART0 -- so the cable that programmes the box is the shell on it. That is the
-point: when the box is on a link with no DHCP server, or on an address it cannot
-reach, the cable is the way back in.
+IPv6 comes up beside IPv4 with no configuration: a `fe80::` link-local at
+link-up, and a global address from the router's advertisements. See
+[IPv6](#ipv6).
 
-The port is a log stream by default: every line, no prompt, and commands still
-run. `console on` is the debug state -- prompt, log silenced so a session can be
-read -- and `console off` puts it back. Commands work in both; only the prompt
-and the log level differ. Nothing is persisted, so a reboot comes back logging.
+`/healthz` carries `time_set`, and it matters: there is no RTC, so until
+something disciplines it the clock reads 1970 + uptime. `time_set` is whether the
+clock is plausible rather than presenting 1970 as a fact.
 
-`idf.py monitor` for it, or raw (the REPL expects CR):
+## Console
+
+Log stream by default: every line, no prompt, and commands still run. `console on`
+is the debug state — prompt, log silenced — and `console off` puts it back.
+Commands work in both. Nothing is persisted, so a reboot comes back logging.
+
+Raw, without `idf.py` (the reader expects CR):
 
 ```console
 $ stty -F /dev/ttyACM0 115200 raw -echo -hupcl
-$ printf 'console on\r' > /dev/ttyACM0
+$ printf 'status\r' > /dev/ttyACM0
 ```
 
-Everything the HTTP surface can do to the box, the cable can do, because the
-cable is what is left when the network is the fault: address it, restart the
-MAC, stop a survey that will not converge, hold the clock off a receiver that
-has gone quiet, and put the config back.
+Everything the HTTP surface can do, the cable can do, because the cable is what
+is left when the network is the fault. Every *setting* written here goes through
+the same validation `POST /config` uses, and the action commands queue work on
+the GPS task through the same functions the HTTP handlers call.
 
-**Addressing** — the one change that can strand the box, so it prints what it
-did and the new state.
+The console is unauthenticated, and `config` prints the whole blob — there are no
+secrets in it.
+
+**Addressing** — the change that can strand the box, so it prints what it did and
+the new state.
 
 | Command | Effect |
 |---|---|
 | `net` | show mode, address, gateway, resolver, link |
-| `net static <cidr> <gw> [dns]` | set a static address, persist and apply it live |
+| `net static <cidr> <gw> [dns]` | set a static address, persist and apply live |
 | `net dhcp` | back to the DHCP client |
 | `eth` | link state, MAC restart count, addressing |
-| `eth restart` | restart the MAC, the recovery for a wedged link (same as `POST /eth/restart`) |
+| `eth restart` | restart the MAC; the recovery for a wedged link |
 
 **State** — read-only, and only what `/healthz` already publishes.
 
@@ -225,30 +181,30 @@ did and the new state.
 |---|---|
 | `status` | one screen: version, uptime, link, addressing, IPv6, fix, mode, owner, stratum, dispersion |
 
-**Service** — what the box offers and where it takes time from.
+**Service**
 
 | Command | Effect |
 |---|---|
-| `serve <on|off>` | answer UDP/123 |
-| `timesource <off|dhcp|static|gps|auto>` | where the clock comes from |
+| `serve <on\|off>` | answer UDP/123 |
+| `timesource <off\|dhcp\|static\|gps\|auto>` | where the clock comes from |
 | `ntpserver [host]` | upstream for `timeSource=static` |
 | `hostname [name]` | DHCP hostname |
 | `log [<ip> <port>]` | UDP log sink |
-| `console on` / `console off` | prompt on and log silenced, or back to the log stream |
+| `console on` / `console off` | prompt and silence, or back to the log stream |
 
-**Config** — every key, and the reset.
+**Config**
 
 | Command | Effect |
 |---|---|
-| `config` | print the stored config, pretty-printed (`config raw` for one line) |
-| `config set <key> <value>` | any key from the table under [HTTP API](#http-api) |
+| `config` | print the stored config, pretty (`config raw` for one line) |
+| `config set <key> <value>` | any key from [Configuration](#configuration) |
 | `config reset` | compiled-in defaults; the boot count survives |
 
-**Receiver** — the actions the settings cannot express. `gps` alone prints fix,
-satellites, survey progress and mode.
+**Receiver**
 
 | Command | Effect |
 |---|---|
+| `gps` | fix, satellites, survey progress, mode |
 | `gps survey stop` | back to a moving position; the last mean is kept for `fix` |
 | `gps survey fix` | lock the receiver's own mean as the held position |
 | `gps reset [soft\|hard\|power\|cold]` | reset the receiver; `hard` re-initialises the front end, `cold` also drops the almanac |
@@ -257,1878 +213,619 @@ satellites, survey progress and mode.
 | `gps suppress <s>` | ignore PPS edges for `s` seconds — a deliberate holdover, `0` to stop |
 | `gps defaults` | clear the receiver's configuration to its own defaults |
 
-**Board and NVS** — IDF's own commands, `cmd_system` and `cmd_nvs`.
+**Board and NVS** — IDF's own commands.
 
 | Command | Effect |
 |---|---|
 | `help [cmd]`, `version`, `restart`, `free`, `heap`, `tasks` | usage, build, reboot, memory, task list |
-| `log_level <level> [tag]` | log level, all tags or one — per-tag is why the stream can be quieted without `console on` |
-| `nvs_namespace <ns>`, `nvs_list`, `nvs_get`, `nvs_set`, `nvs_erase`, `nvs_erase_namespace` | read and write the NVS partition directly |
+| `log_level <level> [tag]` | log level, all tags or one |
+| `nvs_namespace`, `nvs_list`, `nvs_get`, `nvs_set`, `nvs_erase`, `nvs_erase_namespace` | read and write the NVS partition directly |
 
-Not on the console, deliberately: **firmware upload** (`POST /firmware` needs
-the network it is delivered over, and a serial reflash is the fallback anyway)
-and **static IPv6** (SLAAC only — the address comes from the router). The PPS
-bench knobs `pulse_ms`, `period_us` and `delay_ns` are also HTTP-only; the
-delay is a setting (`antDelayNs`) and the other two are not.
+Not on the console, deliberately: firmware upload (an upload needs the network it
+is delivered over, and a serial reflash is the fallback anyway) and static IPv6
+(SLAAC only). `config reset` clears `gpsFixedPos`, `antDelayNs` and
+`gpsUserDelayNs` with everything else, so record them before a reset.
 
-The console component's REPL task is created but never started: it stays parked
-on its notification while one reader task owns the port and dispatches lines
-through `esp_console_run()`. A running REPL sits in a blocking UART read, and
-that pending read takes input away for a task that cannot run it; the REPL's own
-linenoise also fires `ESC[6n` cursor probes that arrive back as input and get
-executed as commands. The cost of the reader is line editing: backspace works,
-arrows and history do not.
+## Configuration
 
-Every *setting* the console writes goes through `Settings::applyJson()`, the
-same validation `POST /config` uses, so a bad address is refused at the prompt
-rather than stored. The action commands (`gps survey`, `gps reset` and the rest)
-queue work on the GPS task through the same request functions the HTTP handlers
-call, so there is one implementation of each and the console cannot do anything
-the network could not.
+`/config` takes and returns a flat JSON object. Values are strings; unknown keys
+are ignored so an older or newer client will not break it. Everything is stored
+in NVS and survives a reboot.
 
-The console is unauthenticated. It is whatever the USB cable can reach, and
-`config` prints the whole blob -- there are no secrets in it, and keeping it that
-way is cheaper than redacting.
-
-`config reset` clears `gpsFixedPos`, `antDelayNs` and `gpsUserDelayNs` with
-everything else, because they are settings like any other. A surveyed and
-calibrated box needs those put back, so record them before a reset.
-
-## Expected log (captured from this board)
-
-```
-I (385) eth_demo: esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, NTP from GPS/PPS or upstream
-I (395) settings: hostname=esp32p4-ntp tz=AEST-10AEDT,M10.1.0,M4.1.0/3 timeSource=gps ntpServer=(unset) serveNtp=on
-I (395) gps_time: UART1 9600 8N1 (esp TX 15 -> module RX, esp RX 16 <- module TX), PPS on GPIO14
-I (405) ntp_time: time source: gps (u-blox over UART, PPS on GPIO14)
-I (585) gps_time: UBX frames arriving at 9600 baud
-I (585) gps_time: module accepted the configuration (NAV-PVT + NAV-TIMELS at 1 Hz, NMEA off)
-I (705) gps_time: 3D fix, 18 satellites, UTC 2026-11-13T12:17:19+1100 (nano 495480)
-I (705) gps_time: clock set from the GPS (2026-11-13T12:17:19+1100): CLOCK_REALTIME now agrees with what the responder serves
-I (805) gps_time: leap: GPS-UTC offset +18 s, nothing announced
-I (955) eth_demo: MDIO addr 1: PHY ID 0x02430c54 (IP101 = 0x0243xxxx)
-I (955) eth_demo: phy: bmsr=0x7849 link=0 autoneg_done=0 bmcr=0x3100
-I (955) esp_eth.netif.netif_glue: 02:00:5e:00:53:01
-I (955) esp_eth.netif.netif_glue: ethernet attached to netif
-I (1405) gps_time: locked: stratum 1 from here on (PPS edges so far: 1, rate +0 ppb)
-I (2965) eth_demo: Ethernet started
-I (2965) eth_demo: link up   (MAC 02:00:5e:00:53:01)
-I (2965) eth_demo: requesting DHCP lease ...
-I (4395) eth_demo: IPv6 link-local: fe80::200:5eff:fe00:5301
-I (4395) eth_demo: http over IPv6: http://[fe80::200:5eff:fe00:5301]/healthz
-I (7395) eth_demo: IPv6 global: 2001:db8:1:1:200:5eff:fe00:5301
-I (7395) eth_demo: http over IPv6: http://[2001:db8:1:1:200:5eff:fe00:5301]/healthz
-I (7465) esp_netif_handlers: eth ip: 192.0.2.20, mask: 255.255.255.0, gw: 192.0.2.1
-I (7465) eth_demo: DHCP lease: ip 192.0.2.20  mask 255.255.255.0  gw 192.0.2.1
-I (7465) eth_demo: ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP
-I (7475) WebServer: Starting server on port: 80
-I (7485) eth_demo: http: http://192.0.2.20/healthz  http://192.0.2.20/config
-I (7535) eth_demo: OTA image confirmed: rollback to the previous slot cancelled
-I (7535) ntp_server: serving on udp/123 (dual-stack), reference: GPS/PPS, 3D fix, 18 satellites, stratum 1
-```
-
-The clock is real before the network is: the receiver has a fix at 0.7 s, the
-leap notice 100 ms later, and the first PPS edge is paired with the fix in the
-same breath, so by the time the lease arrives the responder's opening line already
-says `stratum 1` — with `rate +0 ppb`, because a rate needs a minute of anchors
-before it means anything ([The servo](#the-servo)). `nano` is the receiver's own
-sub-second offset for that solution — a few hundred microseconds either side of
-zero, which is the evidence that a NAV-PVT and a PPS edge describe the same
-instant. On a boot with `timeSource=dhcp` instead, the GPS still runs and logs
-the fix, it just does not steer anything, and the responder starts at `stratum 16`
-until SNTP has set the clock.
-
-The addresses, MAC and IPv6 prefix in this log are documentation values rather
-than what this LAN handed out: `192.0.2.0/24` is TEST-NET-1 (RFC 5737),
-`2001:db8::/32` is the IPv6 documentation prefix (RFC 3849), and the MAC is a
-locally administered one. The link-local is that MAC's EUI-64, built the way the
-board builds it, so the three stay consistent if you compare them by hand.
-
-The two IPv6 lines arrive on their own schedule: the link-local at ~1.4 s after
-`link up` (Duplicate Address Detection clearing `fe80::`), the global one a Router
-Solicitation later — on this boot 3 s after the link-local and 70 ms before the
-lease. `OTA image confirmed` only appears on the first boot of an image that
-arrived over `POST /firmware`, which is what this one was.
-
-Later boots show `settings: hostname=...` with no "no stored config" line, i.e.
-the NVS blob was found and applied.
-
-Notes: `0x02430c54` is the IP101 PHY ID (addr 1, as strapped on the board);
-`bmsr=0x7849 link=0` before the cable is plugged in, `link=1` after. The P4 uses
-its eFuse base MAC; the one shown here is the documentation MAC the IPv6 lines
-are derived from.
-
-## Test from your laptop
-
-```sh
-ping -c 4 <leased-ip>           # the address the lease above printed
-```
-
-Captured on this setup:
-
-```
-PING 192.0.2.20 (192.0.2.20): 56 data bytes
-64 bytes from 192.0.2.20: icmp_seq=0 ttl=64 time=0.805 ms
-64 bytes from 192.0.2.20: icmp_seq=1 ttl=64 time=0.799 ms
-...
---- 192.0.2.20 ping statistics ---
-4 packets transmitted, 4 packets received, 0.0% packet loss
-```
-
-A reply means the whole path (PHY, RMII clocking, DHCP, lwIP, ICMP) works.
-
-## IPv6
-
-IPv4 is still the default path — the DHCP lease, and the option-42 clock source
-— and IPv6 runs beside it, not instead of it. Three config lines and two calls
-are the whole implementation:
-
-| Where | What |
-|-------|------|
-| `sdkconfig.defaults` | `CONFIG_LWIP_IPV6=y` (IDF's own default, spelled out because the rest depends on it), `CONFIG_LWIP_IPV6_AUTOCONFIG=y` for SLAAC, `CONFIG_LWIP_IPV6_MLD=y`, `CONFIG_LWIP_IPV6_NUM_ADDRESSES=3` |
-| `eth_link.cpp`, `ETHERNET_EVENT_CONNECTED` | `esp_netif_create_ip6_linklocal()`. esp_netif does **not** create `fe80::` on its own, and without a source address lwIP has nothing to send the Router Solicitation from — so no RA comes back and there is no global address either. Called on every link-up, so a cable bounce re-arms it. |
-| `eth_link.cpp`, after `esp_eth_start()` | `ETH_CMD_S_PROMISCUOUS`, then the MAC frame filter's **PM** bit. Without MLD and PM the board has a link-local, answers a unicast ping, and answers a ping to `ff02::1` not at all: the MAC drops the multicast groups SLAAC and NDP both need. `esp_eth` has no multicast-hash ioctl, so the bit is written directly — and it must be *after* start, because the MAC is programmed during start and clears it. |
-| `eth_link.cpp`, `IP_EVENT_GOT_IP6` | logs each address as it lands, with the URL it makes reachable |
-| `net_state::ipv6Global()` | first address that is not link-local, from `esp_netif_get_all_ip6()`. `esp_netif_get_ip6_global()` filters on lwIP's `ip6_addr_isglobal()`, which is `2000::/3` and so hides a ULA: on a `fd00::/64` segment it reported nothing while the box answered fine. |
-
-**On a routed pocket** the segment needs what the IPv4 side needed, in IPv6
-terms: a prefix, a route, and a name. The bridge carries `fd00:99::1/64` with
-`ipv6.nat=true` and an RA from Incus's dnsmasq; the LAN router carries
-`fd00:99::/64` via the bridge host; `esp32p4-ntp.mianos.com` carries an AAAA
-beside its A, and `ntp.mianos.com` is a CNAME so it follows. A ULA is not
-internet-routable, which is what `ipv6.nat` is for — and the configured upstream
-`162.159.200.1` is an IPv4 address regardless, because lwIP's SNTP client
-resolves A records only.
-
-Nothing above that needed changing:
-
-- `esp_http_server` binds `in6addr_any` whenever lwIP is built with IPv6, so
-  `/healthz`, `/config`, `/ntp/sync` and `POST /firmware` answer over IPv6 the
-  moment the netif has an address. Same handlers, same auth (none).
-- The mianesp `webserver` component never formats an address of its own: the
-  handlers get an `httpd_req_t`, and the base class logs the peer with
-  `getpeername()` into a `sockaddr_in6`, unwrapping v4-mapped ones, so IPv6
-  clients are named correctly with no change there either.
-- lwIP answers ICMPv6 echo and NDP by itself, exactly like ICMPv4.
-
-From another host on the same segment as the ping above:
+| Key | Default | Effect |
+|---|---|---|
+| `hostname` | `esp32p4-ntp` | netif hostname and DHCP option 12. 32 characters max; a change reaches the lease at the next renewal. |
+| `tz` | `AEST-10AEDT,M10.1.0,M4.1.0/3` | POSIX TZ for `localtime()`. Presentation only — NTP always serves UTC. |
+| `timeSource` | `dhcp` | `dhcp` takes the server from DHCP option 42, `static` polls `ntpServer`, `gps` disciplines from the receiver, `auto` is `gps` with the upstream behind it, `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
+| `ntpServer` | *(empty)* | Upstream host or address for `static`, and preferred over option 42 under `auto`. A hostname is resolved through the lease's DNS. An IPv6 literal is stored but cannot sync. |
+| `serveNtp` | `on` | `off` stops the responder within a second, `on` restarts it, no reboot. Serving an unlocked clock is safe: it answers stratum 16 with LI 3. |
+| `ipMode` | `dhcp` | `static` programs the three keys below instead of taking a lease. |
+| `ipAddress` | *(empty)* | `a.b.c.d/len`, len 1..30. Programmed only in `static` mode. |
+| `ipGateway` | *(empty)* | Optional even in `static` mode: a box with an address and no route is still on the wire. |
+| `ipDns` | *(empty)* | Optional; empty clears the resolver. |
+| `gpsTimeMode` | `moving` | `moving`, `survey` or `fixed`. Prefer `POST /gps/survey`, which sets this with the parameters. |
+| `gpsFixedPos` | *(empty)* | `x,y,z,acc_mm` in centimetres and millimetres, for a surveyed or known antenna position. Re-sent at every boot. |
+| `gpsSurvey` | *(empty)* | `hours,acc_mm`, hours 2..48, acc_mm 50..60000. Read when a survey is armed from NVS. |
+| `antDelayNs` | `0` | Antenna lead delay in ns, up to 200000. Brings the pulse forward by the cable's delay. |
+| `gpsUserDelayNs` | `0` | Calibration term in ns, ±10 ms, kept separate from the lead so a measured correction stays distinguishable from a cable length. |
+| `gpsBaud` | `38400` | Written by the firmware when frames arrive at a new rate. Set by hand only if the stored value is wrong. |
+| `logHost` / `logPort` | *(empty)* / `5514` | UDP log sink, a dotted quad. `""` clears it. |
+| `boots` | `0` | Read-only boot counter. |
 
 ```console
-$ ping6 -c 3 -I en0 fe80::200:5eff:fe00:5301
-16 bytes from fe80::200:5eff:fe00:5301%en0, icmp_seq=2 hlim=255 time=9.399 ms
---- fe80::200:5eff:fe00:5301 ping6 statistics ---
-3 packets transmitted, 3 packets received, 0.0% packet loss
-
-$ ping6 -c 3 2001:db8:1:1:200:5eff:fe00:5301
-3 packets transmitted, 3 packets received, 0.0% packet loss
-round-trip min/avg/max/std-dev = 0.827/1.139/1.474/0.265 ms
-
-$ curl -g -s http://192.0.2.20/healthz | tr , '\n' | grep ipv6
- "ipv6_linklocal":"fe80::200:5eff:fe00:5301"
- "ipv6_global":"2001:db8:1:1:200:5eff:fe00:5301"
-
-$ curl -g -s 'http://[2001:db8:1:1:200:5eff:fe00:5301]/healthz' | head -c 80
-{"uptime":29,"time":"2026-11-11T17:16:11+1100","time_set":true,"version":"...
-
-$ curl -g -s 'http://[fe80::200:5eff:fe00:5301%25en0]/healthz' | head -c 40
-{"uptime":29,"time":"2026-11-11T17:16:11+1100
+$ curl -s -X POST -H 'Content-Type: application/json' \
+       -d '{"hostname":"p4-ntp","tz":"UTC0"}' http://<box>/config
+$ curl -s -X POST http://<box>/config/reset
 ```
 
-Two client-side details: `curl` needs `-g` (brackets are glob characters to it)
-and the zone spelled `%25` rather than `%`; `ping6` takes `-I en0` instead. The
-link-local address only works from that segment — a router does not forward it.
-
-`/healthz` omits `ipv6_linklocal` and `ipv6_global` until each exists: the
-link-local appears once Duplicate Address Detection clears it (about a second
-after link-up), the global one only after a Router Advertisement. On a LAN with
-no IPv6 router you get the link-local and nothing else, which is also the answer
-to "why does ping6 work but curl to the global address not".
-
-Deliberately not included:
-
-- **DHCPv6.** SLAAC covers a board that wants one routable address and is what a
-  normal LAN hands out; DHCPv6-only numbering would need
-  `CONFIG_LWIP_IPV6_DHCP6=y` plus a hook to take the address it offers.
-- **An IPv6 upstream for the clock.** lwIP's SNTP client resolves its server
-  through `dns_gethostbyname()`, i.e. A records only, and RFC 2132 defines DHCP
-  option 42 as a list of IPv4 addresses — so both `dhcp` and `static` clock modes
-  stay on IPv4. `ntpServer` accepts and stores an IPv6 literal, but
-  `ntp_time.cpp` logs `lwIP's SNTP client resolves A records only, so it cannot
-  sync from it` rather than failing silently. (The *responder* has no such
-  limitation: it answers IPv6 clients.)
-
-The responder socket this list used to defer to now exists, and is bound exactly
-as sketched here: `AF_INET6` with `IPV6_V6ONLY=0` on `::`, one socket for both
-families — see [Serving NTP](#serving-ntp-udp123).
-
-### Cost, and switching it off on a small board
-
-Measured app sizes (`.bin` as flashed), same toolchain, IPv6 either in or out of
-lwIP's build:
-
-| Build | bytes | Δ vs IPv6 off |
-|-------|------:|--------------:|
-| ESP32-P4, IPv6 off | 495,328 | — |
-| ESP32-P4, IPv6 + SLAAC | 533,552 | +38,224 (+7.7%) |
-| ESP32-P4, IPv6 + SLAAC + NTP responder | 539,600 | +44,272 (+8.9%) |
-| ESP32-P4, the same + GPS reference (this firmware) | 583,216 | +87,888 (+17.7%) |
-| classic ESP32 (`modswitch`, mianesp stack), IPv6 off | 938,896 | — |
-| classic ESP32, IPv6 on as IDF ships it | 969,440 | +30,544 (+3.3%) |
-| classic ESP32, IPv6 + SLAAC | 969,456 | +30,560 (+3.3%) |
-
-The GPS row is +43 KB, and almost none of it is `gps_time.cpp`, whose own code is
-under 4 KB. `esp_driver_uart`'s `uart.c` alone is 31 KB at this toolchain's `-Og`,
-and the GPIO ISR service adds the rest — driver code this firmware did not
-previously link. That is 2.5% of a 1.7 MB app slot for a stratum-1 reference.
-
-What that says:
-
-- **The cost is lwIP's IPv6 stack, not this feature.** ~30–38 KB for IPv6 at all;
-  SLAAC on top of it is **16 bytes** — a flag in the netif and a couple of
-  branches that were compiled in either way.
-- **The responder is 6,048 bytes** (533,552 → 539,600): the socket, the header
-  builder, the rate limiter and the `/healthz` fields, with no new dependency.
-- **Your ESP32 fleet is already paying it.** IDF 6 sets `CONFIG_LWIP_IPV6=y` by
-  default, so those binaries have carried IPv6 since they moved to IDF 6 — they
-  simply had nothing to give it an address. `modswitch` as shipped is the third
-  row: 969,440 bytes with IPv6 compiled in and no SLAAC.
-- **Switching it off is not a config line away.** mianesp's `webserver`
-  component initialises a `sockaddr_in6` in `WebServer::callerAddress()`, and
-  lwIP only defines that type when IPv6 is on: an IPv4-only build of this tree
-  stops with `'sockaddr_in6' has initializer but incomplete type`. The numbers
-  above for "IPv6 off" were produced with a six-line `#if CONFIG_LWIP_IPV6`
-  fallback to `sockaddr_in` in a throwaway copy of that component — that is the
-  change it would take to make IPv4-only builds possible again.
-- The code in *this* repo is already guarded: `eth_link.cpp`, `net_state.cpp`
-  and `web_server.cpp` put their IPv6 work behind `#if CONFIG_LWIP_IPV6`, so
-  the same sources serve an IPv4-only board at zero cost once the component
-  allows it.
-
-Verdict: leave IPv6 on. 30 KB is 1.6% of a 1.9 MB OTA slot on a 4 MB module —
-not worth a component patch and the loss of the IPv6 half of every endpoint —
-and on the P4 (32 MB, ~0.5 MB app) it is noise.
+Body size is capped at 4 KB and string values at 63 characters; longer values are
+truncated and logged. Nothing is authenticated — anything on the LAN can
+reconfigure the box.
 
 ## HTTP API
 
-The endpoints follow the [mianesp](https://github.com/mianos/mianesp)
-`components/webserver` conventions, so anything already talking to those
-devices works here unchanged: success is a 2xx with the resulting state as the
-body, failure is `{"error": "...", "statusCode": N}` with the matching status,
-and unknown paths / wrong methods get the same JSON error shape instead of
-httpd's built-in plain-text page.
-
-| Method | Path            | Purpose                                          |
-|--------|-----------------|--------------------------------------------------|
-| GET    | `/healthz`      | uptime, clock, build, heap, link, address, clock source, servo |
-| GET    | `/config`       | current settings                                 |
-| POST   | `/config`       | apply any subset of the keys, persist, echo back |
-| POST   | `/config/reset` | restore compiled-in defaults and persist         |
-| POST   | `/ntp/sync`     | force an upstream poll, wait up to 5 s for it (while the receiver is serving: report the lock) |
-| POST   | `/gps/pps`      | make the PPS interrupt ignore edges for `{"suppress_s":N}` seconds — the holdover test hook |
-| GET    | `/firmware`     | build + slot info for the running image          |
-| POST   | `/firmware`     | write the body into the inactive OTA slot, reboot into it |
-
-| POST   | `/ntp/txlag`    | turn the transmit correction on or off (A/B runs) |
-
-UDP/123 answers NTPv3/v4 client requests — basic and
-[interleaved](#interleaved-mode-rfc-9769) — and read-only mode 6 control queries
-([`ntpq`](#control-queries-ntpq)).
-
-UDP/123 answers NTPv3/v4 client requests and read-only mode 6 control queries
-([`ntpq`](#control-queries-ntpq)).
-
-`/healthz` on this unit:
-
-```console
-$ curl -s http://192.0.2.20/healthz
-{"uptime":42,"time":"2026-11-11T18:07:30+1100","time_set":true,
- "version":"aa33def","idf_ver":"v6.0.1","partition":"ota_1","heap_free":524508,
- "hostname":"esp32p4-ntp","link_up":true,"ip":"192.0.2.20",
- "ipv6_linklocal":"fe80::200:5eff:fe00:5301",
- "ipv6_global":"2001:db8:1:1:200:5eff:fe00:5301",
- "ntp_source":"dhcp","ntp_server":"192.0.2.1",
- "ntp_reachable":true,"ntp_synced":true,"last_sync":1794380815,
- "serve_ntp":true,"ntp_stratum":3,"ntp_refid":"192.0.2.1",
- "ntp_leap":0,"ntp_root_delay_us":991.8,"ntp_root_dispersion_us":991.8,
- "ntp_requests":5}
-```
-
-The same JSON comes back over IPv6 — `/healthz` does not care which family the
-request arrived on, and `ip`/`ipv6_*` describe the board, not the caller. See
-[IPv6](#ipv6) for the two address fields and how to reach them.
-
-`time_set` matters: there is no RTC, so the base `time` field is 1970 + uptime
-until something disciplines it. `time_set` says whether the clock is plausible
-(after 2020) rather than presenting 1970 as a fact, `ntp_synced` says whether
-*this* client set it, `last_sync` is the epoch it last set, `ntp_server` is the
-upstream actually in use (`null` until one is known) and `ntp_reachable` is the
-RFC 5905 reachability register: non-zero means the server has answered. `ip` is
-omitted until the DHCP lease lands, and `ipv6_linklocal` / `ipv6_global` are
-omitted until each address exists.
-
-With the receiver serving (`timeSource=gps`, or `auto` while it is healthy)
-`ntp_server` is `null` — nothing is polled, so there is no upstream — `ntp_synced`
-is the receiver's lock, and `gps_fix` (u-blox fix type: 0 none, 2 2D, 3 3D),
-`gps_sats` and `gps_pps_age_ms` describe the receiver itself — see [GPS](#gps-u-blox-lea-8--pps) for what those numbers mean. The block reports whichever
-source is actually serving, not the setting, so on an `auto` box that has fallen
-back it is the upstream half.
-
-`ntp_source` is the *configured* value and reads `auto` on a box that may be on
-either; `ntp_tx_correction_us` is the measured transmit correction the replies carry and
-`ntp_interleaved_served` counts replies answered in interleaved mode.
-`time_owner` is the one that actually has the clock (`gps`, `handing` or
-`upstream`), `ntp_client` is what the SNTP client is doing, `gps_fallback` says
-whether one is engaged, `fallback_age_s` how long this episode has run and
-`fallback_count` how many there have been since boot. `gps_fix`, `gps_sats` and
-`gps_pps_age_ms` are present on every path, including while the upstream is
-serving, because then they are the answer to "is it the antenna or the sky?".
-
-The GPS side of `/healthz` is deliberately five fields: `gps_fix`, `gps_sats`,
-`gps_pps_age_ms`, and the two configuration failures below when they are set. It
-answers "is it working", not "how well". Everything numeric — the servo, the
-signal, the antenna, the pulse — is at
-[`GET /gps/info`](#gpsinfo-for-the-diagnostics), where a caller tuning something
-can have it without a poller carrying it.
-
-The failure fields appear only when true, because a healthy board has nothing to
-say about them: `gps_tp5_rejected`, `gps_ant_cfg_rejected`, `gps_ant_short`, and
-`gps_ant_latched` after a short has cut the bias. `gps_pps_suppressed_s` is
-likewise present only while the holdover test hook is armed.
-
-The last group is the responder's: `serve_ntp` is whether it is listening,
-`ntp_stratum` / `ntp_refid` / `ntp_leap` are what a reply would claim *right now*
-(so they flip to `16` / `"INIT"` / `3` the moment the clock stops being fresh),
-`ntp_root_delay_us` and `ntp_root_dispersion_us` are the two fields a client reads
-to decide how much to trust it — the same numbers the wire carries, before 16.16
-rounds them to 15.26 µs steps — and `ntp_requests` is how many requests it has
-answered since boot. They are absent while it is not running. Reporting the root
-figures here rather than leaving them to be inferred keeps the endpoint honest in
-the same way the reply is: 2 µs of delay and 2.5 µs of dispersion from the GPS,
-992 µs from an upstream nobody measured.
-
-`/config` takes and returns a flat JSON object. Values are strings; keys that
-are not registered are ignored, so an older/newer client will not break it:
-
-| Key        | Default                          | Effect |
-|------------|----------------------------------|--------|
-| `hostname` | `esp32p4-ntp`                    | netif hostname, and the name the DHCP client sends as option 12. A change reaches the lease at the next renewal. |
-| `tz`       | `AEST-10AEDT,M10.1.0,M4.1.0/3`   | POSIX TZ used by `localtime()` for `/healthz`. Presentation only — NTP always serves UTC. |
-| `timeSource` | `dhcp`                         | `dhcp` takes the upstream NTP server from DHCP option 42, `static` polls `ntpServer`, `gps` disciplines the clock from the u-blox receiver over UART plus its PPS line ([GPS](#gps-u-blox-lea-8--pps)), `auto` is `gps` with the upstream behind it ([fallback](#fallback-when-the-receiver-stops)), `off` leaves the clock alone. Unknown values are treated as `off` and logged. |
-| `ntpServer` | *(empty)*                       | Upstream NTP host or address, used when `timeSource` is `static` and preferred over the lease's server when it is `auto`. An IPv6 literal is stored but cannot sync — lwIP's SNTP client resolves A records only ([IPv6](#ipv6)). |
-| `serveNtp` | `on`                            | `off` stops the UDP/123 responder within a second and starts it again on `on`, no reboot. Serving an unlocked clock is safe by construction: it answers stratum 16 with LI 3, which tells clients to ignore it. |
-| `gpsBaud` | `38400`                          | UART rate the receiver was last heard on. Written by the firmware the moment a frame arrives at a new rate, tried first on every boot, and the fallback scan covers a module that has been reset to something else. Set it by hand only if the stored value is known to be wrong. |
-| `ipMode` | `dhcp`                            | `static` programs the address below instead of taking a lease. It exists for a link with no DHCP server on it; a `static` whose address does not parse falls back to DHCP at boot and says so. |
-| `ipAddress` | *(empty)*                      | `a.b.c.d/len` with len 1..30. Programmed only when `ipMode` is `static`. |
-| `ipGateway` | *(empty)*                      | Dotted quad, optional even in `static` mode: a box with an address and no route is still on the wire. |
-| `ipDns` | *(empty)*                          | Dotted quad, optional. Empty clears the resolver rather than inheriting the lease's. |
-
-```console
-$ curl -s -X POST -H 'Content-Type: application/json' \
-       -d '{"hostname":"p4-ntp","tz":"UTC0"}' http://192.0.2.20/config
-{"hostname":"p4-ntp","tz":"UTC0","timeSource":"dhcp","ntpServer":"","serveNtp":"on"}
-
-$ curl -s http://192.0.2.20/healthz
-{"uptime":44,"time":"2026-11-11T02:38:44+0000","time_set":true, ... ,
- "hostname":"p4-ntp","link_up":true,"ip":"192.0.2.20", ...}
-
-$ curl -s -X POST http://192.0.2.20/config/reset
-{"status":"reset"}
-```
-
-## Updating over Ethernet (OTA)
-
-The board's only interface is the RJ45, so the firmware carries an update
-endpoint: `POST /firmware` with the raw app image as the body writes it into the
-inactive slot and reboots into it.
-
-```console
-$ curl --data-binary @build/esp32p4_ntp.bin http://192.0.2.20/firmware
-{"written":531328,"partition":"ota_0","rebooting":true}
-
-$ sleep 20; curl -s http://192.0.2.20/firmware
-{"version":"67ea5fc","idf_ver":"v6.0.1","built":"Nov 11 2026 16:12:36",
- "partition":"ota_0","confirmed":true,"ota":true,"next_partition":"ota_1","slot_size":1740800}
-```
-
-`partition` is where the running image came from, `next_partition` is where the
-next upload lands: successive updates alternate `ota_0` / `ota_1`. That
-alternation is also the quickest proof an update happened — uploading the same
-build twice leaves `version` unchanged but flips the slot. `confirmed` is the
-rollback handshake below: `true` means this image passed the reachability check
-and will stay; `false` right after a write means it is still `PENDING_VERIFY`.
-
-What checks the update:
-
-- **Payload.** The first `esp_ota_write()` rejects a body whose magic byte is
-  not an app image, and `esp_ota_end()` verifies the whole thing (chip id,
-  checksum, segment hashes). Both answer
-  `400 {"error":"not a valid app image for this chip"}`, and a rejected body
-  leaves the boot slot untouched.
-- **Size.** `Content-Length` must fit the slot, otherwise `413`.
-- **Boot.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` marks a newly written image
-  `ESP_OTA_IMG_PENDING_VERIFY`. `eth_link.cpp` confirms it with
-  `esp_ota_mark_app_valid_cancel_rollback()` as soon as it has a DHCP lease and
-  the HTTP server is listening; if an image never gets that far, the bootloader
-  returns to the slot that worked. On a box with no other interface, that is the
-  difference between a bad update and a trip to find a USB cable. While an image
-  is still unconfirmed the endpoint answers `409` — a pending-verify app is not
-  allowed to write another one.
-- **Trust.** No authentication, like `/config`: anything on this LAN can replace
-  the firmware. Fine for a bench network; on an untrusted one this needs a token
-  or `esp_https_ota` with a signed image.
-
-`"ota": false` in `GET /firmware` means the flashed partition table has no
-second slot — `POST /firmware` then answers `500` and updating needs the cable.
-`built` is the app descriptor's link-time stamp, which only moves when that
-object is recompiled; use `version` (the git describe stamp) to identify a build.
-
-## Clock (test mode)
-
-There is no RTC on this board, so until something disciplines it `time()` is
-1970 + uptime — useless for an NTP *server*. Two things fix that now: the GPS
-above (the real reference, `timeSource=gps`) and `NtpTime`, the upstream SNTP
-client, which is what `timeSource=dhcp` or `static` still uses — and what runs
-when there is no receiver on the pins, or under `auto` when the receiver stops
-([fallback](#fallback-when-the-receiver-stops)). It polls and **steps** (not
-slews) the system clock; `sdkconfig.defaults` is the map:
-
-| Setting                            | Why |
-|------------------------------------|-----|
-| `CONFIG_LWIP_DHCP_GET_NTP_SRV=y`   | lwIP asks the DHCP server for option 42 and hands the answer to SNTP |
-| `CONFIG_LWIP_DHCP_MAX_NTP_SERVERS=2` | keep primary and backup from one lease |
-| `CONFIG_LWIP_SNTP_MAX_SERVERS=2`   | matching SNTP slot count |
-
-`NtpTime::start()` sets the re-poll interval to 60 s (`esp_sntp_set_sync_interval`)
-instead of lwIP's default hour, so the responder's freshness window
-([Serving NTP](#serving-ntp-udp123)) has fifteen polls of margin rather than
-none: with the default, one lost reply would flip the server to stratum 16 for a
-whole cycle.
-
-Ordering is the fiddly part, and both halves are load-bearing:
-
-1. `NtpTime::begin()` runs **before** `esp_eth_start()`, because lwIP only keeps
-   an option-42 server if `sntp_servermode_dhcp()` was enabled when the DHCP ACK
-   is processed. Getting that wrong is silent: the log just never shows
-   `upstream time server`.
-2. `onGotIp()` re-polls on the lease, because the first poll at boot may have
-   gone out before the option-42 address existed. In `dhcp` mode with no option
-   42 in the lease it warns once: `no NTP server in the lease (option 42)`.
-3. Switching back to `dhcp` while a lease is already held cannot pick option 42
-   up until the next DHCP bind — lwIP only hands the address to SNTP at that
-   point, so `/ntp/sync` answers 504 in the meantime and `/healthz` shows
-   `ntp_server: null`. The switch logs `option 42 arrives at the next DHCP
-   bind`; a reboot applies it at once.
-
-```console
-$ curl -s -X POST http://192.0.2.20/ntp/sync        # poll now, wait up to 5 s
-{"synced":true,"time":"2026-11-11T13:38:44+1100","ntp_server":"192.0.2.1"}
-
-$ curl -s -X POST -H 'Content-Type: application/json' \
-       -d '{"timeSource":"static","ntpServer":"ntp.example.net"}' \
-       http://192.0.2.20/config
-{"hostname":"esp32p4-ntp","tz":"...","timeSource":"static","ntpServer":"ntp.example.net"}
-```
-
-With `timeSource=off` (or `static` and an empty `ntpServer`) `/ntp/sync` answers
-`409 {"error":"no time source: set timeSource to dhcp, static or gps"}`; a poll
-that gets no answer within 5 s is `504 {"error":"no time sync from the upstream
-server"}`. Names are resolved with the DNS server from the lease, so
-`ntpServer` can be a hostname.
-
-This path is the fallback, not the reference: it steps the clock from somebody
-else's server and cannot say how far away that server is. The stratum-1 path is
-the GPS ([GPS](#gps-u-blox-lea-8--pps)), and the responder must not serve a clock
-that is still slewing — hence the step here rather than a slew.
-
-Errors (all captured on this unit):
-
-```console
-$ curl -s -X POST http://192.0.2.20/healthz
-{"error":"method not allowed on /healthz","statusCode":405}
-$ curl -s http://192.0.2.20/nope
-{"error":"no such endpoint: /nope","statusCode":404}
-$ curl -s -X POST -d '[]' http://192.0.2.20/config
-{"error":"invalid JSON (expected an object)","statusCode":400}
-$ curl -s -X POST http://192.0.2.20/config
-{"error":"JSON body required","statusCode":400}
-$ curl -s -X POST --data-binary @big.json http://192.0.2.20/config
-{"error":"request body too large","statusCode":413}
-$ curl -s -X POST http://192.0.2.20/ntp/sync      # with timeSource=off
-{"error":"no time source: set timeSource to dhcp, static or gps","statusCode":409}
-$ curl -s -X POST http://192.0.2.20/ntp/sync      # server silent for 5 s
-{"error":"no time sync from the upstream server","statusCode":504}
-```
-
-Body size is capped at 4 KB, and string values at 63 characters
-(`Settings::kMaxValueLen`); longer values are truncated and logged. `hostname`
-has its own, smaller cap of 32 (`Settings::kMaxHostnameLen`), because
-`esp_netif_set_hostname()` refuses anything longer — and refuses it at boot,
-where the failure is fatal, so the limit is applied where the value is stored
-rather than where it is used. That name travels twice in the DHCP request
-(option 12 and ESP-IDF's vendor-class-identifier hook), which is why
-`sdkconfig.defaults` also raises `CONFIG_LWIP_DHCP_OPTIONS_LEN` to 128: at the
-default 69 the option area fits 14 characters, and anything longer makes lwIP
-drop an option and print an `LWIP_ERROR` on every boot.
-
-Settings live as one JSON blob in NVS (namespace `settings`, key `config`),
-which is why they survive a reboot. `Settings` is a mianesp `SettingsBase`
-subclass: the fields are registered with their compiled-in defaults in the
-constructor via `field()`, so a new setting is one `field()` line plus its
-member (and, if it needs to take effect immediately, an `onChange()` callback —
-that is how a new `tz` reaches `setenv`/`tzset`).
-
-The dependencies are mianesp components pulled over git (`main`), plus
-`espressif/cjson` from the registry — cJSON left the IDF core in v6. The first
-build downloads them into `managed_components/` (git-ignored), and it needs an
-SSH key with read access to `mianos/mianesp`.
-
-## Fallback when the receiver stops
-
-`timeSource=auto` is the stratum-1 GPS path with an upstream behind it. While
-the receiver is locked it is served and it steers, exactly as `gps` does. When
-the receiver stops correcting — no pulse for fifteen seconds, which is three
-lost seconds plus a margin — the SNTP client is started against `ntpServer` if
-one is set and the lease's option-42 server otherwise, and the clock, the served
-reference and the stratum all move to it.
-
-The rule that makes this safe is that **exactly one source owns
-`CLOCK_REALTIME` at any instant**. Ownership changes on the client's first
-sync, not on a timer, and going back is stop-then-hand-back: the receiver has to
-hold for twenty seconds, the client is stopped, and only then is the servo
-allowed to steer again. A settling window keeps the edge that lands on the same
-instant as the client's step from measuring that step as an error and undoing
-it. While the client owns the clock the receiver keeps measuring — the offsets
-at `/gps/info` continue and are taken against the upstream's clock — because
-that is what shows the two references pulling apart.
-
-While the receiver still claims something worth serving (locked, or holding over
-on its fitted rate) it is what answers, so a short outage stays a stratum-1
-answer with growing dispersion. Only when that claim expires does the upstream
-answer, at stratum 3 with the LAN guess for root delay: lwIP's client cannot
-measure its own round trip and the upstream's own stratum is not visible through
-it, so the claim is one hop pessimistic rather than optimistic. With neither
-source usable the board answers stratum 16 and LI 3, as it always has.
-
-Three limits are worth knowing:
-
- - **Nothing to fall back to.** No `ntpServer` and no option 42 in the lease
-   means the client comes up with nothing to poll; the board then serves the
-   receiver until its holdover expires and stratum 16 after that. Option 42 is
-   collected from boot even while the client is stopped, but a lease that
-   arrives before `auto` is set is not replayed — name a server with
-   `ntpServer` instead of relying on it.
- - **A server pointing at this board.** An offset measured against ourselves is
-   always zero, so the clock would look disciplined and free-run. The dotted quad
-   is compared against the leased address and skipped with a warning; a host name
-   that resolves back here is not caught.
- - **It does not make the clock good.** A WAN path is milliseconds where the
-   receiver is microseconds, so a fallback is about not lying and not drifting,
-   not about staying a reference. `gps_fallback`, `time_owner` and
-   `fallback_age_s` at `/healthz` are how a client or a person tells.
-
-## GPS (u-blox LEA-M8T + PPS)
-
-The reference the server exists for. `timeSource=gps` makes the board a
-stratum-1 server: the date and time come from a u-blox LEA-M8T over UART, the second
-boundary from its timepulse, and `CLOCK_REALTIME` is slewed to match.
-
-| Signal     | GPIO | Direction                          | Carries |
-|------------|------|------------------------------------|---------|
-| module TX  | 16   | into the P4 (UART1 RX)             | `UBX-NAV-PVT` and `UBX-NAV-TIMELS`, once a second: UTC date/time, fix type, satellite count, leap-second offset |
-| module RX  | 15   | out of the P4 (UART1 TX)           | configuration — nine short frames at boot |
-| module PPS | 14   | into the P4, rising edge, interrupt | the top of the second |
-
-UART1 at 9600 8N1, no flow control, which is the module's factory default. The
-three pins are `kTxPin` / `kRxPin` / `kPpsPin` at the top of `main/gps_time.cpp`;
-nothing else in the firmware touches them.
-
-### Which wire does what
-
-The UART says *which* second it is. The PPS says *when* that second started. That
-split is the whole accuracy story, and it is why the receiver is not simply read
-over the serial port:
-
-- a NAV-PVT frame is 92 bytes and arrives a few tens of milliseconds after the
-  boundary. It cannot tell you where in the second you are, so a server built on
-  the UART alone would be tens of milliseconds out — worse than the upstream SNTP
-  clock it would be replacing;
-- the PPS edge is the other half: the interrupt handler stamps
-  `esp_timer_get_time()` as it fires, so what limits it is interrupt latency
-  (microseconds), not the frame time.
-
-Walk through one second:
-
-1. **Edge.** The ISR stamps the monotonic clock and bumps a counter. It runs from
-   IRAM (`CONFIG_ESP_TIMER_IN_IRAM` makes the counter IRAM-safe), so an OTA write
-   disabling the flash cache for a few milliseconds cannot turn an edge into a
-   crash. Edges less than 0.5 s apart are ignored: that is header-pin bounce, or a
-   module reconfiguring its pulse, not a second passing.
-2. **Frame.** NAV-PVT arrives, the checksum is verified (a frame that fails it is
-   dropped, never guessed at), and if the newest edge is under 900 ms old and has
-   not already been paired, the two become an **anchor**: `(UTC second, monotonic
-   instant)`.
-3. **Serve.** Every timestamp the responder puts on the wire is the anchor plus
-   elapsed monotonic time, corrected by the servo's rate (`esp_timer` here
-   undercounts by 30 ppm, and 30 µs a second is not nothing). `GpsTimeRef::now()`
-   does not read `CLOCK_REALTIME` at all, so an `adjtime()` correction in flight
-   can never reach a reply, and two replies cannot go backwards.
-4. **Steer.** The same anchor corrects the system clock, because the log lines,
-   `/healthz` and the HTTP `Date` header read it: a step when there is no previous
-   fix or the offset is over 250 ms, otherwise `adjtime()` with the residual — a
-   few tens of microseconds a second, which IDF applies in seconds, not minutes.
-5. **Notice.** NAV-TIMELS carries the leap-second offset and any announcement, and
-   is kept for the first byte of a reply ([Accuracy](#accuracy-and-the-parts-that-are-not)).
-
-The 900 ms pairing window is the honest part of step 2. If a frame arrives later
-than that, it is not describing the edge that was stamped — the edge was missed,
-or the receiver is late — and pairing it anyway would put the anchor a whole
-second out. Such a second is skipped instead; if that keeps happening, the lock
-expires, which is the correct answer.
-
-### What the module has to be set to
-
-The firmware configures the receiver over UART at every boot, with
-`UBX-CFG-MSG`: `NAV-PVT` once a second on UART1 — the date, the fix, the satellite
-count — `NAV-TIMELS` once a second beside it for the leap-second notice, and the
-NMEA sentences (GGA, GLL, GSA, GSV, RMC, VTG, ZDA) off so the line carries only
-what is read here. `NAV-TIMELS` is 24 bytes on a line that has room: the GPS-UTC
-offset, whether a leap is announced, and the countdown to it, which is the only
-source for the leap indicator in a reply's first byte.
-
-The timepulse is **asserted**, not assumed. `UBX-CFG-TP5` goes out first — 1 Hz
-and 1 Hz again for the locked case, `alignToTow`, rising edge, UTC grid, 100 ms
-wide — with the antenna and user delays left at zero because the lead's delay is
-not known and a made-up figure would be worse than none. A pulse somebody moved in
-`u-center` is the one fault that makes this server confidently wrong rather than
-merely stale, and 32 bytes per boot is cheaper than a README asking the reader to
-go and look. The module's answer is reported, not swallowed: `/healthz` carries
-`gps_tp5_ok`, and a refusal is a warning at boot.
-
-Each configuration message is sent on its own and the firmware waits for that
-message's own ACK or NAK before sending the next, because this receiver answers
-some of what it is asked and ignores the rest — `MON-COMMS` gets silence, so a
-port list has to be synthesised for `u-center`
-([below](#u-center-at-the-same-time-as-the-server)) — and an order-based guess
-drifts apart inside one boot. The three replies it does give are acted on directly
-rather than matched up afterwards.
-
-**`UBX-NAV-TIM-TP`** is the obvious way to stop guessing: every pulse would arrive
-with the receiver's own quantisation error (`qErr`) and its nominal time of week,
-turning root delay from an assumption into a measurement. The receiver is a
-LEA-M8T with `PROTVER 22.00`, well past the protocol 15 that introduced the
-message, and it still refused the enable for most of a session — until a hardware
-reset, after which the same bytes are acknowledged. So a refusal here is worth
-suspecting as module state before capability; `/healthz` reports the answer as
-`gps_timtp` (`rejected`, `accepted` or `silent`), and the three are worth keeping
-apart for exactly that reason.
-
-The message also stays silent without a time solution, so it says nothing while
-the receiver has no fix — which is why the budget never depends on it. The jitter
-it would have described is measured instead from the servo's own residuals
-([the numbers](#accuracy-and-the-parts-that-are-not)), and `qErr` plus the
-pulse-position check start contributing the moment both a fix and the message
-exist.
-
-Nothing here is followed by `UBX-CFG-CFG`: saving it to the receiver's flash would
-outlive the firmware and take the module's own defaults away from `u-center`.
-Eleven short frames per boot is the cheaper trade.
-
-### Constellations, and the one pair that will not coexist
-
-`UBX-CFG-GNSS` is asserted at every boot, and the receiver takes it. What it
-asserts is **GPS + Galileo + GLONASS + QZSS**: 37 satellites in view on this site
-against 22 before, median elevation 49° against 35°, and a median C/N0 that did
-not move — the new satellites are weak ones, but they are *high* ones, and height
-is what a position solution has least of.
-
-**BeiDou and GLONASS are mutually exclusive on this receiver**, which is
-documented nowhere obvious and took a bisect over every combination. Enabling
-BeiDou comes back `NAK` while GLONASS is on, and `NAK` while Galileo is on for the
-same reason, so of the six constellations only these two coherent sets exist:
-
-| `POST /gps/gnss` | Set | In view here |
+Success is a 2xx with the resulting state as the body; failure is
+`{"error":"...","statusCode":N}` with the matching status, and unknown paths and
+wrong methods get the same JSON shape.
+
+| Method | Path | Purpose |
 |---|---|---|
-| `{"set":"max"}` (default) | GPS, Galileo, GLONASS, QZSS | 37 |
-| `{"set":"beidou"}` | GPS, BeiDou, QZSS | — trades GLONASS and Galileo for BeiDou |
+| GET | `/healthz` | uptime, clock, build, heap, link, addresses, clock source, servo, responder |
+| GET | `/config` | current settings |
+| POST | `/config` | apply any subset of the keys, persist, echo back |
+| POST | `/config/reset` | compiled-in defaults |
+| POST | `/ntp/sync` | poll the upstream now and wait up to 5 s; while the receiver serves, report the lock |
+| POST | `/ntp/txlag` | transmit correction on or off, for A/B runs |
+| GET | `/gps/info` | receiver identity, servo, signal, antenna, configuration answers |
+| GET | `/gps/bench` | all of the above plus the configuration echoes, for a bench session |
+| GET | `/gps/sats` | per-satellite C/N0, elevation and azimuth |
+| GET | `/gps/samples` | drain the 900-epoch ring by cursor |
+| POST | `/gps/survey` | `{"action":"start","hours":24,"acc_mm":30000}`, `{"action":"fix"}`, `{"action":"stop"}` |
+| POST | `/gps/pps` | ignore PPS edges for `{"suppress_s":N}` seconds — the holdover test hook |
+| POST | `/gps/ant` | `{"bias":"on"\|"off"}`, `{"delay_ns":N}` cable delay, `{"user_ns":N}` calibration, `{"pulse_ms":N}`, `{"period_us":N}` |
+| POST | `/gps/gnss` | `{"set":"max"\|"beidou"}` or `{"mask":N}` |
+| POST | `/gps/reset` | hot start; `{"cold":true}` also drops the almanac; `{"hardware":true}` re-initialises the receiver |
+| POST | `/gps/baud` | `{"baud":38400,"module":true}` |
+| POST | `/eth/restart` | restart the MAC |
+| GET | `/firmware` | build and slot information |
+| POST | `/firmware` | write the body into the inactive slot and reboot into it |
 
-`{"mask":N}` is accepted for anything neither name covers, one bit per `gnssId`
-(GPS 0, SBAS 1, Galileo 2, BeiDou 3, IMES 4, QZSS 5, GLONASS 6). A mask the
-receiver refuses leaves the old set in place and says so: `gnss_cfg` goes
-`rejected`, beside `gnss`, which names what was asked for. A mask change re-runs
-the whole message set, because the acquisition is thrown away with it.
+`/healthz` reports the clock source, the responder's live claim, the receiver's
+fix and the servo. Some fields are present only when they apply, because a
+healthy box has nothing to say about them: `gps_tp5_rejected`,
+`gps_ant_cfg_rejected`, `gps_ant_short`, `gps_ant_latched`,
+`gps_pps_suppressed_s`. Address fields are omitted until each address exists.
 
-SBAS and IMES are off in both sets. Nothing here applies SBAS corrections, so its
-two geostationary satellites would be two more low measurements for a channel;
-IMES is an indoors system. The channel counts are the receiver's own reported
-defaults, untouched — they are already the split u-blox ships for a five
-constellation mask, and a different one would be a guess against a working
-baseline.
+`ip` is the board's, not the caller's: the same JSON comes back over either
+family.
 
-Turning a constellation on costs minutes, not seconds: Galileo appeared about
-seven minutes after being enabled and then filled out to ten satellites. Judging
-one by the first minute after the change will look like nothing happened.
+## GPS reference
 
-### Surveying the position, and locking it
+`timeSource=gps` makes the box a stratum-1 server. `auto` adds an upstream behind
+it ([fallback](#fallback)).
+
+The receiver is configured at every boot with `UBX-CFG-MSG`: `NAV-PVT` and
+`NAV-TIMELS` once a second, all NMEA off. Each message is sent on its own and
+waits for its own ACK or NAK, because this module answers some of what it is
+asked and ignores the rest. Nothing is saved to the receiver's flash, so
+`u-center` keeps its own defaults and a handful of short frames per boot is the
+cost.
+
+The line starts at the rate in `gpsBaud`, 38400 as shipped. With no valid frame
+in 4 s it walks 9600, 115200, 57600, 19200 and 4800 and then starts over: a
+receiver that has been through `u-center` is usually not on 9600 any more, and a
+scan is cheaper than a datasheet. 38400 also keeps the wire at about 10% busy
+with the diagnostics loaded, against 43% at 9600, which is what stops the line
+deciding what can be enabled. `POST /gps/baud {"baud":38400,"module":true}` moves
+it; without `module` only the host moves.
+
+Only the receiver's IO section is saved to its flash, so a new rate survives a
+power cut without pinning the message rates and the constellation mask to that
+boot. The module does not resume its periodic output until it is power-cycled,
+so the old rate is written back if frames stop; and it never ACKs `CFG-PRT`, so
+silence means carry on and only a NAK stops the move.
+
+### Constellations
+
+`UBX-CFG-GNSS` is asserted at every boot: **GPS + Galileo + GLONASS + QZSS**.
+SBAS and IMES are off — nothing here applies SBAS corrections and IMES is an
+indoors system.
+
+**BeiDou and GLONASS are mutually exclusive on this receiver.** Enabling BeiDou
+is NAKed while either GLONASS or Galileo is on, so two coherent sets exist:
+
+| `POST /gps/gnss` | Set |
+|---|---|
+| `{"set":"max"}` (default) | GPS, Galileo, GLONASS, QZSS |
+| `{"set":"beidou"}` | GPS, BeiDou, QZSS — trades GLONASS and Galileo |
+
+`{"mask":N}` takes one bit per `gnssId` (GPS 0, SBAS 1, Galileo 2, BeiDou 3,
+IMES 4, QZSS 5, GLONASS 6). A refused mask leaves the old set in place and
+reports `gnss_cfg` as `rejected`.
+
+A new constellation costs minutes, not seconds: Galileo took about seven minutes
+to appear and ten to fill out. Judging it by the first minute looks like nothing
+happened.
+
+### Surveying the position
 
 A timing receiver should not be solving its own position. While it does, the
-position moves with the clock and the pulse with it; with the position fixed, the
-receiver solves time only. Position error is cheap in time — 3.3 ns per metre,
-averaged over the constellation — so even a survey that lands metres is worth
-more than none, which is why this is offered on a site that will never be
-survey-grade.
+position wanders with the clock and the pulse with it; with the position fixed it
+solves time only.
 
 ```console
-$ curl -s -X POST -d '{"action":"start","hours":24,"acc_mm":3000}' http://192.0.2.20/gps/survey
-$ curl -s http://192.0.2.20/gps/info | python3 -m json.tool | grep svin   # watch it
-$ curl -s -X POST -d '{"action":"fix"}'   http://192.0.2.20/gps/survey    # lock the result
-$ curl -s -X POST -d '{"action":"stop"}'  http://192.0.2.20/gps/survey    # back to moving
+$ curl -s -X POST -d '{"action":"start"}' http://<box>/gps/survey
+$ curl -s http://<box>/gps/info | grep svin          # watch it
+$ curl -s -X POST -d '{"action":"fix"}' http://<box>/gps/survey
 ```
 
-`CFG-TMODE2` ends a survey only when the minimum duration **and** the mean variance
-limit are both met, so `acc_mm` decides whether it ever finishes. The default is
-**30 m, not the 3 m "survey-grade" suggests**, because the limit is compared against
-the *site's wander* and not against how well the mean is known. Those are different
-numbers and the wander is usually the larger, so a limit chosen for the mean can sit
-under a scatter the site will never beat: the survey then runs its whole duration
-and ends with `valid` false, which reads as failure for a position that was fine.
-Pick the limit from the receiver's own `gps_svin_acc_mm` while it runs, not from the
-accuracy that is wanted.
+The defaults are 24 hours and a 30 m limit. The receiver ends a survey only when
+the minimum duration **and** the mean variance limit are both met, so `acc_mm`
+decides whether it ever finishes. 30 m, not the 3 m "survey-grade" suggests, is
+the useful limit: it is compared against the site's own wander rather than
+against how well the mean is known, and the wander is usually the larger. Pick
+the limit from `gps_svin_acc_mm` while the survey runs, not from the accuracy you
+want.
 
-A start whose limit is tighter than what the receiver is already scattering is
-logged as such, rather than being discovered a day later.
+A finished survey is logged once with its accuracy rather than locked
+automatically: the accuracy is worth a look first. Changing the mode mid-survey
+does not restart it; `stop` then `start` does.
 
-`gnss`'s siblings: `gps_time_mode` is `moving`, `survey` or `fixed`; `gps_svin_dur_s`,
-`gps_svin_obs`, `gps_svin_valid`, `gps_svin_age_s` and the accuracy pair
-`gps_svin_acc_mm` / `gps_svin_var_mm2` come from the receiver's own progress message.
-`valid` is the receiver saying the result is good enough to use, and it stays false
-until both conditions are met. A finished survey is logged once, with its accuracy,
-rather than locked automatically — the accuracy is worth a look first.
+The mode and position are re-sent from NVS at boot. `CFG-TMODE2` restarts the
+pulse generator, so it is not sent until there is a fix, satellites and a live
+edge, and a refusal after that backs off from 5 s to 5 min.
 
-**What survives a reboot.** Nothing in the receiver's RAM does, so the mode and the
-position are re-sent from NVS at start-up: a survey with its own parameters, a lock
-as it was. Adopting the position into RAM is not the same as asking for it, and the
-two were once the same act — the hold was restored, never sent, and the receiver
-came up moving while `/config` still said `fixed` and `/gps/info` reported a hold
-that did not exist. Every boot spent the survey for nothing.
+### Antennas
 
-`CFG-TMODE2` restarts the pulse generator, so it is not sent at four seconds in
-with the receiver still acquiring: that cost five seconds of edges, two refusals
-and the fallback upstream taking the clock. The frame waits until there is a fix,
-satellites and a live edge, and a refusal after that backs off (5 s doubling to
-5 min). It stops once the receiver is in fixed mode, while a survey is running, or
-when the stored mode is no longer `fixed`, so a `stop` is not undone by the retry.
+The M8T does have an antenna supervisor, and `CFG-ANT` bit 2
+(open-circuit detection) is the one this firmware rejects: `0x0F` is NAKed,
+`0x0B` with the pins named is accepted. A NAK is about the whole message, so any
+one unsupported bit hides an otherwise complete feature.
 
-**TIM-TP stops in fixed mode**, because it is a survey-time message and a held
-position has no survey to describe. The receiver still emits the pulse and the
-capture still trusts it, so what is lost is only the receiver's statement of where
-that pulse sits — bounded by the generator's step, not unknowable. The
-`unobserved` term therefore holds at the 5 µs quantisation clamp while the edge is
-trusted instead of climbing 10 µs a second to a 200 ms cap. Left climbing it
-demoted a box within a minute of the frames stopping, and because the term never
-comes back the box never promoted again: the upstream kept the clock while 40 µs
-of dispersion had been the truth.
+With the switch closed the front end recovers: `agc` falls from ~5300 to the low
+hundreds and `cn0_max` goes from 0 to 42–44. That C/N0 is the number to judge an
+antenna by. Satellite count is not: a better antenna adds the marginal ones last,
+and a worse one can hold the count up on the strongest handful while everything
+near the horizon goes.
 
-**Two message dialects, and how they were found.** The first attempt used
-`UBX-CFG-TMODE3` (0x06 0x71) and `UBX-NAV-SVIN` (0x01 0x3B). Both are wrong here and
-wrong in a way that looks almost like working: TMODE3 was *acknowledged* and then
-read back as all zeros, and NAV-SVIN was `NAK`ed. At `PROTVER 22` this is an M8, and
-its messages are **`CFG-TMODE2` (0x06 0x3D)** and **`TIM-SVIN` (0x0D 0x04)** — same
-28-byte layout, but the first byte is `version` in one and `timeMode` in the other,
-so TMODE3 was being told "disabled" every time and answering `ACK`. The `TIM-`
-prefix is the tell: this is a TIM firmware, and the `onNavSvin` parser reads `dur`,
-the mean position, `meanV` and `obs` from offsets confirmed against live frames
-rather than from a specification.
+Turning the bias off and on again does not bring the sky back by itself — the
+receiver sits at zero satellites until it re-initialises its front end, so
+`/gps/ant` queues a reset on the off-to-on edge.
 
-`meanV` is a **variance in mm²**, and the two accuracy fields of `CFG-TMODE2`
-(`fixedPosAcc`, `svinAccLimit`) are **plain mm with no scaling** — spec R27 p.267.
-So the square comes off on the way to the wire, even though the positions beside
-them in the same message are in **centimetres**.
+The RF connector is SMB. An SMA adapter on it is a snap-fit with real loss and
+contact risk: reseat it before blaming the antenna.
 
-Behaviour alone cannot settle this, which is why the wrong reading survived: a
-limit of 9e8 finishes a survey and 9e6 does not, and that is true under either
-reading. The spec decides it, and the same page says why the field matters — the
-3D accuracy "directly affects the accuracy of the timepulse" (R27 p.100). Sent the
-raw variance, the receiver is told its antenna is known to hundreds of kilometres,
-and in fixed mode that is an unlocked pulse, no `TIM-TP`, and a clock free-running
-at the crystal's rate while still publishing an accuracy in microseconds.
+A known lead delay goes in as `{"delay_ns":N}` — coax is about 5 ns per metre and
+the figure is taken off the pulse, which is the same correction whether the extra
+metres are in the cable or the antenna is simply further away. 200 µs is over
+40 km.
 
-The API still takes an accuracy in mm and squares it to keep the variance; the
-read-back roots it, and both `gps_svin_var_mm2` and `gps_svin_acc_mm` are published
-so a disagreement is visible.
+### `/gps/info` and `/gps/sats`
 
-Changing the time mode while one is already running does not restart it — the
-duration keeps counting. `stop` then `start` is the way to begin again with
-different parameters.
+`/gps/info` is the diagnostics: module identity, pin map, servo, signal,
+antenna, and which configuration messages were accepted. `ant_cfg` and `timtp`
+are three-state — `rejected`, `accepted`, `silent` — because a refusal, an
+acceptance that never arrived, and a message never asked for are three different
+faults. The two age fields say when the reading was taken.
 
-### Antennas, and what the front end says about one
+| Key | Means |
+|---|---|
+| `cn0_max` / `cn0_mean` / `cn0_used` | C/N0 on used satellites, dBHz. How two antennas are compared. |
+| `agc` | AGC count. Pinned near 5460 is a desensed front end: no preamp, an open feed, or an interferer. |
+| `jam_ind` / `jam` | Interference index and verdict. High alongside *low* `agc` means an interferer rather than a missing feed. |
+| `noise_dbm` | `MON-HW` noise floor. Barely moves here; `agc` and `cn0` are the tell. |
+| `ant` / `ant_power` / `ant_bias` | What the supervisor reports and what the switch is doing. |
 
-The M8T **does have an antenna supervisor**, and it took a while to find because
-one flag bit refuses the entire message. Every attempt used `0x0F` — supply,
-short detect, open detect, power-down-on-short — and every one came back `NAK`,
-which reads exactly like "no supervisor here". It is not: sweeping the bits one at
-a time shows `svcs`, `scd` and `pdwnOnSCD` all accepted, and **bit 2, open-circuit
-detection, is the one this firmware rejects**. With `0x0B` and the pins named, the
-receiver reports `aStatus ok` and `aPower on` and drives the switch.
-
-The working frame is `flags 0x0B, pins 20/27` — the `EXTINT` pair the board wires
-to the transistor base and the short-sense divider. `gps_ant` and `gps_ant_power`
-now report what the receiver says instead of `unknown`.
-
-The lesson is worth keeping: a `NAK` is about the whole message, so any one
-unsupported bit hides an otherwise complete feature. Vary the bits before
-concluding a message is absent.
-
-With the switch closed the front end recovers completely: `agc` falls from ~5300 to
-the low hundreds, `cn0_max` goes from 0 to **42–44**, and the receiver holds a
-3D fix and stratum 1. That C/N0 is the number to judge an antenna by; 11 was an
-unpowered preamp, 42 is a working one.
-
-`NAV-TIM-TP` remains odd on this receiver. It was acknowledged once, immediately
-after a hardware reset, and refused at every other time — including now, with a fix,
-which is when it would actually have something to say. `/healthz` reports it as
-`rejected`; the code path stays because it costs nothing and the earlier ACK proves
-the message exists.
-
-**The board is a WD22UGRC**, a Huawei carrier for the LEA-M8T, and it does not
-generate antenna power: the 8-pin header takes `V_ANT` on pin 1 as a *supply
-input* separate from Vcc on pin 2, and the transistor pair switches it. No supply
-on pin 1 means no bias, however the receiver is configured — it was measured dry
-here, and an unpowered preamp is a 10 to 20 dB attenuator: worse than a passive
-antenna, not better. That is what `cn0_max` 11 dBHz over a working fix was, and
-when the path faded the last few dB it went to zero and stayed there.
-
-The switch is the board's, not the firmware's: the two PNPs take base drive from
-the module's `AADET_N` pin and report a short on `SCS1_N`, and the module drives
-those once `CFG-ANT` is accepted. `V_ANT` on pin 1 still has to be fed — the board
-switches a supply, it does not make one.
-
-A GPIO drive on 17 with a sense on 18 exists as a fallback for a module that
-cannot be configured, and costs nothing while unused.
-
-The RF connector is SMB, and the SMA adapter often used on a bench is a snap-fit
-with real loss and contact risk — worth reseating, and worth suspecting before the
-antenna is blamed for a weak sky.
-
-The module stays a LEA-M8T and is not suspected: unplugging and refitting the
-antenna moves `gps_noise_dbm` by 2 dB, `gps_agc` by 78 counts and `gps_jam_ind` by
-8, all in the direction an open connector and a matched one should move, so the RF
-front end and the board's trace are both alive. What is missing is L1 at the pin.
-
-What software can say is what the front end is doing, which turns out to be
-enough to spot a dead antenna path without a supervisor:
-
-| Key at `/gps/info` | Means |
-|-----|-------|
-| `cn0_max` / `cn0_mean` / `cn0_used` | C/N0 on **used** satellites, in dBHz. This is how two antennas are compared. Satellite count is not: a better antenna adds the marginal ones last, and a worse one can hold the count up on the strongest handful while everything near the horizon goes. |
-| `noise_dbm` | `MON-HW` noise floor. A preamp tell only in the coarse sense: this board sits near −99 dBm with the preamp powered and −98 with it off, so the number barely moves and the **`agc` and `cn0` pair is what actually separates the two** (5460 and 9 dBHz unpowered, 1400–1600 and 24–27 dBHz powered). Do not read −99 as "no preamp" here, which an earlier version of this table invited. |
-| `agc` | AGC count. Pinned near 5460 is a desensed front end: no preamp, an open feed, or a strong interferer. |
-| `jam_ind` / `jam` | Interference index, and the receiver's verdict where the firmware offers one. It runs near 50 desensed and near 10–25 with the preamp powered, so a high value alongside *low* `agc` means an interferer rather than a missing feed. |
-| `ant` / `ant_power` / `ant_bias` | What the supervisor reports, and what the switch is doing. |
-
-**Turning the bias off and on again does not bring the sky back by itself.** The
-supply returns, the receiver sits at zero satellites, AGC pegged and `ant`
-DONTKNOW, and stays there — four minutes of it before a hardware reset restored
-24 dBHz in fifteen seconds. `/gps/ant` on the off-to-on edge therefore queues that
-reset itself, because the missing step is the module re-initialising its front
-end and the next person to compare two antennas would otherwise be left with a
-deaf receiver and no obvious next move.
-
-### GET /gps/info, for the diagnostics
-
-Everything `/healthz` does not carry: the receiver's identity, the pin map, the
-servo, the signal, the antenna, and which configuration messages it took.
-
-```console
-$ curl -s http://192.0.2.20/gps/info | python3 -m json.tool
-{"module":"EXT CORE 3.01 ... PROTVER=22.00 MOD=LEA-M8T-0",
- "ant_cfg":"accepted","tp5_ok":true,"timtp":"rejected",
- "offset_us":31,"rate_ppm":-30.06,"rate_n":300,
- "dispersion_us":2.4,"lock_window_s":600,
- "ant":"ok","ant_power":"on","ant_bias":"on","ant_short":false,
- "noise_dbm":-100,"agc":1638,"jam_ind":8,"jam":"unknown",
- "cn0_max":43,"cn0_mean":29,"cn0_used":14,
- "leap_s":18,"leap_pending":false,
- "pin_sel":"0001f400","pin_dir":"00010000","pin_val":"0000f7ef",
- "mon_hw_age_s":0.66,"cn0_age_s":0.75}
-```
-
-`ant_cfg` and `timtp` are three-state — `rejected`, `accepted`, `silent` — because
-a refusal, an acceptance that never arrived, and a message never asked for are
-three different faults. `pin_dir` having a bit set is the receiver driving the
-antenna switch; `pin_sel` and `pin_val` are the rest of the pin map. The two ages
-are there because a reading is only worth anything next to when it was taken.
-
-`cn0_*` is the antenna metric and `noise_dbm` the preamp tell — see
-[Antennas](#antennas-and-what-the-front-end-says-about-one) for which number to
-compare on and which to diagnose with.
-
-### GET /gps/sats, for the sky view
-
-Per-satellite C/N0 with elevation and azimuth, for a polar plot. Separate from
-`/gps/info` because it is the one response whose size follows the sky.
-
-```console
-$ curl -s http://192.0.2.20/gps/sats
-{"used":14,"mean":29,"max":43,"age_ms":210,
- "sats":[{"gnss":0,"sv":6,"cno":31,"elev":41,"azim":212,"flags":2327}, ...]}
-```
-
-`used`, `mean` and `max` are the same figures `/gps/info` reports, repeated so a
-poller needs one request. `age_ms` is how old the sample is, and is `null` before
-the first `NAV-SAT` arrives.
-
-The point of the rows is that an aggregate cannot separate the two ways a
-satellite goes bad. One reflected off a roof or a wall arrives **loud** — high
-C/N0 — but late and on a low or fixed elevation; one near the horizon is simply
-weak. Both land in the same `cn0_mean`. Plotting C/N0 against elevation is what
-tells them apart, and that is the difference between a bad site and a bad
-antenna; a survey that will not converge is the usual reason to look.
-
-`flags` is the receiver's own word, passed through unmasked rather than
-reinterpreted: `qualityInd` is bits 0-2, `svUsed` bit 3, `health` bit 4,
-`ephAvail` bit 8. A loud satellite with `health` set and `svUsed` clear is the
-multipath signature, so the plot should colour on those bits rather than on C/N0
-alone. Rows are not deduplicated by `sv`: a multiband receiver lists one
-satellite once per band, and they are genuinely separate measurements.
-
-`elev` is `-91` and `azim` `0` on a receiver with no fix yet: the geometry comes
-from the broadcast ephemeris, so it is only meaningful once satellites are being
-used. Everything is capped at 32 rows.
-
-Two hooks exist for a bench session:
-
-```console
-$ curl -s -X POST -d '{"bias":"on"}' http://192.0.2.20/gps/ant
-{"requested":"on","read_back_after_s":3,...}
-$ curl -s -X POST -d '{"set":"max"}' http://192.0.2.20/gps/gnss      # GPS+Galileo+GLONASS+QZSS
-$ curl -s -X POST -d '{"set":"beidou"}' http://192.0.2.20/gps/gnss   # GPS+BeiDou+QZSS
-$ curl -s -X POST http://192.0.2.20/gps/reset                      # hot start, almanac kept
-$ curl -s -X POST -d '{"cold":true}' http://192.0.2.20/gps/reset  # discard the almanac
-$ curl -s -X POST -d '{"hardware":true}' http://192.0.2.20/gps/reset
-```
-
-`/gps/ant` queued the change for the GPS task, which owns the UART, and the answer
-is a `gps_ant_power` reading three seconds later. On this module it changes
-nothing — there is no supervisor to accept it — but it is the right hook for one
-that has.
-
-The three reset strengths are ordered deliberately: a hot start restarts the
-navigation engine; a cold one also throws the almanac away; a hardware reset
-re-initialises the receiver and drops its whole runtime configuration, so the
-message set is re-sent three seconds later — without that it comes back speaking
-NMEA at 9600 and the parser has nothing to read. The hardware reset is the one
-that changed anything here: it turned a refused `NAV-TIM-TP` enable into an
-acknowledged one while leaving `CFG-ANT` refused. Reach for it before concluding
-that a message is unsupported.
-
-**What this looked like before the flag bit was found**, kept because it is what an
-unswitched preamp does. As received the board reported `cn0_max` 11 and
-`gps_cn0_mean` 9 across 12 used satellites with a 3D fix — 25 to 35 dB below a
-healthy active antenna — and then fell to zero satellites and stayed there through
-a hot start:
-
-```console
-gps_fix 0  gps_sats 0  cn0_max 0  noise_dbm -100  agc 5460  jam_ind 58
-```
-
-Zero satellites while PPS still arrives, over a −100 dBm floor, is an open or
-unpowered feed rather than a configuration fault — which was right, and the cause
-was the refused flag bit rather than the antenna. The firmware was cleared the hard way, and the
-order matters if anyone has to do this again: the **original image from before any
-of the antenna work** (`f84fe50`) was flashed onto a board that had been power
-cycled at the wall, and it sat at zero satellites for three minutes. Nothing in
-the firmware writes the RF path, so nothing in the firmware can be holding it.
-
-Before that, and with nothing physical touched, the receiver had already been taken
-through a hot start, a cold start, a hardware reset and a clear-to-defaults; all
-four left it at zero, while the hardware reset was enough to make it acknowledge
-messages it had been refusing. `NAV-PVT` and `NAV-TIMELS` are acknowledged and
-arriving throughout and the timepulse keeps running. A high-gain antenna whose preamp is not powered is *worse*
-than a passive one — the bypass path is a loss, not a gain — which is what 9 dBHz
-looks like.
-
-**Baud rate.** 9600 is tried first. With no valid UBX frame in 4 s the firmware
-moves to 38400, 115200, 57600 and 19200, then starts over — a receiver that has
-been through `u-center` once is usually not on 9600 any more, and sweeping five
-baud rates at boot is cheaper for everyone than a datasheet. The rate that
-produced frames is logged.
+`/gps/sats` is C/N0 with elevation and azimuth per satellite, for a polar plot.
+An aggregate cannot separate the two ways a satellite goes bad: one reflected off
+a wall arrives loud but late, one near the horizon is simply weak. Plotting C/N0
+against elevation tells them apart, and that is the difference between a bad site
+and a bad antenna. `flags` is the receiver's own word, unmasked: `svUsed` bit 3,
+`health` bit 4. `elev` is `-91` before a fix.
 
 ### u-center, at the same time as the server
 
-`u-center` wants the receiver to itself, and the server wants the receiver's time.
-Both can have it, but only because of how the firmware behaves while a client is
-attached — UBX has no arbitration, so on one line the rule has to come from
-somewhere.
+`u-center` can be attached to TCP port 3333 while the box serves time. The
+client is the only writer for the duration: it is forwarded byte for byte, the
+firmware stops reading the port and taps what it forwards into the same parser
+the clock runs on, and `configureModule()` stands aside so its frames do not
+stamp over the client's. `MON-COMMS` is answered locally (one port, zero
+counters) because this module ignores the poll and `u-center` opens its port by
+polling it.
 
-```
-tcp/3333, straight through to UART1
-```
+Four clients at once, and a fifth is refused with `bridge_refused` set. There is
+no authentication on the port.
 
-`tools/mon_comms_probe.py` and `tools/poll_matrix.py` speak to it the same way
-`u-center` does; `tools/serial_cap.py` captures the console beside them. All of
-them frame through `tools/ubx.py`, the host twin of the firmware's decoder, and
-`tools/ubx_test.py` covers it — see `docs/ubx.md`.
-
-**The client is the only writer for the duration.** Polls, configuration, rates,
-the lot are the client's, and they are forwarded byte for byte with nothing
-filtered. What the firmware stops doing is talking over it:
-
-- it stops reading the port, because two readers on one stream is the bug the
-  bridge exists to avoid. The bridge reads, and taps what it reads into the same
-  parser the clock is driven from, so `NAV-PVT` and the PPS still discipline
-  `CLOCK_REALTIME` while the session runs and `/healthz` still tells the truth;
-- `configureModule()` stands aside, so its eleven `CFG-MSG` frames do not stamp
-  over whatever the client just set. It re-runs half a second after the last
-  client leaves, which also puts `NAV-SAT` back to half rate — a session needs it
-  at 1 Hz for the sky view and C/N0 bars, and the line is better off without it
-  afterwards;
-- an ACK the firmware is waiting for arrives through the bridge's own read rather
-  than a private one, so an antenna request or retry during a session no longer
-  swallows bytes out of the client's stream.
-
-Two exceptions where the firmware *does* write, both deliberate. Attaching sends
-three `CFG-MSG` frames — `NAV-PVT`, `NAV-TIMELS`, `NAV-SAT`, all 1 Hz on UART1 —
-because a client is free to set every rate to zero (its revert-to-defaults does
-exactly that) and a session should not be able to stop the clock as well as draw
-nothing. And a reset or clear-to-defaults forces the full message set back,
-because the module comes out of those speaking NMEA at 9600 with no stream for
-anyone.
-
-**`MON-COMMS` is answered locally.** `u-center` opens a TCP port by polling it and
-this receiver ignores the poll outright — `MON-VER`, `CFG-PRT` and `NAV-SAT` polls
-on the same line are all answered, that one is not. After 400 ms of silence the
-bridge replies for the module: version 0, one port (UART1), every counter zero.
-The counters stay honest zeros because the module never reports them and an
-invented figure is worse than a blank.
-
-Four clients are served at once and the listening socket stays open, so `u-center`
-holding the port does not lock a shell out. A fifth is refused rather than
-silently accepted and closed, and `/gps/info` carries `bridge_refused` — the two
-look identical from the outside otherwise. `bridge_sessions`, `bridge_rx`,
-`bridge_tx`, `bridge_end` and `bridge_last` say what a session carried and how it
-ended; `bridge_last` is the client's last bytes as hex, which is how the handshake
-above was identified. `bridge_active` and `bridge_clients` say whether anyone is
-attached at all, because "`u-center` does nothing" and "`u-center` never reached
-us" are different faults and used to read the same.
-
-There is **no authentication** on this port: anything on the LAN can reconfigure
-the receiver through it, including turning message rates off. Nothing is
-persisted, so the worst case is a receiver configured oddly until the next
-detach — which re-applies the message set — or until a reboot.
-
-**The other way, if the carrier is ever rewired.** UBX keeps a separate output
-rate per port, so a monitor on UART2 could ask for its own messages at its own
-rates without touching UART1 at all — `CFG-MSG` already carries a rate byte per
-port and the session frames set only UART1. This carrier wires UART1 alone, so
-two masters on one line is what there is; if a second pair ever reaches the
-module, point the session's `CFG-MSG` at port 2 and stop sharing.
+`tools/mon_comms_probe.py` and `tools/poll_matrix.py` speak to it the same way;
+see `docs/ubx.md`.
 
 ### Lock, holdover, and what a client sees
 
-| Clock state | LI | stratum | refid | A client does |
-|-------------|----|--------:|-------|---------------|
-| fix ≥ 2D, valid time, PPS edge inside the window | 0 (1 or 2 in the minute before a leap) | 1 | `GPS` | trusts it |
-| fix and a measured rate, edge older than 10 minutes | 3 | 16 | `INIT` | discards it |
+| State | LI | stratum | refid | A client does |
+|---|---|---|---|---|
+| fix ≥ 2D, valid time, edge inside the window | 0 (1 or 2 in the minute before a leap) | 1 | `GPS` | trusts it |
+| fix and a measured rate, edge older than 10 min | 3 | 16 | `INIT` | discards it |
 | no rate yet, and no fix / no edge / edge over 3 s old | 3 | 16 | `INIT` | discards it |
 
-Two windows, and the difference between them is the servo. Before the crystal's
-rate is known — the first minute, sixty anchors — there is nothing to hold over
-*with*: the anchor plus raw elapsed time is a clock whose second boundary is a
-guess, so three missed edges demote the server and the log says so. Once the rate
-is measured, the elapsed time is corrected by it, a ten-minute gap costs
-microseconds rather than milliseconds, and the window stretches to ten minutes
-with root dispersion growing the whole way (2.5 µs at the edge, 602 µs at the end
-of it) so a client can see the claim decay instead of having to trust it.
+Two windows, and the difference is the servo. Before the crystal's rate is known
+— a minute, sixty anchors — there is nothing to hold over *with*, so three missed
+edges demote the server. Once the rate is measured, a ten-minute gap costs
+microseconds instead of milliseconds and the window stretches to ten minutes,
+with root dispersion growing the whole way (2.5 µs at the edge, 602 µs at the
+end) so a client can watch the claim decay.
 
-The numbers below are from this unit, and they are the reason the second window
-exists. Note what the first line is: not an estimate, a measurement taken when the
-PPS came back.
+The window is a cliff, not a taper: one second it is a stratum-1 answer with
+602 µs of dispersion, the next it is `INIT` with LI 3 and `sntp` refuses it. A
+server that has not seen its reference for ten minutes should say so in the one
+field a client is guaranteed to read.
 
-```console
-# 151 s with no PPS, before any rate had been measured (span from POST /gps/pps):
-W (195684) gps_time: PPS back after 151.0 s: the servo was +4525 us out across the gap (+29.968 ppm residual)
-# the same 151 s, with the servo carrying it:
-W (428664) gps_time: PPS back after 151.0 s: the servo was -2 us out across the gap (-0.013 ppm residual)
-# and 701 s, which is past the window: it demoted at 600 s and came back to this
-W (1183644) gps_time: PPS back after 701.0 s: the servo was -4 us out across the gap (-0.006 ppm residual)
-```
+A holdover does not get to be quiet: the first anchor after a gap logs the gap
+and the error, and `/healthz` keeps `gps_last_holdover_s` and
+`gps_last_holdover_error_us`.
 
-That is 4.5 ms of drift and then 2 µs of it, from a crystal that is 30 ppm out —
-and 4 µs across eleven and a half minutes, where the crystal alone would have put
-21 ms on the clock. Nothing was adjusted to make the second line look good: the
-rate is refitted from the last five minutes of anchors every second, and a bigger
-gap starts the window again rather than fitting a slope across the gap.
-
-The window itself is a cliff, not a taper, and it is worth watching it happen:
+`POST /gps/pps {"suppress_s":150}` is the test, capped at an hour — the PPS line
+is soldered, and this is the same code path a loose wire takes:
 
 ```console
-# at 600.8 s of age, mid-test: the ten minutes are up
-W (1083234) gps_time: not locked (fix 3D, last edge 600825 ms ago): stratum 16 until it returns
-$ curl -s http://192.0.2.20/healthz | tr ',' '\n' | grep ntp_
-"ntp_stratum":16
-"ntp_refid":"INIT"
-"ntp_leap":3
-```
-
-One second earlier it was a stratum-1 answer with 602 µs of dispersion; one second
-later it is `INIT` with LI 3, and `sntp` refuses it — which is the whole point of
-having a window: a server that has not seen its reference for ten minutes should
-say so in the one field a client is guaranteed to read.
-
-Those are the numbers the budget produces. Sampled out of `/healthz` while a 121 s
-holdover ran, and then the edge back:
-
-```console
-# POST /gps/pps {"suppress_s":120}, dispersion as the anchor ages away
-"gps_pps_age_ms":28721   "dispersion_us":30.529
-"gps_pps_age_ms":56801   "dispersion_us":58.529
-"gps_pps_age_ms":84885   "dispersion_us":86.529
-"gps_pps_age_ms":112963  "dispersion_us":114.529
-# the first edge back, 121 s later
-"gps_last_holdover_s":120.9964  "gps_last_holdover_error_us":-2.94
-```
-
-One microsecond a second from 2.5 µs at the edge, which is the 1 ppm wander term
-and nothing else. The run ended claiming 114 µs for an error that came back at
-2.94 µs: 39 times the truth, in the direction a promise should err.
-
-There is no silent fallback to SNTP either. `timeSource` names the authoritative
-source; if that source is unhealthy the answer is stratum 16, not a stratum whose
-meaning quietly changed. Switching back is one `POST /config`, and it takes effect
-without a reboot: `NtpServer` holds a single `TimeRef` that asks `Settings` on
-every call and forwards to the GPS or the upstream implementation, so the serving
-task never has a pointer swapped under it.
-
-A receiver that is absent, mis-wired or talking a protocol this does not parse is
-a log line and a stratum-16 reference — not a boot failure. That matters on a
-headless board whose only other interface is the RJ45.
-
-A holdover does not get to be quiet: the first anchor after a gap logs the gap and
-the error, `/healthz` keeps `gps_last_holdover_s` and `gps_last_holdover_error_us` from the
-last one, and the servo logs a step in the reference (100 ms or more) with the
-window discarded, because that is the one failure that would otherwise look like a
-healthy clock.
-
-### The servo
-
-Every anchor is one sample of `esp_timer` against the GPS, so the slope of the
-last five minutes of them is the crystal's rate error, by least squares, in parts
-per billion. On this board that is about `-30 ppm` (`-29.97` when the numbers below
-were taken, `-30.1` on the next boot — it wanders with temperature, which is why
-the window is ten minutes and not ten hours), and the sign is worth spelling
-out: negative means the counter undercounts, so a GPS second takes slightly more
-of its microseconds than a million, and the correction hands 30 µs back per
-second. The fit's residual is 0.3 µs — the number that says these are samples of a
-clock and not of the receiver's mood — and the rate it produced was worth 13 ppb
-across a 151 s gap, measured rather than fitted.
-
-The estimate is applied to every served timestamp (`now()` takes the rate out of
-the elapsed part of the anchor-plus-elapsed), which does two things that are easy
-to confuse:
-
-- it **removes the sawtooth** between edges. Without it, uncorrected timestamps
-  fall 30 µs behind each second and snap forward at the edge, which is invisible
-  in a mean but not in a client that samples often;
-- it **turns a holdover from three seconds into ten minutes**, because the error
-  across a gap becomes the fit's own residual instead of the crystal's rate times
-  the gap — 2 µs at 151 s and 4 µs at 701 s, instead of 4.5 ms and 21 ms, as
-  measured above.
-
-It deliberately does *not* steer the hardware. `esp_timer` has no rate knob, and
-the EMAC's PTP counter — which does, in ppb — is the next step, not this one. So
-`CLOCK_REALTIME` is still corrected by `adjtime()` phase only, and the servo is
-the responder's business rather than the system's.
-
-`POST /gps/pps` exists because the PPS line on this board is soldered. It makes
-the interrupt ignore edges for a while, which is the same code path a loose wire
-takes, and it is the only way to know what a holdover is worth without waiting for
-a fault:
-
-```console
-$ curl -s -X POST -H 'Content-Type: application/json' -d '{"suppress_s":150}' \
-       http://192.0.2.20/gps/pps
-{"pps_suppressed_s":150,"locked":true,"stratum":1,"holdover_s":0}
-
-$ curl -s http://192.0.2.20/healthz | tr ',' '\n' | grep holdover
+$ curl -s http://<box>/healthz | tr ',' '\n' | grep holdover
 "gps_last_holdover_s":150.9955
 "gps_last_holdover_error_us":-2.032
 ```
 
-`suppress_s` is capped at an hour. `/healthz` reports the time left as
-`gps_pps_suppressed_s` while a test is armed, so an artificial demotion is never
-mistaken for a fault.
+While a test is armed, `gps_pps_suppressed_s` is present, so an artificial
+demotion is never mistaken for a fault.
+
+### The servo
+
+Every anchor is one sample of `esp_timer` against the GPS, and the slope of the
+last five minutes of them is the crystal's rate error, by least squares, in ppb.
+On this board that is about −30 ppm, and it wanders with temperature — which is
+why the window is ten minutes and not ten hours. The sign matters: negative means
+the counter undercounts, so a GPS second takes slightly more of its microseconds
+than a million and the correction hands 30 µs back per second.
+
+The estimate is applied to every served timestamp, which does two things:
+it removes the sawtooth between edges, and it turns a holdover from three seconds
+into ten minutes, because the error across a gap becomes the fit's residual
+instead of the rate times the gap — 2 µs across 151 s rather than 4.5 ms.
+
+It does not steer the hardware. `esp_timer` has no rate knob, so
+`CLOCK_REALTIME` is corrected by `adjtime()` phase only and the servo is the
+responder's business rather than the system's. The P4's EMAC has a 1588 counter
+that does have a rate knob; that is the next step.
 
 ### Accuracy, and the parts that are not
 
-- **The edge** is stamped in the interrupt handler, so the limit is interrupt
-  latency: single-digit microseconds. Not sub-microsecond — that needs a hardware
-  counter, which the P4 has, and which is the next step below.
-- **Between edges** the anchor is extended with `esp_timer_get_time()` (1 µs
-  resolution) corrected by the servo's rate, so what is left is the fit's residual
-  — 2 µs measured across a two-and-a-half-minute holdover — rather than 30 µs of
-  crystal error accumulating over each second.
-- **The reply stamps** (`t2`/`t3`) are still software: taken after `recvfrom()` and
-  before `sendto()`, so a client also measures the LAN path and scheduler latency
-  ([Serving NTP](#serving-ntp-udp123) is explicit about that). A disciplined
-  reference removes the *clock* error; it cannot remove the *transport* error.
-- **Leap seconds** now come from the receiver rather than being assumed. `NAV-TIMELS`
-  is parsed at boot and once a second: it carries the GPS-UTC offset (18 s), and
-  when it announces a leap, the last minute before it sets LI=1 (delete) or LI=2
-  (insert) in the reply's first byte, as RFC 5905 7.3 asks. The guard matters:
-  the module reports a non-zero `timeToLsEvent` even with nothing announced — 18 s
-  of it, with `lsChange` 0, while this was being written — so the indicator is
-  gated on the change type and the countdown together, and a countdown alone would
-  put a warning in front of clients once a month for no reason. Nothing is smeared:
-  the u-blox UTC fields already include the offset, the epoch stays POSIX, and the
-  second that repeats or vanishes is the second the timestamp repeats or vanishes.
-  Unlocked, LI is 3, because a server that has lost its reference should not be
-  quoting a leap notice either.
-- **What a client is told about the error** is root delay 2 µs and root dispersion
-  2.5 µs at the edge, growing at 1 ppm of the anchor's age from there: 3.5 µs a
-  second after the edge, 84 µs after 82 s, 602 µs at the end of the ten-minute
-  window. The delay is the measurement path — two microseconds of interrupt
-  latency, a named constant — plus half of any pulse quantisation the receiver
-  states about itself; the dispersion adds the stamping jitter actually measured
-  from the servo's residuals, 0.3 to 0.5 µs across the runs below. Both fields used
-  to be worse than this: root delay was **0**, which was an assumption dressed as a
-  number, and the dispersion was a flat 10 µs guess that no measurement stood
-  behind. Growing at 1 ppm is the crystal wandering with temperature, not the fit —
-  quoting the fit's ppb would be a promise about a room that has not been measured
-  — and it is what makes the holdover honest: a client that watches dispersion can
-  tell how stale the claim is getting, and when the window is exceeded the answer
-  is stratum 16, not a slightly-more-wrong stratum 1.
+- The edge is stamped in the interrupt handler: single-digit microseconds,
+  limited by interrupt latency. Not sub-microsecond.
+- Between edges the anchor is extended with `esp_timer_get_time()`, corrected by
+  the servo's rate, so what is left is the fit's residual — 2 µs measured across
+  a two-and-a-half-minute holdover — instead of 30 µs of crystal error per
+  second.
+- The reply stamps are still software: taken after `recvfrom()` and before
+  `sendto()`, so a client also measures the LAN path and scheduler latency.
+- Leap seconds come from the receiver, not from a constant. `NAV-TIMELS` carries
+  the GPS-UTC offset, and an announced leap sets LI in the last minute before it.
+  The indicator is gated on the change type *and* the countdown, because the
+  module reports a non-zero countdown even with nothing announced. Unlocked, LI
+  is 3.
+- Root delay is 2 µs and root dispersion 2.5 µs at the edge, growing at 1 ppm of
+  the anchor's age. NTP's 16.16 field resolves 15.26 µs and rounds up, so both go
+  out as one least significant bit at the edge; `/healthz` carries them
+  unrounded.
 
-  The measured budget is a *narrowing* — 2.5 µs at the edge against the old 10 —
-  and it is worth knowing where the floor is: NTP's 16.16 field resolves 15.26 µs,
-  and `toFixed()` rounds up so a microsecond clock never claims zero. At the edge
-  both fields therefore go out as the same single least significant bit, and the
-  improvement only becomes visible on the wire once the anchor has aged a second or
-  two. `/healthz` carries the unrounded numbers, which is the honest place to read
-  them.
+## Serving NTP
 
-### Enabling it, and what it looks like
+`NtpServer` answers on UDP/123 from one dual-stack socket
+(`AF_INET6`, `IPV6_V6ONLY=0`, bound to `::`), started on the first lease beside
+the HTTP server. It serves whichever source set the clock: stratum 1 from the
+GPS, stratum 3 from the upstream.
 
-```console
-$ curl -s -X POST -H 'Content-Type: application/json' \
-       -d '{"timeSource":"gps"}' http://192.0.2.20/config
-{"hostname":"esp32p4-ntp","tz":"...","timeSource":"gps","ntpServer":"","serveNtp":"on"}
+| State | LI | stratum | refid |
+|---|---|---|---|
+| GPS locked | 0, or 1/2 in the minute before a leap | 1 | `GPS` |
+| upstream locked, synced under 15 min ago | 0 | 3 | the upstream's address |
+| not locked | 3 | 16 | `INIT` |
+| over the rate limit | 0 | 0 | `RATE` |
 
-$ curl -s http://192.0.2.20/healthz
-{ ... "ntp_source":"gps","ntp_server":null,"ntp_synced":true,"last_sync":1794526208,
-  "gps_fix":3,"gps_sats":18,"gps_pps_age_ms":82111,
-  "serve_ntp":true,"ntp_stratum":1,"ntp_refid":"GPS","ntp_leap":0,
-  "ntp_root_delay_us":2,"ntp_root_dispersion_us":84,"ntp_requests":17}
+Stratum 3, not 2, because lwIP's SNTP client does not keep the upstream's own
+stratum: this device cannot know whether it is one or two hops from the
+reference, and under-claiming is the safe error.
 
-$ curl -s http://192.0.2.20/gps/info          # the numbers behind the above
-{"offset_us":30,"rate_ppm":-29.968,"rate_n":183,"dispersion_us":84.5,
- "lock_window_s":600,"cn0_max":43,"noise_dbm":-100,"agc":1638,
- "ant":"ok","ant_power":"on","leap_s":18,"leap_pending":false, ...}
+On the wire:
 
-$ curl -s -X POST http://192.0.2.20/ntp/sync     # nothing to poll: it reports the lock
-{"synced":true,"time":"2026-11-13T10:30:25+1100","source":"gps","gps_fix":3,"gps_sats":5}
-```
+- **Answers mode 3 only, version 3 or 4, and replies in the request's version.**
+  A mode 4 packet (another server), mode 1, version 2, or anything under 48
+  bytes gets silence.
+- **Always 48 bytes out, never more than came in.** No MAC, no extension fields
+  echoed.
+- **Origin timestamp is the client's transmit field byte for byte**, including an
+  all-zero one.
+- **Precision −20**, about 1 µs, which is what this clock can distinguish.
+- **refid** is the upstream's IPv4 address at stratum 3, or a stable FNV-1a of
+  the name when the upstream is a hostname (lwIP does not expose the resolved
+  bytes for RFC 5905's MD5). At stratum 1 it is `"GPS\0"`.
+- **Rate limit**: a 16-packet burst per source address, then one request per 2 s,
+  then one `RATE` kiss-o'-death per second, then silence. Eight addresses are
+  remembered. The burst is sized for people: `sntp` sends five queries per
+  invocation, so two runs back to back stay answered.
+- **Log**: one line at start-up, one for the first request of a boot, then one a
+  minute.
 
-That dump is mid-holdover on purpose — `gps_pps_age_ms` 82111 is the dead edge,
-`ntp_root_dispersion_us` 84 is the claim decaying at 1 ppm of it, and the reference is
-still serving because the rate is known.
-
-`gps_pps_age_ms` counts 0→1000 every second: a value near 1000 means the last edge
-is a whole second old, which is normal just before the next one arrives.
-`offset_us` (`/gps/info`) is how far `CLOCK_REALTIME` was from the anchor at the
-last edge — a few tens of microseconds here, and the number the slew is working on.
-`ntp_synced` is the lock, not "was set once", so a receiver that loses its fix
-changes its mind within the lock window.
-
-The servo and the notice fields:
-
-- `rate_ppm` is the crystal's rate as the servo has measured it (negative:
-  `esp_timer` undercounts), `rate_n` how many anchors that rests on — it climbs to
-  60 and the first fit lands, which is when the holdover window becomes ten
-  minutes;
-- `dispersion_us` and `lock_window_s` appear only while locked, because they are
-  what a reply would claim and a demoted reply claims neither;
-- `leap_s` is the GPS-UTC offset from `NAV-TIMELS`, `leap_pending` whether a leap
-  is announced, and `leap_in_s` only while one is — together these are the first
-  byte of every reply;
-- `gps_pps_suppressed_s` exists only while `POST /gps/pps` has a test armed, and
-  `gps_last_holdover_s` / `gps_last_holdover_error_us` only after the first holdover, so
-  nothing in this group can be mistaken for a permanent state.
-
-## Serving NTP (UDP/123)
-
-`NtpServer` (`main/ntp_server.cpp`) answers NTPv3/v4 client requests on port 123
-from one dual-stack socket: `AF_INET6`, `IPV6_V6ONLY=0`, bound to `::`, exactly
-as [IPv6](#ipv6) recommended before it existed. It starts on the first DHCP
-lease, next to the HTTP server, and serves the clock whichever source above set —
-`stratum 3` from the upstream SNTP client, `stratum 1` from the GPS.
+Not included, on purpose: NTS, broadcast/multicast, and a servo that steers the
+oscillator.
 
 ### Interleaved mode (RFC 9769)
 
-A client that asks for it gets, in each reply, the *measured* receive and
-transmit timestamps of the previous exchange rather than a prediction of this
-one, which is the only way a server with a software transmit stamp can hand out
-a timestamp it did not have to guess. The negotiation is implicit: an
-interleaved request carries the previous reply's receive timestamp as its origin
-timestamp, and the reply then replays the saved transmit timestamp of that same
-exchange. Clients that do not ask see exactly the same bytes as before.
+An interleaved request carries the previous reply's receive timestamp as its
+origin, and the reply replays that exchange's saved transmit timestamp rather
+than predicting this one. Clients that do not ask see the same bytes as before.
 
-That required measuring the transmit path, which is what
-`ntp_tx_correction_us` is: the duration of a throwaway `sendto()` to the device's
-own address, every thirty seconds, EWMA-filtered and clamped, applied to the
-transmit stamp before it is written. The receive side uses the same figure —
-both stamps are software, both err by the same path and the errors have opposite
-signs, so one measurement serves both and a client's offset is not left carrying
-the difference between two guesses. `kReceiveLagNs` is now only the floor used
-before the first sample.
+This required measuring the transmit path: `ntp_tx_correction_us` is the duration
+of a throwaway `sendto()` to the device's own address every thirty seconds,
+EWMA-filtered and clamped, applied to the stamp. The receive side uses the same
+figure, because both stamps err by the same path with opposite signs.
+`POST /ntp/txlag {"enabled":false}` turns it off at runtime.
 
-`POST /ntp/txlag {"enabled":false}` turns it off at runtime, which is how the
-figure was chosen and how it can be re-derived on another network. Five boots,
-interleaved A/B samples either side, twenty to thirty each: uncorrected the
-client's offset sat at −157, −223 and −164 µs, corrected it was +4, −32 and −72.
-The shift tracks L/2 as the arithmetic predicts (161 µs for a 323 µs
-correction, 191 for 281, 92 for 281), at 4 to 16 sigma.
+It is an estimator, not a calibration: half a `sendto` is a lower bound, the
+driver and the wire happen after the call returns, and the residual varies with
+the switch and the client. Expect tens of microseconds, not zero. The mirror
+image is that a client's *delay* falls by the same amount, so its distance to
+this server looks smaller than it is.
 
-So it works, and it is an estimator rather than a calibration: half a `sendto`
-is a lower bound on the real path, because the driver and the wire happen after
-the call returns, and how much it under-reads varies with the switch, the client
-and the load on the host. Expect a few tens of microseconds residual, not zero,
-and expect it to differ between boots. A first version probed a self-send and
-half round trip instead; that read about 1.5x high, since it measures two stack
-traversals where a reply does one.
-
-The cost is the mirror image: a client's *delay* falls by the same amount, from
-about 500 µs to about 100 µs here, because the delay formula assumes `t2..t3`
-spans the processing interval and the correction inflates it. So the offset is
-right and a client's distance to this server looks smaller than it is. Hardware
-transmit stamping is the fix for both, and is the only reason this is a trade at
-all.
-
-The saved-pair table is deliberately small (24 entries, keyed by address and not
-port, dropped after two minutes). A client that falls further behind than that
-gets a basic reply, which every client understands; answering twice from one
-receive timestamp is forbidden and the lookup consumes it.
-
-One consequence worth stating: a stratum-1 server's **root delay is 0**. The
-reference is a receiver on the board, so the field that means "round trip to the
-reference" has nothing to measure, and the local stamping error goes in
-dispersion where it belongs. Reporting it in the delay instead charged it at
-half rate *and* let the client's own measured delay charge the processing a
-second time; the client's own error bound dropped from 366 us to 290 us when it
-moved.
-
-What this does **not** fix: the transmit stamp is still taken in user space and
-still early by whatever the probe could not see, which on a self-send is the
-PHY's serialisation. Hardware transmit stamping would make the whole correction
-unnecessary.
-
-### The PPS edge: a capture peripheral, off by default
-
-The edge is taken by a GPIO interrupt. MCPWM capture is implemented alongside it
-(`kCaptureEdge` in `gps_time.cpp`) and switched off, and the reason is worth
-recording rather than rediscovering.
-
-A capture latches the edge perfectly, in silicon, at 6.25 ns a tick on this part
-— and then there is no way to read the counter, so the interval from the edge to
-"now" has to be measured out of band. Both available ways of doing that (catching
-the same counter again, or running a second counter) jitter by more than the
-interrupt latency the capture removes. The edge is latched perfectly; the
-arithmetic cannot reach it.
-
-Four configurations, by the rate fit's own worst residual: interrupt stamp
-0.5–0.7 µs, capture stamping at ISR entry 1.5 µs, capture with the software-catch
-sub-microsecond part 4.3 µs, and with a group timer as the "now" end 5.1 µs. It
-is not a clean comparison — residuals differ by boot, and the same interrupt code
-has measured 0.5 and 3.4 µs on different boots — so treat the order as
-suggestive, not settled. Settling it needs an A/B within one boot, which needs
-the edge path switchable at runtime.
-
-What would change the answer is a MAC that stamps the frame itself, which this
-part has (the 1588 unit) and which is the next step anyway: there, "now" is
-hardware and the capture's resolution finally counts for something.
-
-Two things the work did fix regardless: the capture clock is read from the driver
-(160 MHz here) rather than assumed, and the sub-microsecond part is only enabled
-after both counters are measured to run at one rate.
+The saved-pair table is 24 entries, keyed by address, dropped after two minutes.
+A client further behind than that gets a basic reply.
 
 ### Control queries (`ntpq`)
 
-The same socket answers NTP mode 6, the read-only half of
-[RFC 9327](https://www.rfc-editor.org/rfc/rfc9327.html): `READSTAT`, `READVAR`,
-and `READCLOCK`. `WRITEVAR` is refused rather than half-applied, because a write
-here would only duplicate what `POST /config` already owns.
-
-That means the standard tool works against it, which is the point — a server
-that ignores `ntpq` looks broken to anyone whose first move is to run it:
+The same socket answers read-only mode 6 ([RFC 9327](https://www.rfc-editor.org/rfc/rfc9327.html)):
+`READSTAT`, `READVAR`, `READCLOCK`. `WRITEVAR` is refused rather than
+half-applied, because a write would only duplicate `POST /config`.
 
 ```console
-$ ntpq -p 192.0.2.20
+$ ntpq -p <box>
      remote           refid      st t when poll reach   delay   offset   jitter
 ==============================================================================
 *GPS(0)          .GPS.            1 l    -   16  1567   0.0520   0.0146   0.0004
 ```
 
-There is no limit on these: one 12-byte query and a few header bytes gets up to
-about three datagrams and a kilobyte back, which is the amplification
-[RFC 9327](https://www.rfc-editor.org/rfc/rfc9327.html) warns about. On a LAN it
-is not worth metering; if the socket is ever forwarded, it is the thing to rate
-limit first.
-
-The row is the reference that is serving, at association id 1: the receiver
-posing as the reference clock ntpd would have (`127.127.20.0`, `srcddr` and a
-`"GPS(0)"` hostname), or the upstream's own address while a
-[fallback](#fallback-when-the-receiver-stops) is running. There is one
-association and no selection algorithm, so one row is the whole truth. An
-unlocked clock sets its status word's reach bit clear and `ntpq -p` shows it as
-an unreachable peer with stratum 16, exactly as it should.
-
-`ntpq -c rv`, `-c sysinfo`, `-c sysstats` and `-c assoc` all answer from the
-same counters `/healthz` publishes; a variable this device does not have is
-answered with the protocol's "unknown variable" error rather than silence, so
-the client retries one at a time and carries on past the gap. A reply longer
-than one datagram is split and marked, which is what `sysstats` needs.
-
-The design is one seam wide. A reply builder that knows the protocol, and a
-`TimeRef` that knows where the time came from — `reference()` (stratum, refid,
-when it last synced, locked or not), `now()` (the timestamp to stamp), and
-`describe()` (one phrase for the boot log). There are two implementations,
-`UpstreamTimeRef` and `GpsTimeRef`, and the packet code does not know which one
-answered. Which one it is comes from `Settings::timeSource()`, re-read behind a
-`SelectedTimeRef` on every call so `POST /config` can change it while the
-responder is running.
-
-### What it will say, and what it will not
-
-| Clock state | LI | stratum | refid | A client does |
-|-------------|----|--------:|-------|---------------|
-| GPS locked: fix, valid time, PPS edge inside the window (3 s, or 10 min with a rate) | 0, or 1/2 in the minute before a leap | 1 | `GPS` | trusts it |
-| upstream locked: synced less than 15 min ago | 0 | 3 | the upstream's address | trusts it |
-| not locked | 3 | 16 | `INIT` | discards it |
-| over the rate limit | 0 | 0 | `RATE` | backs off |
-
-Stratum 3, not 2, and that is the honest number: lwIP's SNTP client does not
-keep the upstream's own stratum, so this device cannot know whether it is one or
-two hops from the reference. Claiming one hop more than a well-behaved internet
-server over-states the distance; claiming one less under-states it, and a client
-weights a closer server more heavily. Under-claiming is the safe error. With the
-GPS the question does not arise — the reference *is* here, so the server says 1
-([GPS](#gps-u-blox-lea-8--pps)).
-
-The window is what makes "locked" mean something: fifteen missed polls of
-`NtpTime`'s one-a-minute interval. `ntp_synced` in `/healthz` only records that
-the clock was set at some point; a responder that keeps saying stratum 3 after
-its upstream went away is serving drift. Past the window it
-answers `li=3 stratum=16` — RFC 5905's way of saying *do not use me* — and macOS
-`sntp` obliges:
-
-```console
-$ /usr/bin/sntp -t 2 192.0.2.20
-sntp: Exchange failed: Server not synchronized
-...
-sntp: Clock select failed
-        header: E4 (li:3 vn:4 mode:4)
-       stratum: 10 (16)
-           ref: 494E4954 (84.73.78.73)
-         t_ref: 00000000.00000000 (0.000000000)
-```
-
-(Captured with `timeSource=off` and a reboot, so nothing had set the clock. That
-is also how the `INIT` refid and the zero reference timestamp were verified.)
-
-### On the wire
-
-- **Answers mode 3 only, version 3 or 4, and replies in the request's version.**
-  A mode 4 packet (another server), a mode 1 packet, version 2, or anything
-  shorter than 48 bytes gets silence — answering a mode 4 is how two servers end
-  up talking to each other forever.
-- **Always 48 bytes out, never more than came in.** No MAC, no extension fields
-  echoed, so this cannot be used as a reflector.
-- **Origin timestamp is the client's transmit field byte for byte**, including
-  an all-zero one; receive and transmit are taken around the reply build.
-- **Precision `-20`** (about 1 µs — what this clock can distinguish), and root
-  delay / root dispersion **as the reference states them**, because the two
-  references are not the same distance away. From the GPS: root delay 2 µs and root
-  dispersion 2.5 µs, + 1 ppm of the anchor's age — 602 µs at the end of the
-  ten-minute holdover ([the numbers, and the measurement](#accuracy-and-the-parts-that-are-not)).
-  From the upstream: root delay 65 units of 16.16 — 0.992 ms, the standing guess,
-  since lwIP exposes neither the upstream's root delay nor our round trip to it —
-  and root dispersion the same 0.992 ms plus 15 ppm of the time since the last
-  sync, so a stale clock advertises its staleness instead of hiding it.
-  `/healthz` reports both before the field rounds them
-  (`ntp_root_delay_us` / `ntp_root_dispersion_us`), so the endpoint and the wire
-  cannot disagree.
-- **The leap indicator is the receiver's, not a constant.** 0 normally; 1 (delete)
-  or 2 (insert) for the last minute before a leap the receiver has announced, from
-  `NAV-TIMELS`; 3 when the reference is not locked, because a server without a
-  clock has no business quoting a leap notice. Nothing is smeared, and from the
-  upstream source it is 0, because lwIP's SNTP client does not surface the
-  upstream's indicator.
-- **refid** is the upstream's IPv4 address at stratum 3; a hostname upstream
-  gets a stable FNV-1a of the name instead of RFC 5905's MD5 (which lwIP cannot
-  give us the resolved bytes for). Above stratum 1 the field is informational —
-  it is how ntpd spots a loop — so this is a documented deviation, not a guess.
-  At stratum 1 from the GPS it is the four bytes `"GPS\0"`, which is the value
-  RFC 5905 lists for a GNSS reference.
-- **Rate limit**: 16-packet burst per source address, then one request per 2 s,
-  then one `RATE` kiss-o'-death per second, then silence. Eight addresses are
-  remembered; the table recycles the least recently seen rather than growing.
-  The burst is sized for people, not for clients: `sntp` sends five queries per
-  invocation, so two runs back to back (the obvious thing to try) stay answered.
-- **Timestamps are software**: lwIP's port has no `SO_TIMESTAMP` (`lwipopts.h`
-  and the Kconfig have no such option in IDF 6.0), so the receive stamp is taken
-  after `recvfrom()` returns. The EMAC does have an IEEE 1588 unit — the P4 sets
-  `SOC_EMAC_IEEE1588V2_SUPPORTED` — but `esp_eth` exposes it as a *steerable
-  clock*, not a per-frame stamper: `esp_eth_mac_ptp_enable()`,
-  `esp_eth_mac_get_ptp_time()` / `set_ptp_time()`, `esp_eth_mac_adj_ptp_freq()`,
-  `esp_eth_mac_adj_ptp_time()` ("adjust base PTP time frequency increment by
-  PPS", in ppb) and a target-time interrupt. Nowhere does a received frame hand
-  back the descriptor's hardware timestamp, so making `t2` hardware-accurate
-  means patching the driver, not calling an API. That scheduler latency is
-  therefore part of the answer — which is why the dispersion above is stated
-  rather than implied. What the clock *is* good for is the other half: a PPS
-  edge can steer it in ppb, which is exactly the discipline mechanism the
-  stratum-1 phase needs.
-
-The log stays quiet on purpose — one line at start-up, one for the first request
-of a boot, then one a minute (these are the format strings in the code, with
-illustrative values):
-
-```console
-I (9124) ntp_server: serving on udp/123 (dual-stack), reference: upstream 192.0.2.1, stratum 3
-I (15320) ntp_server: first request from 192.0.2.50:60371: stratum 3
-I (75320) ntp_server: answered 12, KoD 1, dropped 3 in the last 60 s
-```
-
-### Verified on this unit
-
-macOS `sntp` against the board. The offset is the board's clock against this Mac
-— i.e. the reference's accuracy plus the step at sync — not a protocol error;
-`delay` 0.36 ms is the whole round trip over the LAN.
-
-```console
-$ /usr/bin/sntp -d 192.0.2.20          # timeSource=gps
-sntp_exchange {
-        result: 0 (Success)
-        header: 24 (li:0 vn:4 mode:4)
-       stratum: 01 (1)
-     precision: FFFFFFEC (9.536743e-07)
-         delay: 0000.0000 (0.000000000)
-    dispersion: 0000.0001 (0.000015259)
-           ref: 47505300 ("GPS ")
-         t_ref: EEA0E3E0.00000000 (4003521504.000000000)
-            t2: EEA0E3E0.EF5AB909 (4003521504.934978069)
-            t3: EEA0E3E0.EF5B2E79 (4003521504.934985069)
-        offset: ... (0.152300570)        # this laptop's clock error, not the board's
-         delay: ... (0.000355000)
-}
-```
-
-`ref: 47505300` is `"GPS\0"`, the RFC 5905 stratum-1 refid. `t_ref` has a zero
-fraction because it is an anchor: the integer second the last PPS edge marked.
-`delay: 0000.0001` is root delay, and it used to be `0000.0000`: the reference is
-the receiver on the board, not a server across a network, so there is no path to
-measure in the ordinary sense — but there is an interrupt to enter, and calling
-that zero was a claim nothing stood behind. One unit of NTP's 16.16 short format is
-15.26 µs, which is what the measured 2 µs rounds up to; `toFixed()` rounds up
-rather than down so a microsecond clock never files a zero. `dispersion` goes out
-as the same unit for the same reason, and grows at 1 ppm of the anchor's age from
-there: 84 µs at 82 s, 602 µs at the end of the ten-minute holdover. `/healthz`
-reports both before that rounding (`ntp_root_delay_us` 2,
-`ntp_root_dispersion_us` 2.5 — the numbers this paragraph is about). Compare with
-the upstream case below, where the same arithmetic starts from 0.992 ms and grows
-at 15 ppm of the poll interval.
-
-With `timeSource=dhcp` instead:
-
-```console
-$ /usr/bin/sntp -d 192.0.2.20
-selected:
-sntp_exchange {
-        result: 0 (Success)
-        header: 24 (li:0 vn:4 mode:4)
-       stratum: 03 (3)
-          poll: 00 (1)
-     precision: FFFFFFEC (9.536743e-07)
-         delay: 0000.0041 (0.000991821)
-    dispersion: 0000.0067 (0.001571655)
-           ref: C0000201 (192.0.2.1)
-         t_ref: EE9E928F.00000000 (4003369615.000000000)
-        offset: ... (0.014526000)
-         delay: ... (0.000342000)
-+0.014526 +/- 0.002399 192.0.2.20 192.0.2.20
-```
-
-`ref: C0000201` is `192.0.2.1` on the wire, printed by sntp as a host-order
-integer; `dispersion` 1.57 ms is the 0.992 ms floor plus the ~38 s since the last
-sync at 15 ppm. Both are the `ntp_root_*` fields in `/healthz`, and both are
-guesses about a path this device cannot measure — which is why the stratum is 3
-and not 1.
-
-The rest of the matrix, from `tools/ntp_test.py` (raw sockets, no dependencies, `recv` with a 1 s timeout):
-
-| Sent | Answer |
-|------|--------|
-| mode 3, vn 4, 48 B over IPv4 | 48 B: `li=0 vn=4 mode=4 stratum=1`, `refid=GPS`, origin echoed |
-| the same over the global IPv6 address | identical |
-| mode 3, vn 3 | `vn=3` in the reply, same fields |
-| mode 4 (server) | nothing |
-| mode 1 (symmetric active) | nothing |
-| vn 2 | nothing |
-| 12 bytes | nothing |
-| transmit timestamp all zeros | origin echoed as zeros |
-| 20 in a burst from one address | 16 answered, then `RATE`, then silence — the script waits 0.5 s per silent packet, so tokens refilled during the run |
-| after the burst, 2.5 s later | answered again |
+One association, no selection algorithm, so one row is the whole truth. An
+unlocked clock clears its reach bit and shows as unreachable with stratum 16.
 
 ### Testing it
 
-Start with a client that is already on the machine, because that is the shape of
-the question ("will anything accept my clock?"):
-
 ```console
-$ sntp 192.0.2.20                 # macOS, BSD, Linux (ntp package)
-+0.114044 +/- 0.002362 192.0.2.20 192.0.2.20
-$ sntp -d 192.0.2.20              # the same, with every header field decoded
+$ sntp <box>                      # macOS, BSD, Linux (ntp package)
++0.114044 +/- 0.002362 <box> <box>
+$ chronyd -Q 'server <box> iburst'    # as root
 ```
 
-`chronyd -Q 'server 192.0.2.20 iburst'` (as root) and
-`w32tm /stripchart /computer:192.0.2.20 /dataonly /samples:3` on Windows ask
-the same question through different code.
+`tools/ntp_test.py <ip> [ipv6]` answers what is actually on the wire, including
+packets a real client never sends: mode 4 / mode 1 / vn 2 / truncated requests
+that must get silence, the origin echo, IPv6, and a burst that trips the limiter.
 
-`tools/ntp_test.py <ip> [ipv6]` answers the other one — what is actually on the
-wire, including the packets a real client never sends: mode 4 / mode 1 / vn 2 /
-truncated requests that must get silence, the origin-timestamp echo, the IPv6
-address, and a burst that trips the limiter. It prints one line per packet:
+`/healthz` is the witness: `ntp_requests` climbs by one per answered packet (a KoD
+or a drop does not count), `serve_ntp` is true. If the counter climbs and the
+client still fails, the problem is the client, not the path.
+
+Test the honesty path too: `timeSource=off` and `sntp` should say
+`Server not synchronized` while `/healthz` says `ntp_stratum: 16`.
+
+## Clock sources
+
+`timeSource` decides, and only that source owns `CLOCK_REALTIME` at any instant.
+
+`dhcp` takes an NTP server from DHCP option 42 and `static` polls `ntpServer`;
+both use `NtpTime`, lwIP's SNTP client, which **steps** the clock rather than
+slewing — a responder must not serve a clock that is still slewing. Both keep it
+polling once a minute, so the freshness window has fifteen polls of margin rather
+than none.
+
+`gps` is the reference. `off` leaves the clock alone.
+
+Until the upstream has answered, the responder says stratum 16 — which is the
+point. A `static` with an empty `ntpServer` is the same as `off`.
+
+`POST /ntp/sync` polls on demand and waits up to 5 s: `409` with no source, `504`
+if the upstream is silent. With the receiver serving there is nothing to poll and
+it reports the lock instead.
+
+Switching to `dhcp` while a lease is already held cannot pick option 42 up until
+the next DHCP bind; a reboot applies it at once.
+
+### Fallback
+
+`timeSource=auto` is the GPS path with an upstream behind it. While the receiver
+is locked it is served and it steers. When the receiver stops correcting — no
+pulse for fifteen seconds, three lost seconds plus a margin — the SNTP client is
+started against `ntpServer`, or the lease's option-42 server, and the clock, the
+served reference and the stratum all move to it.
+
+Ownership changes on the client's first sync, not on a timer, and going back is
+stop-then-hand-back: the receiver has to hold for twenty seconds, the client is
+stopped, and only then may the servo steer again. A settling window keeps the
+edge that lands on the client's step from being measured as an error. While the
+client owns the clock the receiver keeps measuring, so the two references pulling
+apart is visible at `/gps/info`.
+
+While the receiver still claims something worth serving it is what answers, so a
+short outage stays stratum 1 with growing dispersion. Only when that claim
+expires does the upstream answer, at stratum 3.
+
+Three limits:
+
+- **Nothing to fall back to.** No `ntpServer` and no option 42 means the client
+  has nothing to poll; the board serves the receiver until the holdover expires
+  and stratum 16 after that.
+- **A server pointing at this board.** An offset against ourselves is always
+  zero. The dotted quad is compared against the leased address and skipped; a
+  name that resolves back here is not caught.
+- **It does not make the clock good.** A WAN path is milliseconds where the
+  receiver is microseconds. `gps_fallback`, `time_owner` and `fallback_age_s` at
+  `/healthz` are how a client tells.
+
+## IPv6
+
+IPv6 comes up beside IPv4, not instead of it: a link-local at every link-up, and
+a global address by SLAAC from the router's advertisements. `esp_http_server`
+binds `in6addr_any` and lwIP answers ICMPv6 and NDP by itself, so every endpoint
+and a ping6 work the moment there is an address — no handler changes.
+
+`/healthz` omits `ipv6_linklocal` and `ipv6_global` until each exists. The
+link-local appears about a second after link-up, once Duplicate Address
+Detection clears; the global one only after an advertisement. On a LAN with no
+IPv6 router you get the link-local and nothing else.
 
 ```console
-$ python3 tools/ntp_test.py 192.0.2.20 2001:db8::50
-mode 3, vn 4                       len=48 li=0 vn=4 mode=4 stratum=3 prec=-20 delay=0.000992 disp=0.002121 refid=b'\xc0\x00\x02\x01' origin_ok=True
-mode 4 (server)                    NO REPLY
-...
-answered=16 kod=2 silent=2
+$ curl -g -s 'http://[2001:db8::20]/healthz' | head -c 60
+$ curl -g -s 'http://[fe80::200:5eff:fe00:5301%25en0]/healthz' | head -c 60
+$ ping6 -c 3 -I en0 fe80::200:5eff:fe00:5301
 ```
 
-Two things to know before concluding something is broken:
+`curl` needs `-g` (brackets are glob characters) and the zone spelled `%25`. The
+link-local works only from its own segment.
 
-- **`sntp` is five queries, not one.** Three back-to-back runs fit inside the
-  16-packet burst; a tighter loop gets `RATE` and then a second of silence. Wait
-  a few seconds — or run the test from another machine — before believing it.
-- **`/healthz` is the witness.** `ntp_requests` climbs by one per packet it
-  actually answered (a KoD and a dropped packet do not count), `ntp_stratum` and
-  `ntp_refid` should read 3 and the upstream's address while locked, and
-  `serve_ntp` should be `true`. If the counter climbs and the client still
-  fails, the problem is in the client or the header, not the path.
+Deliberately not included: DHCPv6 (SLAAC covers a board that wants one routable
+address) and an IPv6 upstream for the clock — lwIP's SNTP client resolves A
+records only and option 42 is an IPv4 list, so `dhcp` and `static` stay on IPv4.
+`ntpServer` stores an IPv6 literal but logs that it cannot sync from it. The
+responder has no such limit and answers IPv6 clients.
 
-The honesty path is worth testing too, because it is the one that matters when
-something is wrong:
+IPv6 costs about 30 KB of a 1.7 MB slot, all of it lwIP's stack; SLAAC on top is
+16 bytes. Leave it on.
+
+## Updating over the network
+
+`POST /firmware` with the raw app image as the body writes it into the inactive
+slot and reboots into it:
 
 ```console
-$ curl -s -X POST http://192.0.2.20/config -d '{"timeSource":"off"}' >/dev/null
-$ sntp 192.0.2.20
-sntp: Server not synchronized
-$ curl -s http://192.0.2.20/healthz | tr , '\n' | grep ntp_stratum     # 16
-$ curl -s -X POST http://192.0.2.20/config -d '{"timeSource":"dhcp"}' >/dev/null
+$ curl --data-binary @build/esp32p4_ntp.bin http://<box>/firmware
+{"written":531328,"partition":"ota_0","rebooting":true}
 ```
 
-Switching back needs a DHCP bind before lwIP re-learns option 42 (a reboot, or a
-lease renewal); until then the clock is unlocked and the responder keeps saying
-stratum 16, which is correct.
+`partition` is where the running image came from, `next_partition` where the next
+upload lands — successive updates alternate, which is the quickest proof one
+happened. `GET /firmware` also reports `confirmed`: `false` right after a write
+means the image is still `PENDING_VERIFY`.
 
+What checks it:
 
-`POST /config '{"serveNtp":"off"}'` stops it within a second (`/healthz` drops to
-`"serve_ntp":false`, `sntp` gets `recv failure`), and `on` rebinds the same
-socket without a reboot.
+- **Payload.** A body whose magic byte is not an app image is rejected by the
+  first write, and the whole thing is verified at the end (chip id, checksum,
+  segment hashes). Both answer `400`, and a rejected body leaves the slot
+  untouched. A `Content-Length` that does not fit is `413`.
+- **Boot.** A new image is marked pending-verify and confirmed as soon as it has
+  a lease and the HTTP server is listening. If it never gets that far the
+  bootloader returns to the slot that worked — the difference between a bad
+  update and a trip to find a USB cable. While an image is unconfirmed the
+  endpoint answers `409`.
+- **Trust.** No authentication. On an untrusted network this wants a token or a
+  signed image.
 
-Not in this milestone, on purpose — or only half done:
+`"ota": false` at `GET /firmware` means the flashed partition table has no second
+slot; `POST /firmware` then answers `500` and updating needs the cable.
 
-- **NTS** (RFC 8915) — needs TLS and a key exchange; a LAN server gains little.
-- **Broadcast / multicast** (RFC 5905 §9) — every client here polls.
-- **Interleaved mode** (RFC 9769) — the server must remember each client's last
-  transmit timestamp, which is not worth it before hardware stamping exists.
-- **A servo that steers the oscillator itself.** The PPS gives a frequency
-  measurement for free — the slope of the anchors, five minutes of them — and
-  `GpsTimeRef` now fits it and applies it to every timestamp, which is what buys
-  the ten-minute holdover ([The servo](#the-servo)). What is *not* steered is the
-  hardware: `esp_timer` has no rate knob, so the system clock is still corrected
-  every second with `adjtime()` phase only, and the fit lives in the reply path
-  rather than in the counter every task reads. That is the EMAC's PTP counter and
-  the driver work in [Next step](#next-step).
+## Viewer
 
-## The UART rate
-
-The link to the receiver runs at **38400**, not the module's 9600 default. With
-the diagnostics loaded (NAV-SAT, the MON-diagnostics, TIM-SVIN) 9600 measured 43%
-busy; the same traffic at 38400 is 10%, which is what stops the wire deciding
-what can be enabled. `io_parity`, `io_framing` and `io_overrun` are the check, and
-they stay at zero.
-
-`POST /gps/baud {"baud":38400,"module":true}` moves it. Without `module` only the
-host moves, which is the way back from a line something else desynchronised.
-
-Three things about the receiver are needed to do this safely, and getting any of
-them wrong costs an hour:
-
-- **CFG-PRT alone is RAM** and does not survive a power cut, so the IO section --
-  and only the IO section -- is saved with CFG-CFG. Saving everything would pin
-  the message rates and the GNSS mask to that boot.
-- **The save has to wait for the CFG-PRT to be acknowledged.** Saving immediately
-  captures the old rate, and the save's own port reload then undoes the change.
-- **This module never ACKs CFG-PRT**, even when the change works, so silence has
-  to mean carry on. An explicit NAK is the only thing that stops the move.
-
-Even when it is accepted, the receiver stops scheduling periodic output until it
-is **power-cycled** -- polls still answer, so it reads as a live-but-idle link.
-The old rate is therefore held and written back if frames do not resume within
-two silence windows, and the reordered rate list leads with 38400 so the scan
-does not spend twenty-five seconds walking to a rate the module is already on.
-Every other rate stays in the list: a receiver reset to its factory default comes
-up at 9600 and is still found, just later.
-
-## Layout
-
-| File                    | Contents                                                        |
-|-------------------------|-----------------------------------------------------------------|
-| `main/main.cpp`         | boot order only: NVS, settings, netif + event loop, the GPS, the clock, then the link |
-| `main/eth_link.[ch]pp`  | `EthernetLink`: EMAC + PHY bring-up, pin map, PHY diagnostics, event handlers, netif, status task, web server and responder start, OTA image confirmation |
-| `main/settings.[ch]pp`  | `Settings : SettingsBase` — the five device settings            |
-| `main/web_server.[ch]pp`| `NtpWebServer : WebServer` — `/healthz` fields, `/config`, `/config/reset`, `/ntp/sync`, `/gps/pps`, `/firmware` |
-| `main/time_ref.h`       | `TimeRef` / `TimeReference`: what the responder may claim (stratum, refid, leap, root figures), and the interface both sources implement |
-| `main/gps_time.[ch]pp`  | `GpsTime` + `GpsTimeRef`: UART1 and the PPS interrupt, the UBX `NAV-PVT` / `NAV-TIMELS` parsers, the anchor, the frequency servo and its holdover, the slew of `CLOCK_REALTIME` |
-| `main/ntp_time.[ch]pp`  | `NtpTime`: upstream SNTP client for `timeSource=dhcp`/`static`    |
-| `main/ntp_server.[ch]pp`| `NtpServer` + `UpstreamTimeRef` + `SelectedTimeRef`: the UDP/123 responder, reply builder, rate limiter |
-| `main/net_state.[ch]pp` | read-only netif / link / IPv6-address accessors, fed by `eth_link.cpp` |
-| `main/ubx.[ch]pp`       | UBX framing for both readers: byte state machine, checksum gate, definition table with length ranges |
-| `main/text.h`           | `put` / `getList` / `putLe` / `getLe`: formatting and parsing without a format string |
-| `tools/ntp_test.py`     | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
-| `tools/ubx.py`          | host twin of the decoder, used by the tools |
-| `tools/ubx_test.py`     | framing tests: every split offset, corrupt bytes, false sync, length gates |
-
-`docs/code-review.md` is the review template for changes here.
-
-Written locally; everything else (JSON, NVS, settings machinery, the HTTP
-server) is a mianesp component.
+`viewer/` is a local page for the box: sky plot, receiver health, signal, and
+long-term charts read from the box's own JSON. One process polls on a timer and
+every tab reads the same snapshot, so opening tabs does not change the load on
+the box. See `viewer/README.md`.
 
 ## Troubleshooting
 
-- **`phy: MDIO read failed` or no `MDIO addr N` line at boot**: the SMI pins
-  (MDC/MDIO) are wrong, or the PHY is held in reset (check `ETH_PHY_RST_GPIO`).
-  On this board MDIO addr 1 answers with `0x0243xxxx`; anything else means
-  wiring / PHY-address trouble, not lwIP trouble.
+- **`phy: MDIO read failed`, or no `MDIO addr N` line**: SMI pins wrong, or the
+  PHY held in reset. Addr 1 answers with `0x0243xxxx`; anything else is wiring,
+  not lwIP.
 - **PHY ID prints but `link=0` forever**: no link partner. Check the cable and
-  the switch port LED; link only comes up when the PHY sees a partner.
-- **Link up but no lease** (`waiting for link + DHCP lease` keeps printing):
-  the DHCP server must be on that L2 segment; some guest/VLAN networks need
-  a MAC registration. For a static IP, fill `esp_netif_ip_info_t` and call
-  `esp_netif_set_ip_info()` instead of relying on the DHCP client.
-- **No serial output at all**: check `CONFIG_ESP_CONSOLE_UART_DEFAULT` is set.
-  Logs only appear if the firmware prints to UART0 (the CH343 bridge); the
-  P4's native USB-Serial/JTAG pins are not broken out on this connector.
-- **Port busy / `[Errno 16] Resource busy`**: a leftover `esp_idf_monitor`
-  still owns `/dev/cu.usbmodem*`; `lsof /dev/cu.usbmodem*` and kill it.
-- **Nothing on port 80, but ping works**: the server starts on the first
-  `IP_EVENT_ETH_GOT_IP`, so check the log for `WebServer: Starting server on port: 80`.
-  If it says `httpd_start: ESP_ERR_HTTPD_...`, the port is already bound.
-- **`/config` returns defaults after a reboot**: the NVS write failed — look for
-  `settings: failed to persist config` in the log (usually a full partition).
-- **`time_set` stays `false` / `time` reads 1970**: nothing set the clock. In
-  `dhcp` mode look for `no NTP server in the lease (option 42)` — plenty of
-  DHCP servers do not send one, and then `timeSource=static` with an explicit
-  `ntpServer` is the fix. If there is no warning but no `clock set` line either,
-  the poll is leaving the board but not coming back: check the server is
-  reachable (`/ntp/sync` returns 504) and that UDP/123 outbound is allowed.
-- **`ntp_time: upstream time server` never appears**: `NtpTime::begin()` must
-  run before `esp_eth_start()` or lwIP discards option 42. Check the boot order
-  in `app_main()`, and that `CONFIG_LWIP_DHCP_GET_NTP_SRV=y` survived a
-  `sdkconfig` edit (run `idf.py menuconfig` → Component config → LWIP → SNTP).
-- **A client says `Server not synchronized` / `Clock select failed`**: the
-  responder is answering `li=3 stratum=16`, deliberately — the clock is not
-  locked. Check `/healthz`: `ntp_synced` false, or `last_sync` older than
-  fifteen minutes. Fix the upstream, not the responder. Serving a 1970 clock
-  with `stratum=3` would be the actual bug.
-- **`serve_ntp` is `false`**: `serveNtp` is `off`. If it is `on` and still
-  `false`, the boot log has the reason: `bind udp/123: errno 98` means something
-  else owns the port on the device, `cannot start the responder task` means heap
-  (it wants 4 KB of stack). A failed start never takes the rest of the firmware
-  with it — HTTP keeps answering, which is how you get in to see why.
-- **`stratum` is 16 right after switching `timeSource` back to `dhcp`**: the
-  clock has not resynced because lwIP only learns option 42 on a DHCP bind — the
-  log says `option 42 arrives at the next DHCP bind (a reboot applies it now)`.
-  Nothing wrong with the responder; a lease renewal or reboot clears it.
-- **`stratum` drops to 16 ten minutes into a GPS outage**: that is the holdover
-  window ending, not a new fault. `/healthz` says how long the edge has been gone
-  (`gps_pps_age_ms`) and how much dispersion the replies had accumulated. If
-  `gps_pps_suppressed_s` is present, someone armed `POST /gps/pps` and the outage
-  is a test — `{"suppress_s":0}` stands the edges back up.
-- **`rate_n` climbs but `rate_ppm` stays 0** (both at `/gps/info`): the fit needs 60 anchors, so
-  that would be a boot less than a minute old. If `gps_rate_n` sits still instead,
-  no anchors are being paired: the PPS interrupt or the UBX frames are missing
-  (`no PPS edges` / `no UBX frames` in the log), and the holdover will stay at
-  three seconds because there is no rate to hold with.
-- **A client is getting `RATE` kiss-o'-death replies**: it is asking faster than
-  one packet per 2 s after its 16-packet burst. macOS `sntp` sends five queries
-  per invocation, so a loop of `sntp` runs will get there — wait a few seconds
-  between runs, or drive it with `tools/ntp_test.py`, which sends one packet at
-  a time and prints what came back. Confirm with `ntp_requests` in `/healthz`
-  against the client's own count.
+  the switch port LED.
+- **Link up but no lease**: the DHCP server must be on that L2 segment. Fill in
+  `ipMode`/`ipAddress`/`ipGateway` for a static address instead.
+- **No serial output at all**: `CONFIG_ESP_CONSOLE_UART_DEFAULT` must be set. The
+  P4's native USB-Serial/JTAG pins are not on this connector.
+- **`Resource busy` on the port**: a leftover `idf.py monitor` still owns the
+  node; `lsof /dev/cu.usbmodem*` and kill it.
+- **Nothing on port 80 but ping works**: the server starts on the first
+  `IP_EVENT_ETH_GOT_IP`; wait for the lease. `httpd_start` failing means the port
+  is already bound.
+- **`/config` returns defaults after a reboot**: the NVS write failed; look for
+  `settings: failed to persist config`.
+- **`time_set` stays false**: nothing set the clock. In `dhcp` mode look for
+  `no NTP server in the lease (option 42)` — plenty of DHCP servers send none,
+  and then `timeSource=static` with an explicit `ntpServer` is the fix. If a poll
+  goes out and nothing comes back, `/ntp/sync` answers 504.
+- **A client says `Server not synchronized`**: deliberately — the clock is not
+  locked and the responder says `li=3 stratum=16`. Check `ntp_synced`, `last_sync`
+  and `gps_pps_age_ms`. Fix the source, not the responder.
+- **Stratum 16 ten minutes into a GPS outage**: the holdover window ending, not a
+  new fault. If `gps_pps_suppressed_s` is present someone armed `/gps/pps`; zero
+  stands the edges back up.
+- **`rate_n` climbs but `rate_ppm` stays 0**: the fit needs 60 anchors, so that is
+  a boot under a minute old. If `rate_n` sits still, no anchors are being paired —
+  the PPS interrupt or the UBX frames are missing, and the holdover will stay at
+  three seconds.
+- **Zero satellites with a fix, `agc` pegged, `cn0_max` 0**: an open or unpowered
+  feed, not a configuration fault. Check `V_ANT` on pin 1 and the connector.
+- **`RATE` kiss-o'-death replies**: the client is asking faster than one per 2 s
+  after its burst. `sntp` sends five queries, so a tight loop gets there; wait
+  between runs or use `tools/ntp_test.py`.
 - **`ntp_refid` is a number for a hostname upstream**: that is the FNV-1a of the
-  name, not its address — lwIP does not expose the address the SNTP client
-  resolved ([Serving NTP](#serving-ntp-udp123)). Set `ntpServer` to the literal
-  address if you want to see it there.
-- **`ipv6_linklocal` is missing from `/healthz`**: IPv6 never came up. Check the
-  log for `IPv6 link-local: ...` right after `link up` — that line comes from
-  the `esp_netif_create_ip6_linklocal()` call in `eth_link.cpp`, and without it
-  esp_netif leaves the netif with no IPv6 address at all even though lwIP was
-  built for it. If the log line is there, the address is still in DAD: it shows
-  up a second later.
-- **`ping6` to the link-local works but the global address is unreachable**: no
-  Router Advertisement reached the board, so SLAAC had nothing to build an
-  address from. `ndp -rn` on macOS (or `ip -6 route` elsewhere) shows whether
-  that segment is advertised at all; a link-local ping only proves the wiring,
-  since the packet never leaves the L2 segment.
-- **`curl` says `bad range` or `URL rejected`**: an IPv6 literal needs brackets
-  *and* `-g` (curl treats `[` as a glob), and a link-local one needs the zone as
-  `%25`: `curl -g 'http://[fe80::200:5eff:fe00:5301%25en0]/healthz'`.
-- **`/config` accepted an IPv6 `ntpServer` but the clock stays at 1970**: by
-  design — see the warning in the log and [IPv6](#ipv6); lwIP's SNTP client has
-  no AAAA path, so the upstream clock is IPv4-only.
-- **`POST /firmware` answers `500` "no OTA partition"**: the board is still on
-  the old single-app table (`GET /firmware` says `"ota": false`). Flash once over
-  USB with the current `sdkconfig.defaults`; `idf.py flash` writes the new table
-  and `ota_data_initial.bin` for you.
-- **`POST /firmware` answers `409`**: the running image has not confirmed itself
-  yet (it has no lease yet, usually right after an update). Retry once `/healthz`
-  answers.
-- **An update "does not take": the device comes back on the other slot.** That
-  is the rollback working — the new image never reached a lease + HTTP server, so
-  the bootloader returned to the slot that had one. Look for
-  `OTA image confirmed` in the log: absent means the image died earlier, and the
-  serial console is the only place that says why.
-- **First build fails fetching `espressif/cjson`**: the component registry is
-  unreachable. Build once with network access; after that
-  `managed_components/` is cached locally.
+  name. Use a literal address to see it there.
+- **`serve_ntp` is false with `serveNtp` on**: the boot log has the reason —
+  `bind udp/123: errno 98` means something else owns the port, `cannot start the
+  responder task` means heap. HTTP keeps answering either way.
+- **`ping6` to the link-local works but the global is unreachable**: no Router
+  Advertisement, so SLAAC had nothing to build from. `ndp -rn` shows whether the
+  segment is advertised at all.
+- **`POST /firmware` answers `500`**: the board is on the old single-app table
+  (`"ota": false`). Flash once over USB.
+- **An update does not take and the box comes back on the other slot**: the
+  rollback working. `OTA image confirmed` absent means the new image died before
+  it had a lease; only the console says why.
+- **The first build fails fetching `cjson`**: the registry is unreachable. Build
+  once with network.
+
+## Layout
+
+| File | Contents |
+|---|---|
+| `main/main.cpp` | boot order only: NVS, settings, netif + event loop, the GPS, the clock, then the link |
+| `main/eth_link.[ch]pp` | EMAC + PHY bring-up, pin map, PHY diagnostics, event handlers, netif, web server and responder start, OTA confirmation |
+| `main/settings.[ch]pp` | `Settings` — the stored keys and their defaults |
+| `main/config_apply.cpp` | the sequence that runs after a setting changes: hostname, address, time source |
+| `main/web_server.[ch]pp` | the HTTP handlers |
+| `main/console.[ch]pp` | the serial console and its commands |
+| `main/time_ref.h` | what the responder may claim, and the interface both sources implement |
+| `main/gps_time.[ch]pp` | UART1 and the PPS interrupt, the UBX parsers, the anchor, the servo, the slew |
+| `main/ntp_time.[ch]pp` | upstream SNTP client |
+| `main/clock_source.[ch]pp` | which reference owns the clock, and the hand-over between them |
+| `main/ntp_server.[ch]pp` | the UDP/123 responder, reply builder, rate limiter |
+| `main/ntp_control.[ch]pp` | the mode 6 control queries |
+| `main/tx_lag.[ch]pp` | the transmit-path measurement the reply stamps are corrected by |
+| `main/serve_path.[ch]pp` | how far the served time actually moves, for the dispersion |
+| `main/net_log.[ch]pp` | the UDP log sink |
+| `main/net_addr.[ch]pp` | IPv4 literal parsing and validation |
+| `main/net_state.[ch]pp` | read-only link and address accessors |
+| `main/ubx.[ch]pp` | UBX framing: byte state machine, checksum gate |
+| `main/text.h` | formatting and parsing without a format string |
+| `tools/ntp_test.py` | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
+| `tools/ubx.py`, `tools/ubx_test.py` | host twin of the decoder, and its tests |
+| `viewer/` | the local page |
+
+The HTTP and settings machinery (`webserver`, `jsonwrapper`,
+`nvsstoragemanager`, `settingsbase`) are mianesp components, not local copies.
+`docs/` holds the review template and the UBX notes.
 
 ## Next step
 
-The reference is here, the servo is here, and the leap notice is here. What is
-left is making the *edges* as good as the clock, and the first two bullets below
-are one change:
+The clock is good to a few microseconds; what limits it now is the edge. The P4's EMAC has
+an IEEE 1588 counter that can be read from the same edge and steered in ppb
+(`esp_eth_mac_adj_ptp_time()`, `esp_eth_mac_adj_ptp_freq()`), which would make
+the edge hardware-sampled and give the servo somewhere to put its estimate other
+than the reply path. The same unit is the only route to a hardware receive stamp:
+it is exposed as a steerable clock, not a per-frame one, and lwIP has no
+`SO_TIMESTAMP`, so `t2` needs a driver patch.
 
-- **Sub-microsecond PPS capture, and a rate that steers hardware instead of
-  arithmetic.** The ISR stamp is interrupt latency: single-digit microseconds, and
-  it is the floor under everything above. The P4's EMAC has an IEEE 1588 counter
-  that can be read from the same edge and steered in ppb
-  (`esp_eth_mac_adj_ptp_time()`, `esp_eth_mac_adj_ptp_freq()`), which would make
-  the edge hardware-sampled *and* give the servo somewhere to put its estimate
-  other than `GpsTimeRef::now()`. The servo would then discipline the counter the
-  whole system reads rather than the replies alone, and `adjtime()`'s phase-only
-  schedule could go.
-- **The receive-side accuracy** the dispersion admits to. It is *not* a call away:
-  the PTP unit is exposed as a steerable clock, not as a per-frame timestamp, and
-  lwIP has no `SO_TIMESTAMP` — so a hardware `t2` needs a driver patch that
-  surfaces the DMA descriptor's stamp ([what the API actually offers](#serving-ntp-udp123)).
-  Same driver work as the counter above, which is why they are one bullet.
-- **A leap second that actually happened.** The path is built and reads a live
-  offset, but LI has only ever been 0 here: the next leap is the test, and a
-  receiver with a pre-loaded announcement would let it be rehearsed.
-
-Until then this is a correct stratum-1 server: its clock is good to a few
-microseconds, it holds over for ten minutes at 2 µs, and its replies are honest
-about everything it cannot measure.
+The leap path is built and reads a live offset, but LI has only ever been 0 here;
+the next leap is the test.

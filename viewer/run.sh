@@ -2,7 +2,7 @@
 # Serve the sky view on localhost only.
 #
 # BOX_HOST overrides the target, PORT the listener, POLL_S the poll interval:
-#   BOX_HOST=131.84.1.107 PORT=8766 ./run.sh
+#   BOX_HOST=192.0.2.20 PORT=8766 ./run.sh
 set -eu
 cd "$(dirname "$0")"
 
