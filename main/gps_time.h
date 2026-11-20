@@ -535,6 +535,10 @@ public:
      * firmware -- or deliberately, to watch the scan -- is put back. */
     void requestBaud(uint32_t baud, bool moduleToo);
     int8_t sendCfgPrt(uint32_t baud);
+
+    /* The same port configuration as an NMEA sentence, for a receiver whose UBX
+     * input has been switched off. */
+    void sendPubxPortConfig(uint32_t baud);
     int8_t saveCfgIo();
     /* Learn the time mode from the receiver, and put a known position hold back
      * after something has cleared it. */

@@ -394,7 +394,51 @@ void GpsTime::requestBaud(uint32_t baud, bool moduleToo)
     m_baudReqModule = moduleToo;
 }
 
-/* CFG-PRT for UART1. Sent at whatever rate is currently working, so the module
+/* NMEA PUBX,41 -- the port configuration sentence.
+ *
+ * A second way to say what CFG-PRT says, and the only one that still gets in
+ * when the receiver's UBX *input* mask has been zeroed: NMEA parsing does not
+ * depend on it. That is the failure this exists for -- a receiver pulsing PPS
+ * and answering nothing, deaf to every UBX message sent at every rate, because
+ * its UART1 input mask went to zero and the config was saved that way. A rail
+ * power cycle reloads the same broken config, so the repair has to arrive over
+ * the wire or not at all.
+ *
+ * Sent three times at the rate the scan is on, because a receiver whose baud we
+ * have guessed wrong reads the tail of one and the head of the next. Harmless
+ * when the link is healthy: it restates what is already true.
+ *
+ *        $PUBX,41,1,0003,0001,<baud>,0*<cs>
+ *               |  |    |    |      + autobauding off
+ *               |  |    |    + baud rate
+ *               |  |    + out: UBX
+ *               |  + in: UBX | NMEA
+ *               + portID: UART1
+ */
+void GpsTime::sendPubxPortConfig(uint32_t baud)
+{
+    char      bodyText[40] = {};
+    const int body = std::snprintf(bodyText, sizeof(bodyText), "PUBX,41,1,0003,0001,%u,0",
+                                   static_cast<unsigned>(baud));
+    if (body <= 0 || body >= static_cast<int>(sizeof(bodyText))) {
+        return;
+    }
+    uint8_t cs = 0;
+    for (int i = 0; i < body; ++i) {
+        cs ^= static_cast<uint8_t>(bodyText[i]);
+    }
+    /* Two buffers: snprintf cannot take its own destination as an argument. */
+    char      sentence[48] = {};
+    const int total = std::snprintf(sentence, sizeof(sentence), "$%s*%02X\r\n", bodyText, cs);
+    if (total <= 0) {
+        return;
+    }
+    for (int i = 0; i < 3; ++i) {
+        uart_write_bytes(kUart, sentence, static_cast<size_t>(total));
+    }
+}
+
+/* CFG-PRT for UART1, before the burst. Sent at whatever rate is currently working, so the module
  * receives it; the caller switches the host afterwards. 8N1, UBX in and out,
  * NMEA off -- the same shape the boot configuration leaves behind. RAM only, so
  * a module power cycle still returns to its own default and the scan finds it. */
@@ -1890,6 +1934,12 @@ void GpsTime::advanceBaud()
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "uart_set_baudrate(%u): %s", static_cast<unsigned>(m_baud),
                  esp_err_to_name(err));
+    }
+    /* Before the UBX burst, and on the off chance the port config is what is
+     * wrong: NMEA gets in where UBX no longer does. */
+    if (!m_frameSeen) {
+        sendPubxPortConfig(m_baud);
+        esp_rom_delay_us(20000);
     }
     m_poorSecs  = 0;
     m_secFrames = 0;
