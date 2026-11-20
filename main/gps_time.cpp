@@ -1,5 +1,7 @@
 #include "gps_time.h"
 
+#include "ptp.h"
+
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -1100,6 +1102,12 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
         (m_ppsCount == 0 || nowUs - m_ppsMonoUs >= kMinEdgeSpacingUs)) {
         m_ppsMonoUs = nowUs;
         m_ppsMonoNs = edgeNs;
+        /* The same edge in the 1588 counter's base. Read here rather than from a
+         * task: the point of the counter is that the distance from the edge to
+         * the read is a register access, not a wake-up. */
+        if (ptp::hardware()) {
+            m_ppsPtpNs = ptp::nowNs();
+        }
         ++m_ppsCount;
     }
     portEXIT_CRITICAL_ISR(&m_mux);
@@ -4057,6 +4065,7 @@ GpsTime::Status GpsTime::status() const
 
     portENTER_CRITICAL(&m_mux);
     st.ppsCount    = m_ppsCount;
+    st.ppsPtpNs    = m_ppsPtpNs;
     st.timeValid   = m_timeValid;
     st.fixType     = m_fixType;
     st.satellites  = m_satellites;

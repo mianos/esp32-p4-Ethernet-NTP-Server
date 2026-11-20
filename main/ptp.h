@@ -1,0 +1,74 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+#include "esp_attr.h"
+#include "esp_err.h"
+#include "esp_eth_driver.h"
+#include "esp_netif.h"
+#include "freertos/FreeRTOS.h"
+#include "soc/emac_ptp_struct.h"
+
+/* The 1588 counter, and the frames that carry timestamps.
+ *
+ * Two things share it and they are not the same job: the NTP responder wants a
+ * hardware stamp on the datagrams it answers, and the PTP responder will want
+ * the whole frame. Both need the clock running and the receive path diverted,
+ * so that part lives here and neither protocol owns it.
+ *
+ * The PHC is not a third timebase. It is started from CLOCK_REALTIME once, and
+ * what it is for is being read by hardware at the ends of a frame; the servo
+ * still owns the reference and will steer it once the NTP path trusts it.
+ */
+namespace ptp {
+
+/* Install the receive path that splits 0x88F7 frames off and records the stamp
+ * of a UDP/123 datagram before lwIP sees it. Called once, after the netif is
+ * attached; idempotent. */
+esp_err_t attach(esp_eth_handle_t eth, esp_eth_mac_t *mac, esp_netif_t *netif);
+
+/* Start or restart the PHC, from CLOCK_REALTIME. Idempotent unless `restart`,
+ * which a MAC stop/start needs because it clears the block. */
+esp_err_t enable(bool restart = false);
+bool enabled();
+
+/* Set from a task, read from the PPS interrupt: a plain word, so the handler
+ * needs no call into flash. */
+extern volatile bool gHardwareOn;
+
+inline IRAM_ATTR bool hardware()
+{
+    return gHardwareOn;
+}
+
+/* The counter, in nanoseconds. IRAM-safe: the registers are read directly, so
+ * the PPS interrupt may call it while the flash cache is off for an OTA write.
+ * Reading the nanoseconds latches the seconds, so the two cannot straddle a
+ * second boundary. */
+inline IRAM_ATTR int64_t nowNs()
+{
+    const uint32_t ns  = EMAC_PTP.sys_nanosec.ts_sub_seconds;
+    const uint32_t sec = EMAC_PTP.sys_seconds.ts_second;
+    return static_cast<int64_t>(sec) * 1000000000LL + ns;
+}
+
+/* One frame out, with the hardware transmit stamp if the PHC is running.
+ * Returns the stamp in `stampNs`, or 0 when the frame went without one. */
+esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs);
+
+/* Receive stamps for UDP/123, keyed by source. Recorded in the input path, taken
+ * by the responder after recvfrom() so the reply can carry the arrival as t2
+ * rather than a time read after the scheduler. */
+bool takeRxStamp(const uint8_t *addr, size_t addrLen, uint16_t port, int64_t *ns);
+
+struct Stats {
+    uint32_t frames;   /* 0x88F7 frames seen */
+    uint32_t rxStamps; /* UDP/123 arrival stamps recorded */
+    uint32_t txStamps; /* frames sent with a hardware stamp */
+    uint32_t txMissing;
+    int64_t  lastNs; /* most recent stamp of either kind */
+};
+Stats stats();
+
+} // namespace ptp

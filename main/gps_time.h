@@ -127,6 +127,10 @@ public:
         uint8_t  satellites = 0;
         uint32_t ppsCount   = 0;
         int64_t  ppsAgeUs   = -1;    /* since the last edge; -1 means never */
+        /* The last edge in the 1588 counter's base, which is where a hardware
+         * timestamp would come from. Zero until the first edge after the PHC
+         * runs; the two are compared to see the counter track the reference. */
+        int64_t  ppsPtpNs   = 0;
         bool     anchored   = false; /* an edge and a NAV-PVT have been paired */
         time_t   lastFix    = 0;     /* UTC second of the last accepted anchor */
         int64_t  offsetUs   = 0;     /* GPS minus the system clock, last measured */
@@ -752,6 +756,7 @@ private:
      * counter. Only the rate fit reads it; everything that sets the clock or
      * measures age keeps the microsecond field. */
     int64_t      m_ppsMonoNs    = 0;
+    int64_t      m_ppsPtpNs     = 0;
     uint32_t     m_ppsCount     = 0;
     int64_t      m_anchorUtcNs  = 0;
     int64_t      m_anchorMonoUs = 0;

@@ -27,6 +27,7 @@
 #include "soc/emac_reg.h"
 #include "soc/soc.h"
 #include "net_addr.h"
+#include "ptp.h"
 #include "net_log.h"
 #include "net_state.h"
 #include "ntp_server.h"
@@ -351,6 +352,17 @@ esp_err_t EthernetLink::begin()
     ESP_LOGI(TAG, "MAC frame filter 0x%08x: multicast passes",
              static_cast<unsigned>(REG_READ(EMAC_MACFRAMEFILTER_REG)));
 #endif
+
+    /* The receive path is ours from here: it records the arrival stamp of a
+     * UDP/123 datagram and splits 0x88F7 frames off before lwIP, which is what
+     * makes a hardware t2 possible at all. The PHC then stamps every frame.
+     * Neither failing is fatal -- without them the responder keeps its software
+     * stamps -- so both are warnings. */
+    if (ptp::attach(m_eth, m_mac, m_netif) == ESP_OK) {
+        if (ptp::enable() != ESP_OK) {
+            ESP_LOGW(TAG, "hardware timestamping unavailable: software stamps only");
+        }
+    }
     return startStatusTask();
 }
 
@@ -396,6 +408,10 @@ esp_err_t EthernetLink::installDriver()
         ESP_LOGE(TAG, "esp_eth_driver_install failed: %s", esp_err_to_name(err));
         return err;
     }
+
+    /* Kept past the release: the 1588 calls take the MAC, and the driver keeps
+     * it alive for the life of the driver. */
+    m_mac = mac.get();
 
     /* Installed: the driver owns both instances from here. */
     mac.release();
@@ -502,6 +518,8 @@ esp_err_t EthernetLink::restart(const char *why)
         err = esp_eth_start(m_eth);
     }
     if (err == ESP_OK) {
+        /* stop/start clears the 1588 block with the rest of the MAC. */
+        ptp::enable(true);
         ++m_restarts;
         /* The PHY comes back with whatever autoneg settles on; say so, because
          * "restarted and still 100 Mb/s" and "restarted into a half-duplex

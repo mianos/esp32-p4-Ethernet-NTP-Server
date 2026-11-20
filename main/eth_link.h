@@ -111,6 +111,8 @@ private:
     void statusLoop();
 
     esp_eth_handle_t m_eth   = nullptr;
+    /* Owned by the driver once installed; kept for the 1588 calls. */
+    esp_eth_mac_t   *m_mac   = nullptr;
     esp_netif_t     *m_netif = nullptr;
     /* Written by the event handlers, read by the status task. */
     std::atomic<bool> m_haveIp{false};
