@@ -329,6 +329,13 @@ with the diagnostics loaded, against 43% at 9600, which is what stops the line
 deciding what can be enabled. `POST /gps/baud {"baud":38400,"module":true}` moves
 it; without `module` only the host moves.
 
+A receiver can be left saying nothing at all — a port configuration half written,
+or line noise taken for a frame — and then no entry in that list is the right one
+and the scan can only walk it forever. After a whole silent pass the reset frame
+goes out at every rate in the list, once a minute: the module returns at its own
+defaults, NMEA at 9600, and the scan starts from there. The stored rate still
+leads, so a healthy receiver is not disturbed.
+
 Only the receiver's IO section is saved to its flash, so a new rate survives a
 power cut without pinning the message rates and the constellation mask to that
 boot. The module does not resume its periodic output until it is power-cycled,
@@ -670,11 +677,17 @@ the requester's MAC rather than multicast. A slave reports; it does not steer
 The PHC is stepped with the system clock, because a counter left in 1970 would
 put every PTP timestamp 56 years out.
 
-The MAC has one known fault: now and then it stops transmitting altogether —
-ARP included, while the link still reads up — and nothing in the driver clears
-it. Twenty failed sends inside two seconds restarts the MAC, at most once per
-thirty seconds, and logs it, so a stall costs seconds instead of the box. A
-`link up` that answers nothing is that.
+**Only the frames whose stamp is read back are timestamped.** The driver's
+`ptp_enable()` turns the descriptor's timestamp bit on for every frame from then
+on, and the MAC writes the timestamp back into the descriptor after the frame has
+gone — including into frames nobody polls, whose descriptors the next frame may
+already own. The bit is cleared at start-up and raised around the frames that
+need it, under a mutex. A stamp more than a second from the counter is treated as
+absent, so a stale one cannot become a Follow_Up.
+
+Belt and braces: twenty failed sends inside two seconds still restarts the MAC,
+at most once per thirty seconds, and says so. A `link up` that answers nothing is
+what that is for.
 
 ## Clock sources
 
