@@ -327,9 +327,20 @@ are the whole implementation:
 
 | Where | What |
 |-------|------|
-| `sdkconfig.defaults` | `CONFIG_LWIP_IPV6=y` (IDF's own default, spelled out because the rest depends on it), `CONFIG_LWIP_IPV6_AUTOCONFIG=y` for SLAAC, `CONFIG_LWIP_IPV6_NUM_ADDRESSES=3` |
+| `sdkconfig.defaults` | `CONFIG_LWIP_IPV6=y` (IDF's own default, spelled out because the rest depends on it), `CONFIG_LWIP_IPV6_AUTOCONFIG=y` for SLAAC, `CONFIG_LWIP_IPV6_MLD=y`, `CONFIG_LWIP_IPV6_NUM_ADDRESSES=3` |
 | `eth_link.cpp`, `ETHERNET_EVENT_CONNECTED` | `esp_netif_create_ip6_linklocal()`. esp_netif does **not** create `fe80::` on its own, and without a source address lwIP has nothing to send the Router Solicitation from — so no RA comes back and there is no global address either. Called on every link-up, so a cable bounce re-arms it. |
+| `eth_link.cpp`, after `esp_eth_start()` | `ETH_CMD_S_PROMISCUOUS`, then the MAC frame filter's **PM** bit. Without MLD and PM the board has a link-local, answers a unicast ping, and answers a ping to `ff02::1` not at all: the MAC drops the multicast groups SLAAC and NDP both need. `esp_eth` has no multicast-hash ioctl, so the bit is written directly — and it must be *after* start, because the MAC is programmed during start and clears it. |
 | `eth_link.cpp`, `IP_EVENT_GOT_IP6` | logs each address as it lands, with the URL it makes reachable |
+| `net_state::ipv6Global()` | first address that is not link-local, from `esp_netif_get_all_ip6()`. `esp_netif_get_ip6_global()` filters on lwIP's `ip6_addr_isglobal()`, which is `2000::/3` and so hides a ULA: on a `fd00::/64` segment it reported nothing while the box answered fine. |
+
+**On a routed pocket** the segment needs what the IPv4 side needed, in IPv6
+terms: a prefix, a route, and a name. The bridge carries `fd00:99::1/64` with
+`ipv6.nat=true` and an RA from Incus's dnsmasq; the LAN router carries
+`fd00:99::/64` via the bridge host; `esp32p4-ntp.mianos.com` carries an AAAA
+beside its A, and `ntp.mianos.com` is a CNAME so it follows. A ULA is not
+internet-routable, which is what `ipv6.nat` is for — and the configured upstream
+`162.159.200.1` is an IPv4 address regardless, because lwIP's SNTP client
+resolves A records only.
 
 Nothing above that needed changing:
 
