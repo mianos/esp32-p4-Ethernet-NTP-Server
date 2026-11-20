@@ -5,6 +5,7 @@
 
 #include "esp_attr.h"
 #include "esp_eth_mac_esp.h"
+#include "hal/emac_hal.h"
 #include "esp_timer.h"
 #include "esp_log.h"
 
@@ -13,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 namespace {
@@ -174,6 +176,7 @@ uint8_t          gDomain    = 0;
 uint8_t          gPriority1 = 128;
 uint16_t         gSeq[16]   = {};
 TaskHandle_t     gTask      = nullptr;
+SemaphoreHandle_t s_txMux   = nullptr;
 
 struct DelayReq {
     uint8_t  mac[6];
@@ -643,13 +646,22 @@ esp_err_t enable(bool restart)
         ESP_LOGE(TAG, "phc enable: %s", esp_err_to_name(err));
         return err;
     }
-    /* Every frame, not only PTP's: the responder needs the arrival stamp of a
-     * UDP/123 datagram long before there is a PTP message to serve. */
+    /* Receive stamps on every frame, not only PTP's: the responder needs the
+     * arrival stamp of a UDP/123 datagram long before there is a PTP message to
+     * serve. The transmit side is the opposite -- see transmit(). */
     err = esp_eth_mac_enable_ts4all(s_mac, true);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ts4all: %s", esp_err_to_name(err));
         return err;
     }
+    if (s_txMux == nullptr) {
+        s_txMux = xSemaphoreCreateMutex();
+        if (s_txMux == nullptr) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    uint32_t stampBit = EMAC_HAL_TDES0_TX_TS_ENABLE;
+    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS), &stampBit);
 
     /* Start it at CLOCK_REALTIME so a stamp is an epoch instant and can be read
      * by eye. Before the clock is set this is 1970, which the anchor corrects
@@ -722,16 +734,31 @@ void noteTxResult(esp_err_t err)
     gRestarting = false;
 }
 
+/* The transmit path stamps a frame only when the descriptor flag is set for it,
+ * and the driver sets that flag globally for every frame once timestamping is
+ * on. That is the problem this works around: the MAC writes the timestamp back
+ * into the descriptor after the frame has gone, and a descriptor that has been
+ * handed to the next frame by then gets it in the words the DMA is reading --
+ * `insufficient TX buffer size`, then nothing transmits at all. So the flag is
+ * cleared at start-up and raised only around the frames whose stamp is read
+ * back, under a mutex because two tasks send. */
 esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
 {
     if (stampNs != nullptr) {
         *stampNs = 0;
     }
-    if (s_eth == nullptr) {
+    if (s_eth == nullptr || s_txMux == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
+    if (xSemaphoreTake(s_txMux, pdMS_TO_TICKS(20)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    uint32_t stampBit = EMAC_HAL_TDES0_TX_TS_ENABLE;
+    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_SET_TDES0_CFG_BITS), &stampBit);
     eth_mac_time_t stamp = {};
     const esp_err_t err  = esp_eth_transmit_ctrl_vargs(s_eth, &stamp, 2, frame, len);
+    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS), &stampBit);
+    xSemaphoreGive(s_txMux);
     if (err != ESP_OK) {
         noteTxResult(err);
         /* A frame offered while the driver still says the link is down is not a
@@ -749,9 +776,17 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
         ++s_stats.txMissing;
         return ESP_OK;
     }
+    /* A stamp that is a second away from the counter was written by an older
+     * frame and describes nothing; the caller falls back to software. */
+    const int64_t got  = static_cast<int64_t>(stamp.seconds) * 1000000000LL +
+                         static_cast<int64_t>(stamp.nanoseconds);
+    const int64_t diff = got - nowNs();
+    if (diff > 1000000000LL || diff < -1000000000LL) {
+        ++s_stats.txMissing;
+        return ESP_OK;
+    }
     ++s_stats.txStamps;
-    s_stats.lastNs = static_cast<int64_t>(stamp.seconds) * 1000000000LL +
-                     static_cast<int64_t>(stamp.nanoseconds);
+    s_stats.lastNs = got;
     if (stampNs != nullptr) {
         *stampNs = s_stats.lastNs;
     }

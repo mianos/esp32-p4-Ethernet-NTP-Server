@@ -2036,7 +2036,33 @@ void GpsTime::advanceBaud()
      * introduced it, and every boot after. */
     if (++m_scanSteps >= kCount) {
         m_scanSteps = 0;
-        m_baudIndex = m_preferredIndex;
+        /* A whole pass with nothing at all. The module can be left in a state
+         * where it says nothing on any rate -- a port configuration half
+         * written, a burst of line noise taken as a frame -- and then no entry
+         * in the list is the right one and the scan can only walk it forever.
+         *
+         * A reset frame is twelve bytes and is harmless at a wrong rate, so it
+         * goes out at every rate in the list, once a minute. The module comes
+         * back at its own defaults, NMEA at 9600, and the scan starts from
+         * there; the message set is re-asserted when frames appear. */
+        const int64_t nowUs = esp_timer_get_time();
+        if (nowUs - m_lastSweepUs > 60000000LL) {
+            m_lastSweepUs = nowUs;
+            constexpr uint8_t rst[4] = {0x00, 0x00, 0x00, 0x00}; /* hot, hardware */
+            for (uint32_t baud : kBauds) {
+                (void)uart_set_baudrate(kUart, baud);
+                sendUbx(0x06, 0x04, rst, sizeof(rst));
+                vTaskDelay(pdMS_TO_TICKS(20));
+            }
+            ESP_LOGW(TAG, "receiver silent at every rate: reset swept, back to 9600");
+            for (int i = 0; i < kCount; ++i) {
+                if (kBauds[i] == 9600) {
+                    m_baudIndex = i;
+                }
+            }
+        } else {
+            m_baudIndex = m_preferredIndex;
+        }
         if (!m_noDataLogged) {
             ESP_LOGW(TAG, "no UBX frames at any baud rate: check module TX -> GPIO%d "
                           "(esp RX) and PPS -> GPIO%d", kRxPin, static_cast<int>(kPpsPin));

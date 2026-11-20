@@ -760,6 +760,8 @@ private:
      * counter. Only the rate fit reads it; everything that sets the clock or
      * measures age keeps the microsecond field. */
     int64_t      m_ppsMonoNs    = 0;
+    /* When the silent-baud reset sweep last ran, so it cannot run every pass. */
+    int64_t      m_lastSweepUs  = 0;
     int64_t      m_ppsPtpNs     = 0;
     uint32_t     m_ppsCount     = 0;
     int64_t      m_anchorUtcNs  = 0;
