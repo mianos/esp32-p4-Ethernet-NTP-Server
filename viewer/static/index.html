@@ -634,21 +634,40 @@ function longChart(host, points, key, unit, axis) {
   const pts = points.filter((p) => p[key] != null);
   const head = document.createElement('div');
   head.className = 'label';
-  head.textContent = axis;
   host.appendChild(head);
   if (pts.length < 2) {
+    head.textContent = axis;
     const none = document.createElement('div');
     none.className = 'foot';
     none.textContent = 'nothing logged in this span';
     host.appendChild(none);
     return;
   }
+  /* A window that has been round the clock reaches seconds and seven digits do
+   * not fit the gutter, so a large offset is drawn in milliseconds. */
+  const peak = Math.max(...pts.map((p) => Math.abs(p[`${key}hi`] ?? p[key])));
+  const scale = unit === 'us' && peak >= 1000 ? 1000 : 1;
+  const shown = scale === 1 ? unit : 'ms';
+  head.textContent = shown ? `${axis}, ${shown} (band = min..max)` : axis;
+
   const W = 600, H = 90, L = 44, R = 8, T = 6, B = 14;
-  const lo = Math.min(...pts.map((p) => p[`${key}lo`] ?? p[key]));
-  const hi = Math.max(...pts.map((p) => p[`${key}hi`] ?? p[key]));
-  const pad = (hi - lo) * 0.1 || 1;
+  const at = pts.map((p) => ({
+    t: p.t,
+    v: p[key] / scale,
+    lo: (p[`${key}lo`] ?? p[key]) / scale,
+    hi: (p[`${key}hi`] ?? p[key]) / scale,
+  }));
+  const lo = Math.min(...at.map((p) => p.lo));
+  const hi = Math.max(...at.map((p) => p.hi));
+  /* A flat window keeps a band around itself rather than collapsing onto the
+   * axis line. */
+  const pad = (hi - lo) * 0.1 || Math.abs(hi) * 0.01 || 0.5;
   const bottom = lo - pad, top = hi + pad;
-  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  /* Tick precision from the span. At a fixed decimal a quiet series prints
+   * -30.3 three times, which reads as a broken axis rather than a settled one;
+   * hundredths of a ppm are worth seeing, and so are whole milliseconds. */
+  const digits = Math.min(6, Math.max(0, Math.ceil(Math.log10(2 / (top - bottom)))));
+  const t0 = at[0].t, t1 = at[at.length - 1].t;
   const x = (t) => L + ((t - t0) / ((t1 - t0) || 1)) * (W - L - R);
   const y = (v) => T + (1 - (v - bottom) / ((top - bottom) || 1)) * (H - T - B);
 
@@ -656,14 +675,13 @@ function longChart(host, points, key, unit, axis) {
   for (const tick of [bottom, (bottom + top) / 2, top]) {
     svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(tick), y2: y(tick), class: 'grid' }));
     svg.appendChild(Object.assign(svgEl('text', { x: L - 4, y: y(tick) + 3, class: 'axis' }),
-      { textContent: `${tick.toFixed(1)}` }));
+      { textContent: `${tick.toFixed(digits)}` }));
   }
-  const band = pts.map((p) => `${x(p.t).toFixed(1)},${y(p[`${key}hi`] ?? p[key]).toFixed(1)}`)
-    .concat(pts.slice().reverse()
-      .map((p) => `${x(p.t).toFixed(1)},${y(p[`${key}lo`] ?? p[key]).toFixed(1)}`));
+  const band = at.map((p) => `${x(p.t).toFixed(1)},${y(p.hi).toFixed(1)}`)
+    .concat(at.slice().reverse().map((p) => `${x(p.t).toFixed(1)},${y(p.lo).toFixed(1)}`));
   svg.appendChild(svgEl('polygon', { points: band.join(' '), class: 'band' }));
   svg.appendChild(svgEl('polyline', {
-    points: pts.map((p) => `${x(p.t).toFixed(1)},${y(p[key]).toFixed(1)}`).join(' '),
+    points: at.map((p) => `${x(p.t).toFixed(1)},${y(p.v).toFixed(1)}`).join(' '),
     class: 'mean',
   }));
   host.appendChild(svg);
@@ -716,8 +734,8 @@ async function renderLong() {
   } catch { return; }
   const label = { 300: '5 min', 3600: '1 h', 21600: '6 h', 86400: '24 h', 604800: '7 d' }[longSpan] || `${longSpan} s`;
   $('longnote').textContent = `last ${label}, ${payload.rows ?? 0} samples`;
-  longChart($('longoff'), payload.series || [], 'off', 'us', 'offset, us (band = min..max)');
-  longChart($('longrate'), payload.series || [], 'rate', 'ppm', 'servo rate, ppm (band = min..max)');
+  longChart($('longoff'), payload.series || [], 'off', 'us', 'offset');
+  longChart($('longrate'), payload.series || [], 'rate', 'ppm', 'servo rate');
   longAdev($('longadev'), payload.adev || []);
 }
 
