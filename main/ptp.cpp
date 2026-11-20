@@ -1,5 +1,6 @@
 #include "ptp.h"
 
+#include "eth_link.h"
 #include "gps_time.h"
 
 #include "esp_attr.h"
@@ -360,23 +361,27 @@ void sendSync()
     ++s_stats.syncSent;
 }
 
-void answerDelayReq()
+/* One queued request, oldest first; false when the queue is empty. The task
+ * drains the whole queue each tick, so a client that bursts (or several) is
+ * answered up to the ring's depth instead of one per second. */
+bool takeDelayReq(DelayReq &req)
 {
-    DelayReq req;
-    bool     have = false;
+    bool have = false;
     portENTER_CRITICAL(&gDelayMux);
     for (size_t i = 0; i < kDelayRing; ++i) {
         if (gDelay[i].seq != 0xffff) {
-            req  = gDelay[i];
-            have = true;
+            req           = gDelay[i];
+            have          = true;
             gDelay[i].seq = 0xffff;
             break;
         }
     }
     portEXIT_CRITICAL(&gDelayMux);
-    if (!have) {
-        return;
-    }
+    return have;
+}
+
+void answerDelayReq(const DelayReq &req)
+{
     uint8_t resp[kDelayRespLen] = {};
     putHeader(resp, kMsgDelayResp, kDelayRespLen, req.seq, 0, 0);
     putStamp(resp + kHeader, req.rxNs + static_cast<int64_t>(utcOffset()) * 1000000000LL);
@@ -390,6 +395,17 @@ void slaveTick();
 
 void ptpTask(void *)
 {
+    /* The start hangs off the address, which is applied a moment before the
+     * driver starts the MAC. Wait for a transmit to be accepted rather than
+     * firing the first announces into a downed link. */
+    for (int i = 0; i < 50 && gMode != 0; ++i) {
+        uint8_t probe[kHeader] = {};
+        putHeader(probe, kMsgAnnounce, kHeader, 0, 0, 0);
+        if (sendPtp(kMulticast, probe, kHeader, nullptr) == ESP_OK) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
     TickType_t last = xTaskGetTickCount();
     while (gMode != 0) {
         /* Only a master announces: a slave that kept announcing would be
@@ -397,7 +413,10 @@ void ptpTask(void *)
         if (gMode == static_cast<uint8_t>(ptp::Mode::Master)) {
             sendAnnounce();
             sendSync();
-            answerDelayReq();
+            DelayReq queued;
+            for (size_t i = 0; i < kDelayRing && takeDelayReq(queued); ++i) {
+                answerDelayReq(queued);
+            }
         } else {
             slaveTick();
         }
@@ -670,6 +689,39 @@ esp_err_t stepToRealtime()
     return esp_eth_mac_set_ptp_time(s_mac, &now);
 }
 
+/* The MAC stops transmitting now and then -- ARP included, so the box goes
+ * dark while it still reports a link -- and nothing in the driver clears it. A
+ * restart of the MAC does, so the failure is watched for here and escalated
+ * once it is clearly not a one-off, with a floor so a stuck restart cannot
+ * spin. The errno's own log line is the evidence trail. */
+uint32_t gTxFails       = 0;
+int64_t  gLastTxFailUs  = 0;
+int64_t  gLastRestartUs = 0;
+bool     gRestarting    = false;
+
+void noteTxResult(esp_err_t err)
+{
+    if (err == ESP_ERR_INVALID_STATE) {
+        return; /* link not up yet: not a fault */
+    }
+    const int64_t now = esp_timer_get_time();
+    /* Anything sparse enough to be individual losses is left alone; a burst is
+     * the stall. */
+    if (now - gLastTxFailUs > 2000000) {
+        gTxFails = 0;
+    }
+    gLastTxFailUs = now;
+    if (++gTxFails < 20 || gRestarting || now - gLastRestartUs < 30000000) {
+        return;
+    }
+    gRestarting    = true;
+    gLastRestartUs = now;
+    ESP_LOGW(TAG, "transmit stalled (%u in a row): restarting the MAC", gTxFails);
+    (void)EthernetLink::instance().restart("tx stalled");
+    gTxFails    = 0;
+    gRestarting = false;
+}
+
 esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
 {
     if (stampNs != nullptr) {
@@ -681,6 +733,7 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
     eth_mac_time_t stamp = {};
     const esp_err_t err  = esp_eth_transmit_ctrl_vargs(s_eth, &stamp, 2, frame, len);
     if (err != ESP_OK) {
+        noteTxResult(err);
         /* A frame offered while the driver still says the link is down is not a
          * fault: the task starts on the address, which is up a moment before
          * the driver's own link flag is. Only the rest are counted. */
