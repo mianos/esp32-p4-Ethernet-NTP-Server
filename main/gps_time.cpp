@@ -1913,20 +1913,28 @@ void GpsTime::advanceBaud()
 {
     constexpr int kCount = static_cast<int>(sizeof(kBauds) / sizeof(kBauds[0]));
 
-    ++m_baudIndex;
-    if (m_baudIndex >= kCount) {
-        /* One pass only, then back to the rate this receiver was last heard on,
-         * so the next pass starts where the module most likely still is. A
-         * module powered up later is still found, without a warning every
-         * twenty seconds forever. */
+    /* A pass is the whole list and is counted, not inferred from the index.
+     *
+     * Wrapping the index back to the preferred rate instead looked equivalent
+     * and was not: starting at the preferred rate and stepping forward never
+     * visits the entries *before* it. With the stored rate at 9600 the scan went
+     * 9600, 115200, 57600, 19200, 4800 and round again, so the receiver's
+     * actual 38400 was never tried at all -- one commit after the one that
+     * introduced it, and every boot after. */
+    if (++m_scanSteps >= kCount) {
+        m_scanSteps = 0;
         m_baudIndex = m_preferredIndex;
         if (!m_noDataLogged) {
             ESP_LOGW(TAG, "no UBX frames at any baud rate: check module TX -> GPIO%d "
                           "(esp RX) and PPS -> GPIO%d", kRxPin, static_cast<int>(kPpsPin));
             m_noDataLogged = true;
         }
-    } else if (!m_noDataLogged) {
-        ESP_LOGI(TAG, "no UBX frames yet, trying %u baud", static_cast<unsigned>(kBauds[m_baudIndex]));
+    } else {
+        m_baudIndex = (m_baudIndex + 1) % kCount;
+        if (!m_noDataLogged) {
+            ESP_LOGI(TAG, "no UBX frames yet, trying %u baud",
+                     static_cast<unsigned>(kBauds[m_baudIndex]));
+        }
     }
 
     m_baud = kBauds[m_baudIndex];
@@ -2429,6 +2437,7 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     m_recentFrames[m_recentAt++ % 16] = static_cast<uint16_t>((cls << 8) | id);
     if (!m_frameSeen) {
         m_frameSeen = true;
+        m_scanSteps = 0;
         ESP_LOGI(TAG, "UBX frames arriving at %u baud", static_cast<unsigned>(m_baud));
         /* The rate the receiver is actually on, so the next boot starts here
          * instead of scanning for it. Saved only on a change: a rate that keeps

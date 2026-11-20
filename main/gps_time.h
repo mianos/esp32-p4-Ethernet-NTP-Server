@@ -787,6 +787,8 @@ private:
     bool     m_ackLogged    = false;
     bool     m_noDataLogged = false;
     int      m_baudIndex    = 0;
+    /* Rates tried since the pass began; a pass is kCount of them. */
+    int      m_scanSteps    = 0;
     /* Where the scan starts and where a wrap returns to: the rate the receiver
      * was last heard on. Bounds-checked against kBauds at begin(). */
     int      m_preferredIndex = 0;
