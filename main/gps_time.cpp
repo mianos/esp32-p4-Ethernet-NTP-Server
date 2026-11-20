@@ -571,8 +571,13 @@ void GpsTime::restoreTimeMode()
          * reboot silently threw away a survey that had signed itself off. Four
          * fields is the older form and reads as unvalidated, which is what it
          * was. */
-        if (text::getList(settings.gpsFixedPos(), ',', x, y, z, acc, val) ||
-            text::getList(settings.gpsFixedPos(), ',', x, y, z, acc)) {
+        /* A zero position parses and is not a position: it is the centre of the
+         * Earth, and holding it costs microseconds of clock for every kilometre.
+         * It is what a lock taken with no survey mean used to store. */
+        const bool stored = (text::getList(settings.gpsFixedPos(), ',', x, y, z, acc, val) ||
+                             text::getList(settings.gpsFixedPos(), ',', x, y, z, acc)) &&
+                            !(x == 0 && y == 0 && z == 0);
+        if (stored) {
             adoptFixedPosition(x, y, z, acc, val != 0);
             ESP_LOGW(TAG, "position hold restored from NVS%s",
                      m_holdValidated ? ", survey-validated" : "");
@@ -648,8 +653,10 @@ void GpsTime::reassertFix()
     unsigned long acc = 0;
     unsigned long val = 0;
     const std::string &pos = Settings::instance().gpsFixedPos();
-    if (!text::getList(pos, ',', x, y, z, acc, val) &&
-        !text::getList(pos, ',', x, y, z, acc)) {
+    const bool stored = (text::getList(pos, ',', x, y, z, acc, val) ||
+                         text::getList(pos, ',', x, y, z, acc)) &&
+                        !(x == 0 && y == 0 && z == 0);
+    if (!stored) {
         /* No hold to put back: a survey may be the thing that was wanted.
          * Restarting it loses its elapsed time, which is still better than a
          * reset silently ending a day's run. */
@@ -1671,7 +1678,20 @@ void GpsTime::task()
             uint32_t fixedAcc = 0;
             uint32_t minDur   = 0;
             uint32_t accLimit = 0;
-            if (cmd == 1) {
+            /* A survey reply is the only thing that fills the mean, so "fix" on a
+             * box whose position came back from NVS has no mean at all. Locking
+             * the (0,0,0) that is left points the receiver at the centre of the
+             * Earth, and kilometres of position are microseconds of clock: the
+             * box served 10 ms out until it was stopped. The held position is
+             * the right thing to re-lock from in that case, and only when there
+             * is neither is there nothing to lock. */
+            const bool haveMean =
+                !(m_svinMean[0] == 0 && m_svinMean[1] == 0 && m_svinMean[2] == 0);
+            if (cmd == 3 && !haveMean && !m_fixedValid) {
+                ESP_LOGW(TAG, "nothing to lock: no survey mean and no held position, "
+                              "position left moving");
+                m_svinCmd = 0;
+            } else if (cmd == 1) {
                 tm[0]    = 1; /* survey-in */
                 minDur   = m_svinDurS;
                 /* Millimetres, not millimetres squared. Both accuracy fields
@@ -1692,9 +1712,11 @@ void GpsTime::task()
                  * good to 14 000 km and put the stated pulse accuracy near 47 ms
                  * -- which is the size of the errors that then went unnoticed. */
                 tm[0]    = 2; /* fixed */
-                fixedAcc = isqrt(m_svinAcc);
+                /* Re-locking what is already held keeps its accuracy and its
+                 * provenance; only a mean from this survey can supersede it. */
+                fixedAcc = haveMean ? isqrt(m_svinAcc) : m_fixedAcc;
                 for (int i = 0; i < 3; ++i) {
-                    text::putLe(tm + 4 + 4 * i, m_svinMean[i]);
+                    text::putLe(tm + 4 + 4 * i, haveMean ? m_svinMean[i] : m_fixedMean[i]);
                 }
             }
             /* flags stay zero: ECEF, not LLA. */
@@ -1716,12 +1738,17 @@ void GpsTime::task()
                 if (cmd == 3) {
                     /* Set before the write, because the write is what has to
                      * carry it. */
-                    portENTER_CRITICAL(&m_mux);
-                    m_holdValidated = m_svinValid;
-                    portEXIT_CRITICAL(&m_mux);
+                    if (haveMean) {
+                        portENTER_CRITICAL(&m_mux);
+                        m_holdValidated = m_svinValid;
+                        portEXIT_CRITICAL(&m_mux);
+                    }
                     Settings::instance().setGpsFixedPos(
-                        std::format("{},{},{},{},{}", m_svinMean[0], m_svinMean[1], m_svinMean[2],
-                                    m_svinAcc, m_holdValidated ? 1 : 0));
+                        std::format("{},{},{},{},{}", haveMean ? m_svinMean[0] : m_fixedMean[0],
+                                    haveMean ? m_svinMean[1] : m_fixedMean[1],
+                                    haveMean ? m_svinMean[2] : m_fixedMean[2],
+                                    haveMean ? m_svinAcc : m_fixedAcc,
+                                    m_holdValidated ? 1 : 0));
                 }
                 saveTimeMode();
                 m_svinAtUs = 0;

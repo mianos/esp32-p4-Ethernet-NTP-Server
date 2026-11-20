@@ -760,6 +760,15 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
     doc.AddItem("last_edge_trusted", gps.lastEdgeTrusted);
     doc.AddItem("tie_max_ns", gps.tieMaxNs);
     doc.AddItem("tie_rms_ns", gps.tieRmsNs);
+    /* Where the pulse sits and where the solution epoch sits, which are not the
+     * same question and, in fixed mode, are not both zero: `pvt_nano_ns` is
+     * NAV-PVT's own offset into the second it names and `pulse_offset_ns` is
+     * TIM-TP's statement about the pulse. A standing offset here with the offsets
+     * elsewhere near zero means the two agree with each other and disagree with
+     * UTC. */
+    doc.AddItem("pvt_nano_ns", gps.pvtNanoNs);
+    doc.AddItem("pulse_offset_ns", gps.pulseOffsetNs);
+    doc.AddItem("pulse_on_second", gps.pulseOnSecond);
 
     /* Geometry and clock quality. Each carries its own age so a message that
      * stops is visible as a growing number rather than a stale one that still
@@ -887,7 +896,8 @@ static constexpr const char *kPolled[] = {
     "bridge_clients", "gnss", "gnss_cfg", "time_mode", "svin_dur_s", "svin_acc_mm",
     "svin_var_mm2", "svin_obs", "svin_target_s", "svin_limit_mm", "svin_valid",
     "dispersion_us", "lock_window_s", "tp_jitter_ns", "root_delay_ns", "servo_steps",
-    "servo_clamps", "edge_spikes", "tie_max_ns", "tie_rms_ns", "gdop", "pdop", "hdop",
+    "servo_clamps", "edge_spikes", "tie_max_ns", "tie_rms_ns", "pvt_nano_ns", "pulse_offset_ns",
+    "pulse_on_second", "gdop", "pdop", "hdop",
     "vdop", "dop_age_s", "clk_bias_ns", "clk_drift_ns_s", "t_acc_ns", "f_acc_ps_s",
     "nav_status_flags", "nav_status_flags2", "ttff_ms", "baud", "recent_frames",
     "io_rx_bytes", "io_tx_bytes", "io_parity", "io_framing", "io_overrun", "rbuf_pending",
