@@ -1,5 +1,7 @@
 #include "ptp.h"
 
+#include "soc/emac_dma_struct.h"
+
 #include "eth_link.h"
 #include "gps_time.h"
 
@@ -176,7 +178,7 @@ constexpr int kTaskStack = 4096;
  * descriptor holding a pending timestamp, so the exposure is kept to the one
  * frame a second that needs it. The Follow_Up falls back to the counter read
  * just before the send, which is what any non-stamped master does. */
-constexpr bool kTxStamp = false;
+constexpr bool kTxStamp = true;
 
 volatile uint8_t gMode      = 0;
 uint8_t          gClock[8]  = {};
@@ -754,12 +756,26 @@ void noteTxResult(esp_err_t err)
         gTxFails = 0;
     }
     gLastTxFailUs = now;
-    if (++gTxFails < 20 || gRestarting || now - gLastRestartUs < 30000000) {
+    if (++gTxFails < 8 || gRestarting || now - gLastRestartUs < 30000000) {
         return;
     }
     gRestarting    = true;
     gLastRestartUs = now;
-    ESP_LOGW(TAG, "transmit stalled (%u in a row): restarting the MAC", gTxFails);
+    /* What the DMA itself says: a fatal bus error or an underflow halts the
+     * transmit channel and nothing in the driver restarts it. The status word
+     * is the difference between "the ring is full of stuck descriptors" and
+     * "the channel stopped". */
+    const uint32_t dmaStatus = EMAC_DMA.dmastatus.val;
+    const uint32_t opMode    = EMAC_DMA.dmaoperation_mode.val;
+    const uint32_t current   = EMAC_DMA.dmatxcurrdesc;
+    /* The transmit descriptor the DMA is sitting on, sampled twice: a pointer
+     * that does not move while frames are being queued is a stopped channel,
+     * and one that moves is the ring full of descriptors nobody reclaimed. */
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ESP_LOGW(TAG, "transmit stalled (%u in a row): dma status 0x%08x opmode 0x%08x "
+                  "curtxdesc %08x -> %08x, restarting the MAC",
+             gTxFails, static_cast<unsigned>(dmaStatus), static_cast<unsigned>(opMode),
+             static_cast<unsigned>(current), static_cast<unsigned>(EMAC_DMA.dmatxcurrdesc));
     (void)EthernetLink::instance().restart("tx stalled");
     gTxFails    = 0;
     gRestarting = false;

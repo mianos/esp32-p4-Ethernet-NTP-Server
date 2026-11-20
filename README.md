@@ -677,17 +677,23 @@ the requester's MAC rather than multicast. A slave reports; it does not steer
 The PHC is stepped with the system clock, because a counter left in 1970 would
 put every PTP timestamp 56 years out.
 
-**Only the frames whose stamp is read back are timestamped.** The driver's
-`ptp_enable()` turns the descriptor's timestamp bit on for every frame from then
-on, and the MAC writes the timestamp back into the descriptor after the frame has
-gone — including into frames nobody polls, whose descriptors the next frame may
-already own. The bit is cleared at start-up and raised around the frames that
-need it, under a mutex. A stamp more than a second from the counter is treated as
-absent, so a stale one cannot become a Follow_Up.
+**One frame a second asks for a transmit stamp**, and only that one: the Sync.
+The driver's `ptp_enable()` turns the descriptor's timestamp bit on for every
+frame otherwise, and the MAC writes the timestamp back into the descriptor after
+the frame has gone — including into frames nobody polls, whose descriptors the
+next frame may already own. The bit is cleared at start-up and raised around the
+Sync under a mutex. A stamp more than a second from the counter is refused, and a
+Sync with no stamp goes out anyway with the Follow_Up built from the counter read
+just before it: a missing stamp costs accuracy, never the message.
 
-Belt and braces: twenty failed sends inside two seconds still restarts the MAC,
-at most once per thirty seconds, and says so. A `link up` that answers nothing is
-what that is for.
+**The transmit channel can still stop**, and it is not root-caused. When it does,
+the ring fills with descriptors the DMA holds and every send fails with
+`ESP_ERR_NO_MEM` while the link reads up and the box answers pings. Eight failed
+sends inside two seconds restarts the MAC — at most once per thirty seconds —
+which clears it, and logs the DMA status and the descriptor pointer the DMA is
+sitting on, sampled a hundred milliseconds apart: a pointer that has not moved is
+a stopped channel, one that has moved is a drained ring. That log line is what
+the next round wants.
 
 ## Clock sources
 
