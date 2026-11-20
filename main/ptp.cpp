@@ -169,6 +169,12 @@ constexpr uint8_t kFlagTraceable = 0x30; /* octet 1, time and frequency */
 
 constexpr int kTaskStack = 4096;
 
+/* Whether a transmit stamp is asked of the hardware. The read-back path is the
+ * one that can leave a descriptor holding a pending timestamp, so it is worth
+ * being able to run without it; the Follow_Up is then built from the counter
+ * read just before the send, which is what any non-stamped master does. */
+constexpr bool kTxStamp = false;
+
 volatile uint8_t gMode      = 0;
 uint8_t          gClock[8]  = {};
 uint16_t         gPort      = 1;
@@ -352,9 +358,19 @@ void sendSync()
     const uint16_t seq = gSeq[kMsgSync]++;
     uint8_t        sync[kSyncLen] = {};
     putHeader(sync, kMsgSync, kSyncLen, seq, kFlagTwoStep, 0);
+    /* The counter is read before the frame: without a hardware stamp that is
+     * the best the Follow_Up can carry, and it is within the send cost of the
+     * truth. With one, the measured value replaces it. */
     int64_t syncNs = 0;
-    if (sendPtp(kMulticast, sync, kSyncLen, &syncNs) != ESP_OK || syncNs == 0) {
-        return;
+    if (kTxStamp) {
+        if (sendPtp(kMulticast, sync, kSyncLen, &syncNs) != ESP_OK || syncNs == 0) {
+            return;
+        }
+    } else {
+        syncNs = ptp::nowNs();
+        if (sendPtp(kMulticast, sync, kSyncLen, nullptr) != ESP_OK) {
+            return;
+        }
     }
     uint8_t follow[kFollowUpLen] = {};
     putHeader(follow, kMsgFollowUp, kFollowUpLen, seq, kFlagTwoStep, 0);
@@ -759,7 +775,17 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
     if (stampNs != nullptr) {
         *stampNs = 0;
     }
-    if (s_eth == nullptr || s_txMux == nullptr) {
+    if (s_eth == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!kTxStamp) {
+        const esp_err_t plain = esp_eth_transmit_ctrl_vargs(s_eth, nullptr, 2, frame, len);
+        if (plain != ESP_OK && plain != ESP_ERR_INVALID_STATE) {
+            noteTxResult(plain);
+        }
+        return plain;
+    }
+    if (s_txMux == nullptr) {
         return ESP_ERR_INVALID_STATE;
     }
     if (xSemaphoreTake(s_txMux, pdMS_TO_TICKS(20)) != pdTRUE) {
