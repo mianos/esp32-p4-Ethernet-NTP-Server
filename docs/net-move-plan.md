@@ -1,79 +1,91 @@
-# Plan: move the box onto mega's spare port
+# Plan: move the box onto `enp2s0f0`
 
-Written 2026-11-20, on `b29f645`. The reviewer's dispersion work is finished; this
-is the opposite trade — take the server off a shared switch and put it on a wire
-with exactly one peer.
+Written 2026-11-20, on `b29f645`, revised after the port was named. The reviewer's
+dispersion work is finished; this is the opposite trade — take the server off a
+shared switch and put it on a wire with exactly one peer.
 
-## 0. What is actually on the host
+## 0. What is actually there
 
 | | |
 |---|---|
-| `enp90s0` | I226-LM (`8086:125b`, the vPro/AMT SKU), MAC `58:47:ca:7b:62:1b`, admin **DOWN**, no address, in no bridge, claimed by no container |
-| `enp57s0` | I226-V (`8086:125c`), bound to `igc`, **no netdev at all** — `/sys/bus/pci/devices/0000:57:00.0/net/` is empty, so `enp89s0` (the name `/etc/network/interfaces` still hotplugs) does not exist |
-| `br0` | `enp2s0f1` (X710) at `131.84.1.1/24`; `enp2s0f0` is the other X710, down |
-| ME | HECI `00:16.0` present, `/dev/mei0`, firmware 16.1.25.2049. The LM port is the one it can own |
-| tools | no `ethtool`, no `dmesg` for uid 1000, no syslog, no passwordless sudo; `incus-admin` gives full API access so bridge work needs no sudo, but `ip link` does |
-| box | MAC `80:f1:b2:db:e2:28`, `131.84.1.107` by DHCP, SLAAC v6, logs to `131.84.1.95:5514`, `timeSource auto`, `serveNtp on` |
+| `enp2s0f0` | **the named spare port**: Intel X710 port 0, `8086:1572`, `i40e`, MAC `58:47:ca:7b:62:18`, `portname p0`, alias `enp2s0f0np0` |
+| | an **SFP+ cage**, not an RJ45 — it is empty unless a module is in it, and the netdev is `state DOWN`, `qdisc noop` |
+| `enp2s0f1` | X710 port 1, carries `br0` at `131.84.1.1/24` |
+| `enp90s0` | I226-LM onboard RJ45, admin DOWN, spare; the AMT SKU, and the ME (`/dev/mei0`, FW 16.1.25.2049) can own its link |
+| `enp89s0` | I226-V onboard, bound to `igc`, **no netdev at all** (`/sys/.../0000:57:00.0/net/` empty), so the name `/etc/network/interfaces` hotplugs does not exist |
+| router | `hfc` (container), `131.84.1.2`, masquerade is `ip saddr 131.84.0.0/16`, `DEFAULT_FORWARD_POLICY=ACCEPT`, ruleset is live-only (`nftables.service` disabled) |
+| **leftovers from the last attempt** | `hfc` still has `10.99.0.0/29 via 131.84.1.1 dev eth0`. Nothing on `mega` answers it: no interface, no bridge, no dnsmasq, no container |
+| tools | no `ethtool`, no `dmesg` for uid 1000, no syslog, no passwordless sudo; `incus-admin` covers the bridge, `ip link` does not |
+| box | MAC `80:f1:b2:db:e2:28`, `131.84.1.107` by DHCP, SLAAC v6, logs to `131.84.1.95:5514`, `timeSource auto`, `serveNtp on`, PHY is 10/100 only |
 
-Both candidate ports are onboard and spare. `enp90s0` is the only one with a netdev,
-so it is the one to try, and it is also the one the ME can interfere with.
+So the last attempt got as far as a route on the router and no further. The block
+is already chosen: **`10.99.0.0/29`**, mega `.1`, box `.2`. Reuse it.
+
+### The thing that probably broke it
+
+`enp2s0f0` is a 10 GbE cage and the box is a 100 Mb PHY. A 10G optic or a DAC in
+that cage cannot negotiate with IP101 at all; only a **1000BASE-T SFP** can, and
+even then it is the module's copper PHY that autonegotiates down to 100 M while
+`i40e` sees a 1G link. Without a 1000BASE-T module in the cage there is nothing to
+debug and the BIOS/ME story does not apply — the X710 is not the ME port.
 
 ## 1. Topology
 
 ```
-box 10.99.0.2/28 ──── enp90s0 ──── ntp0 10.99.0.1/28 (bridge, NAT) ──── mega
+box 10.99.0.2/29 ──── enp2s0f0 ──── ntp0 10.99.0.1/29 (bridge, no DHCP) ──── mega
+                                                                             │
+            131.84.1.0/24 ──── hfc ── route 10.99.0.0/29 via 131.84.1.1 ────┘
 ```
 
-- static on both ends, no DHCP server on the wire, no gateway guessing;
-- mega is the only host with a foot on the link; everyone else uses one published
-  endpoint, so the box never needs a LAN address again;
-- IPv6 on the link is dropped (`ipv6.address=none`); clients use v4;
-- the box keeps internet through NAT, so `logHost` and the `auto` upstream survive.
+- static on both ends, no DHCP server, no gateway guessing;
+- routed, not proxied: anyone on the LAN reaches `10.99.0.2` directly, so the
+  viewer and OTA keep their own source addresses and nothing is DNAT'd;
+- mega NATs the box's outbound at `hfc` so `logHost` and the `auto` upstream still
+  work;
+- IPv6 on the link is dropped; clients use v4. The box loses its SLAAC address, so
+  anything reaching it over IPv6 has to move.
 
-A dedicated /28 rather than a /30 keeps room for a second device on the link later
-without renumbering.
+## 2. Phase 0 — prove the port, before any firmware work
 
-## 2. Phase 0 — prove the port, before writing any firmware
-
-This phase needs no firmware change, which is exactly why it goes first.
+Needs a 1000BASE-T SFP in `enp2s0f0` and a Cat5e lead to the box. Check the module
+is physically there first; if it is a 10G optic or a DAC, stop here.
 
 ```
-incus network create ntp0 --type=bridge ipv4.address=10.99.0.1/28 \
-      ipv4.nat=true ipv6.address=none dns.mode=none \
-      bridge.external_interfaces=enp90s0
+incus network create ntp0 --type=bridge ipv4.address=10.99.0.1/29 \
+      ipv4.dhcp=false ipv6.address=none dns.mode=none \
+      bridge.external_interfaces=enp2s0f0
 incus network set ntp0 raw.dnsmasq 'dhcp-host=80:f1:b2:db:e2:28,10.99.0.2'
-ip -br link show enp90s0        # want UP and <...LOWER_UP> with a cable in
+ip -br link show enp2s0f0        # want UP and <...LOWER_UP>, not noop
+cat /sys/class/net/enp2s0f0/carrier
 ```
 
-Then plug the box into `enp90s0`. It is still a DHCP client, so it takes
-`10.99.0.2` from the reservation and answers on it. That is the whole test: if
-`/healthz` comes back from mega, the port, the PHY, the autoneg (IP101 is
-100 Mb only), the ME and the bridge are all fine, and Phase 2 is a convenience
-rather than a rescue.
+The box is still a DHCP client, so once it is plugged in it takes a lease and
+answers `/healthz` from mega with **no firmware change**. That is the whole test.
 
-If `enp90s0` never shows carrier:
+If the port stays down with a known-good module:
 
-1. try to get `enp89s0` back: `echo 0000:57:00.0 | sudo tee /sys/bus/pci/drivers/igc/bind`,
-   then `ip -br link` — a netdev appearing means the port works and the earlier
-   absence was a probe failure, not a BIOS decision;
-2. if neither port links, it is the platform, not the box: MEBx (`Ctrl+P`) for the
-   ME/AMT port, or the BIOS setup for both. That is the reboot the last attempt
-   needed, and it should be scheduled, not discovered mid-move.
+1. `i40e` may have rejected it — `dmesg | grep -i "unsupported sfp"`, then
+   `options i40e allow_unsupported_sfp=1` in `/etc/modprobe.d/` and reload the
+   module. Reloading `i40e` drops **both** X710 ports, so `br0` blips for a few
+   seconds — no reboot, but not while something is mid-transfer;
+2. try the RJ45 instead: `ip link set enp90s0 up`, move the bridge's
+   `bridge.external_interfaces`, and accept the AMT port's quirks;
+3. only if neither links is it the platform, and then MEBx/BIOS is the answer.
 
-## 3. Phase 1 — keep it reachable before the box moves
+## 3. Phase 1 — make the path work before the box moves
 
-The box loses `131.84.1.107` on the day. Nothing should still be pointed at it.
+| step | command |
+|---|---|
+| route already exists | `hfc`: `10.99.0.0/29 via 131.84.1.1` — verify, do not re-add |
+| masquerade for the box's outbound | `hfc`: `nft add rule ip nat POSTROUTING oifname "hfc" ip saddr 10.99.0.0/29 masquerade` |
+| keep the ruleset | `hfc`: `nft list ruleset > /root/nft.$(date +%F)` before the change — the live set is not in `/etc/nftables.conf` and dies with the container |
+| viewer | target `http://10.99.0.2/healthz` |
+| OTA | `POST http://10.99.0.2/firmware` from `esp-builder` |
+| log sink | `131.84.1.95:5514`, already routed; confirm one `txprobe` line lands |
 
-| consumer | today | after |
-|---|---|---|
-| viewer `ntp-status` | polls `131.84.1.107` | `incus config device add ntp-status box proxy listen=tcp:10.99.0.1:8081 connect=tcp:10.99.0.2:80` |
-| OTA / flashing | `POST http://131.84.1.107/firmware` from `esp-builder` | same URL on `10.99.0.1:8081` |
-| LAN time service | clients at `131.84.1.107` | `chronyd` on mega, upstream `10.99.0.2`, `allow 131.84.1.0/24`, clients moved to `131.84.1.1` |
-| log sink | `131.84.1.95:5514` direct | unchanged, through NAT — verify one `txprobe` line lands |
-
-Running chrony on mega is the better answer than a `:123` proxy device: the LAN
-gets one stable address, and a stratum-2 with a local filter is what a shared
-server should be serving anyway. It also survives the box being off.
+No proxy devices: with a route, the containers and the Mac all reach the box by
+its own address, and the box's replies carry its own source. That keeps the
+timestamps and the `servepath` attribution honest.
 
 ## 4. Phase 2 — firmware: static addressing and a serial console
 
@@ -81,12 +93,12 @@ Both exist to remove the DHCP server from the wire and keep the box recoverable
 when the network is wrong. The USB cable stays in `esp-builder`'s `/dev/ttyACM0`
 whatever happens to the Ethernet, so the console is the rollback.
 
-**Console.** The primary console is UART0, which is wired to nothing reachable;
-the USB-Serial/JTAG is only the *secondary*, and `esp_console_new_repl_usb_serial_jtag()`
-is compiled out under that config. So: make USB-SJT the primary
-(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, secondary NONE), add `esp_console`, and
-start a REPL at init. Logs and the prompt then share the one port the box actually
-has, which is what `idf_monitor` already assumes.
+**Console.** The primary console is UART0, wired to nothing reachable; USB-Serial/JTAG
+is only the *secondary*, and `esp_console_new_repl_usb_serial_jtag()` is compiled
+out under that config. So: make USB-SJT the primary
+(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, secondary NONE), add `esp_console`, start a
+REPL at init. Logs and the prompt then share the one port the box has, which is
+what `idf_monitor` already assumes.
 
 **Settings** (`settings.h`, validated in `applyJson`, defaults that never brick):
 
@@ -94,11 +106,11 @@ has, which is what `idf_monitor` already assumes.
 |---|---|---|
 | `ipMode` | `dhcp` | `dhcp` or `static`; anything else is `dhcp` |
 | `ipAddress` | — | `a.b.c.d/len`, `inet_pton`, prefix 1–30 |
-| `ipGateway` | — | dotted quad, optional, on-link not enforced |
+| `ipGateway` | — | dotted quad, optional |
 | `ipDns` | — | dotted quad, optional |
 
-A `static` mode whose address does not parse falls back to DHCP with a loud log,
-so a half-written config is a slow box, never a dark one.
+A `static` mode whose address does not parse falls back to DHCP with a loud log, so
+a half-written config is a slow box, never a dark one.
 
 **`eth_link.cpp`.** Parse once; if static, `esp_netif_dhcpc_stop()` and
 `esp_netif_set_ip_info()` before `esp_eth_start()`, plus `esp_netif_set_dns_info()`
@@ -119,21 +131,21 @@ net static <cidr> <gw> [dns]
 Persists through `Settings::save()`, applies live, prints the resulting address.
 
 **HTTP.** `ipMode`/`ipAddress`/`ipGateway`/`ipDns` join `POST /config`, with an
-`EthernetLink::applySettings()` next to the existing hostname hook. `/healthz`
-gains `ip_mode` so a static box says so.
+`EthernetLink::applySettings()` beside the existing hostname hook. `/healthz` gains
+`ip_mode`.
 
-Sequence: build, flash over the LAN, commit, **rebuild and reflash so the version
-is never `-dirty`** — all while the box is still on the switch.
+Sequence: build, flash over the LAN, commit, **rebuild and reflash so the version is
+never `-dirty`** — all while the box is still on the switch.
 
 ## 5. Phase 3 — the move
 
-1. `net static 10.99.0.2/28 10.99.0.1` over serial, confirm from mega:
-   `curl http://10.99.0.2/healthz`, `ping`, and that `/healthz` reports
-   `ip_mode static` on the address above.
-2. Unplug from the switch, plug into `enp90s0`.
-3. Confirm from mega: link up at 100 Mb, `stratum 1`, `ntp_synced true`, and a
+1. `net static 10.99.0.2/29 10.99.0.1` over serial; confirm from mega:
+   `curl http://10.99.0.2/healthz` reports `ip_mode static` on that address.
+2. Unplug from the switch, plug into `enp2s0f0`.
+3. Confirm from mega: carrier up, `stratum 1`, `ntp_synced true`, and a
    `servepath`/`replypath` line from mega's own `sntp`.
-4. From the Mac: viewer over `10.99.0.1:8081`, `sntp` against `131.84.1.1`.
+4. From a LAN container and the Mac: `/healthz` over the routed path, `sntp` against
+   `10.99.0.2` within its bound.
 5. Delete the `131.84.1.107` reservation on the router so nobody inherits it.
 
 ## 6. Rollback
@@ -141,26 +153,24 @@ is never `-dirty`** — all while the box is still on the switch.
 `net dhcp` on the console, unplug, plug back into the switch. Two minutes, no
 reflash, no reboot. The static config persists but is inert.
 
-If the console is unreachable: `esptool`/`idf.py flash` over `/dev/ttyACM0` still
+Worst case the console is unreachable too: `idf.py flash` over `/dev/ttyACM0` still
 works, because the USB path never depended on the network.
 
 ## 7. Risks
 
 | risk | severity | answer |
 |---|---|---|
-| ME owns the LM port and drops the link when provisioned | high | Phase 0 catches it before any firmware work; MEBx is the fix |
-| `enp89s0` has no netdev, so the fallback port may not exist either | medium | rebind first; if it is a BIOS disable, only the BIOS fixes it |
-| IP101 is 100 Mb only | low | fine for NTP; the I226 autonegotiates down |
-| box unreachable after a bad static config | medium | console + `net dhcp` + the invalid-config fallback |
-| viewer and OTA silently break | medium | Phase 1 lands before the cut, and is tested from the Mac |
-| LAN time clients left on `.107` | medium | clients move to `131.84.1.1` in Phase 1, not after |
-| a second `dnsmasq` on the host fighting port 53 | low | `dns.mode=none` |
+| no 1000BASE-T module in the cage, or a 10G optic | high | check before Phase 0; it is the likeliest reason the last attempt died |
+| `i40e` refuses the module | medium | `allow_unsupported_sfp=1`; the reload blips `br0` |
+| box unreachable after a bad static config | medium | console, `net dhcp`, and the invalid-config fallback |
+| `hfc` ruleset is live-only and dies with the container | medium | snapshot it first; restore on the way back |
+| viewer and OTA silently break | medium | Phase 1 lands before the cut and is tested from the Mac |
+| LAN time clients left on `.107` | medium | they move to `10.99.0.2` in Phase 1, not after |
+| IP101 is 100 Mb, the cage is 10G | low | module autoneg handles it; throughput is irrelevant to NTP |
+| `enp90s0` fallback is the AMT port | low | only used if the cage fails; unprovisioned AMT is inert |
 
 ## 8. Open questions
 
-1. `enp90s0` or `enp89s0` — which port is the one that was tried, and is it the one
-   with a cable run?
-2. Is a cable to that port in place, and may the box drop off the LAN for the
-   Phase 0 test?
-3. LAN time: chrony relay on mega as above, or keep clients pointed at a `:123`
-   proxy device?
+1. What is in the `enp2s0f0` cage now — 1000BASE-T SFP, 10G optic, DAC, or nothing?
+2. Is there a Cat5e lead from that port to the box, and may the box drop off the
+   LAN for the Phase 0 test once the module is in?
