@@ -323,6 +323,10 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
          * minute before a leap, 3 when the reference cannot vouch for the clock
          * at all, and 0 the rest of the time. */
         json.AddItem("ntp_leap", static_cast<double>(ref.locked ? ref.leap : 3));
+        /* True when the reference is holding but its own budget says it is not
+         * fit to serve: stratum 16 and leap 3 are then deliberate, not a lost
+         * fix. */
+        json.AddItem("ntp_demoted", ref.demoted);
         /* The same two numbers the reply's root delay and root dispersion
          * fields carry, before 16.16 rounds them: from the GPS, a measured
          * quantisation and jitter once NAV-TIM-TP is flowing, else the named

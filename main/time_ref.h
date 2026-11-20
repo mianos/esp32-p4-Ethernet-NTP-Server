@@ -50,6 +50,13 @@ struct TimeReference {
      * read together: dispersionNs == 0 means rootDelayNs is not stated either. */
     uint32_t rootDelayNs  = 0;
     uint32_t dispersionNs = 0;
+
+    /* Set when the reference is holding together but its own budget says it is
+     * no longer fit to serve: locked is then already false and stratum 16, and
+     * this is only the reason, for the log and for /healthz. A reference that
+     * knows it is out and keeps advertising a lock is worse than one that
+     * admits it, because the client has no way to check. */
+    bool     demoted  = false;
 };
 
 /* "INIT" in ASCII. RFC 5905 7.3: a server that cannot vouch for its clock says

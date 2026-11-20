@@ -4355,6 +4355,20 @@ void GpsTime::logLockChange()
     }
 }
 
+/* The most uncertainty this reference will serve through while still calling
+ * itself locked.
+ *
+ * A healthy box states about 130 us of dispersion against a serve bound near
+ * 40 us, so 400 us is ten times the bound and three times the healthy floor --
+ * far enough out that only a real fault reaches it. Past it the reply becomes
+ * stratum 16 / INIT / leap 3, which every client already reads as "ignore me".
+ *
+ * The alternative, which this box ran until now, is a stratum-1 badge held
+ * through a 258 ms error with 19 ms of dispersion underneath it. chrony had to
+ * work the falseticker out for itself; a client that trusts stratum alone would
+ * have taken the 258 ms. */
+constexpr int64_t kServeHonestNs = 400000;
+
 GpsTime::ReplyFacts GpsTime::replyFacts() const
 {
     ReplyFacts rf;
@@ -4391,6 +4405,26 @@ GpsTime::ReplyFacts GpsTime::replyFacts() const
             rf.rootDelayNs  = static_cast<uint32_t>(rootDelayNs());
             rf.dispersionNs = static_cast<uint32_t>(budget);
         }
+        /* The gate. Dispersion is the one term the client cannot check for
+         * itself, so it is also the one that decides whether this is a
+         * reference or a guess. */
+        if (budget > kServeHonestNs) {
+            rf.locked   = false;
+            rf.stratum  = 16;
+            rf.refId    = kRefIdInit;
+            rf.demoted  = true;
+            if (!m_gateLogged) {
+                m_gateLogged = true;
+                ESP_LOGW(TAG, "demoting: %lld us of dispersion is past the %lld us a reply may "
+                              "claim -- serving stratum 16 until it closes",
+                         static_cast<long long>(budget / 1000),
+                         static_cast<long long>(kServeHonestNs / 1000));
+            }
+        } else if (m_gateLogged) {
+            m_gateLogged = false;
+            ESP_LOGI(TAG, "promoting: dispersion back to %lld us, serving stratum 1 again",
+                     static_cast<long long>(budget / 1000));
+        }
     }
     return rf;
 }
@@ -4418,6 +4452,7 @@ public:
         ref.leap         = rf.leap;
         ref.rootDelayNs  = rf.rootDelayNs;
         ref.dispersionNs = rf.dispersionNs;
+        ref.demoted      = rf.demoted;
         return ref;
     }
 

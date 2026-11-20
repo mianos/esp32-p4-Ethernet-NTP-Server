@@ -473,6 +473,9 @@ public:
         uint8_t  leap         = 0;
         uint32_t rootDelayNs  = 0;
         uint32_t dispersionNs = 0;
+        /* Held together, but the budget says it is past what a reply may claim:
+         * locked is then false and stratum 16, and this is only the reason. */
+        bool     demoted      = false;
     };
     ReplyFacts replyFacts() const;
 
@@ -865,6 +868,9 @@ private:
     float      m_pDop              = 0;
     float      m_hDop              = 0;
     float      m_vDop              = 0;
+    /* Whether the last reply was demoted by the dispersion gate, so the log
+     * says it once per episode rather than on every reply. */
+    mutable bool m_gateLogged = false;
     int64_t    m_clkBiasNs         = 0;
     int32_t    m_clkDriftNsPerS    = 0;
     uint32_t   m_tAccNs            = 0;
