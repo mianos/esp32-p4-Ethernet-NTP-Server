@@ -2,6 +2,7 @@
 
 #include "esp_attr.h"
 #include "esp_eth_mac_esp.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 
 #include <sys/time.h>
@@ -22,13 +23,15 @@ constexpr int64_t kStampAgeNs = 500000000LL; /* an entry older than this is nois
 struct RxStamp {
     uint8_t  addr[16];
     uint8_t  addrLen;
+    uint8_t  mac[6];
     uint16_t port;
     bool     used;
     int64_t  ns;
 };
 
-esp_eth_handle_t s_eth = nullptr;
-esp_eth_mac_t   *s_mac = nullptr;
+esp_eth_handle_t s_eth   = nullptr;
+esp_eth_mac_t   *s_mac   = nullptr;
+esp_netif_t     *s_netif = nullptr;
 bool             s_attached = false;
 bool             s_enabled  = false;
 
@@ -44,18 +47,28 @@ portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 RxStamp      s_ring[kRing];
 size_t       s_next = 0;
 ptp::Stats    s_stats{};
+uint8_t       s_lastFail = 0;
+
+void fail(uint8_t reason)
+{
+    s_lastFail = reason;
+    if (s_stats.txMissing == 0) {
+        ESP_LOGW(TAG, "sendUdp refused: reason %u", static_cast<unsigned>(reason));
+    }
+}
 
 uint16_t be16(const uint8_t *p)
 {
     return static_cast<uint16_t>((p[0] << 8) | p[1]);
 }
 
-void recordRx(const uint8_t *addr, uint8_t addrLen, uint16_t port, int64_t ns)
+void recordRx(const uint8_t *mac, const uint8_t *addr, uint8_t addrLen, uint16_t port, int64_t ns)
 {
     portENTER_CRITICAL(&s_mux);
     RxStamp &slot = s_ring[s_next];
     s_next        = (s_next + 1) % kRing;
     std::memcpy(slot.addr, addr, addrLen);
+    std::memcpy(slot.mac, mac, 6);
     slot.addrLen = addrLen;
     slot.port    = port;
     slot.used    = true;
@@ -64,6 +77,10 @@ void recordRx(const uint8_t *addr, uint8_t addrLen, uint16_t port, int64_t ns)
 
     ++s_stats.rxStamps;
     s_stats.lastNs = ns;
+    if (s_stats.rxStamps <= 20) {
+        ESP_LOGW(TAG, "record port %u from %u.%u.%u.%u", static_cast<unsigned>(port), addr[0],
+                 addr[1], addr[2], addr[3]);
+    }
 }
 
 /* A UDP datagram bound for port 123, in either family. Returns the source once
@@ -86,7 +103,7 @@ void maybeRecordUdp(const uint8_t *frame, uint32_t len, int64_t ns)
         if (frame[23] != 17 || be16(udp + 2) != 123) {
             return;
         }
-        recordRx(frame + 26, 4, be16(udp), ns);
+        recordRx(frame + 6, frame + 26, 4, be16(udp), ns);
     } else if (type == 0x86dd) {
         if (len < 14 + 40 + 8 || frame[20] != 17) {
             return;
@@ -95,7 +112,7 @@ void maybeRecordUdp(const uint8_t *frame, uint32_t len, int64_t ns)
         if (be16(udp + 2) != 123) {
             return;
         }
-        recordRx(frame + 22, 16, be16(udp), ns);
+        recordRx(frame + 6, frame + 22, 16, be16(udp), ns);
     }
 }
 
@@ -137,8 +154,9 @@ esp_err_t attach(esp_eth_handle_t eth, esp_eth_mac_t *mac, esp_netif_t *netif)
     if (eth == nullptr || mac == nullptr || netif == nullptr) {
         return ESP_ERR_INVALID_ARG;
     }
-    s_eth = eth;
-    s_mac = mac;
+    s_eth   = eth;
+    s_mac   = mac;
+    s_netif = netif;
     const esp_err_t err = esp_eth_update_input_path_info(eth, inputHandler, netif);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "input path: %s", esp_err_to_name(err));
@@ -161,10 +179,14 @@ esp_err_t enable(bool restart)
     /* The crystal, at 40 MHz: 25 ns is the finest the counter can be stepped and
      * is also what its increment is set to. The 80 MHz PLL is the alternative
      * and buys 12.5 ns for a clock that has to be kept running. */
-    config.clk_src             = EMAC_PTP_CLK_SRC_XTAL;
-    config.clk_src_period_ns   = 25.0f;
-    config.required_accuracy_ns = 25.0f;
-    config.roll_type           = ETH_PTP_DIGITAL_ROLLOVER;
+    config.clk_src            = EMAC_PTP_CLK_SRC_XTAL;
+    config.clk_src_period_ns  = 25.0f;
+    /* 40 and not the 25 ns the source ticks at: the driver derives the addend
+     * from 2^32 * period / accuracy, and at 25/25 that is exactly 2^32, which
+     * truncates to zero in a uint32. 40 ns keeps it well inside and still
+     * resolves far finer than the microseconds this clock has to serve. */
+    config.required_accuracy_ns = 40.0f;
+    config.roll_type          = ETH_PTP_DIGITAL_ROLLOVER;
 
     esp_err_t err = esp_eth_mac_ptp_enable(s_mac, &config);
     if (err != ESP_OK) {
@@ -230,13 +252,165 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
     return ESP_OK;
 }
 
-bool takeRxStamp(const uint8_t *addr, size_t addrLen, uint16_t port, int64_t *ns)
+uint32_t sum16(const uint8_t *p, size_t n, uint32_t sum)
 {
-    if (addr == nullptr || ns == nullptr || addrLen > 16) {
+    while (n > 1) {
+        sum += static_cast<uint32_t>((p[0] << 8) | p[1]);
+        p += 2;
+        n -= 2;
+    }
+    if (n != 0) {
+        sum += static_cast<uint32_t>(p[0] << 8);
+    }
+    return sum;
+}
+
+uint16_t fold(uint32_t sum)
+{
+    while ((sum >> 16) != 0) {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    return static_cast<uint16_t>(~sum);
+}
+
+constexpr size_t kMaxUdpPayload = 64;
+
+} // namespace
+
+namespace ptp {
+
+bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const uint8_t dstMac[6],
+             const uint8_t *payload, size_t len, int64_t *stampNs)
+{
+    if (!s_enabled || s_netif == nullptr || s_eth == nullptr || dstAddr == nullptr ||
+        dstMac == nullptr || payload == nullptr || len > kMaxUdpPayload) {
+        fail(1);
         return false;
     }
-    const int64_t now  = nowNs();
+    uint8_t ourMac[6] = {};
+    if (esp_eth_ioctl(s_eth, ETH_CMD_G_MAC_ADDR, ourMac) != ESP_OK) {
+        fail(2);
+        return false;
+    }
+
+    constexpr size_t kEthLen = 14;
+    /* Static, not on the stack: the responder task has a small stack and this
+     * is one sender. */
+    static uint8_t frame[kEthLen + 40 + 8 + kMaxUdpPayload];
+    std::memset(frame, 0, sizeof(frame));
+    std::memcpy(frame, dstMac, 6);
+    std::memcpy(frame + 6, ourMac, 6);
+
+    size_t   udpOff = 0;
+    uint16_t udpLen = static_cast<uint16_t>(8 + len);
+    if (dstAddrLen == 4) {
+        esp_netif_ip_info_t info = {};
+        if (esp_netif_get_ip_info(s_netif, &info) != ESP_OK || info.ip.addr == 0) {
+            fail(3);
+            return false;
+        }
+        const uint32_t src = info.ip.addr;
+        frame[12]          = 0x08;
+        frame[13]          = 0x00;
+        uint8_t *ip        = frame + kEthLen;
+        ip[0]              = 0x45;
+        ip[2]              = static_cast<uint8_t>((20 + udpLen) >> 8);
+        ip[3]              = static_cast<uint8_t>((20 + udpLen) & 0xff);
+        ip[8]              = 64;
+        ip[9]              = 17;
+        std::memcpy(ip + 12, &src, 4);
+        std::memcpy(ip + 16, dstAddr, 4);
+        const uint16_t ipSum = fold(sum16(ip, 20, 0));
+        ip[10]               = static_cast<uint8_t>(ipSum >> 8);
+        ip[11]               = static_cast<uint8_t>(ipSum & 0xff);
+        udpOff               = kEthLen + 20;
+    } else if (dstAddrLen == 16) {
+        /* LWIP_IPV6_NUM_ADDRESSES is three in this build, so the array covers
+         * the netif and the returned count is bounded by it. */
+        esp_ip6_addr_t addresses[3] = {};
+        const int      count        = esp_netif_get_all_ip6(s_netif, addresses);
+        const uint8_t *src          = nullptr;
+        for (int i = 0; i < count; ++i) {
+            const uint8_t *candidate = reinterpret_cast<const uint8_t *>(&addresses[i].addr);
+            const bool linklocal = candidate[0] == 0xfe && (candidate[1] & 0xc0) == 0x80;
+            const bool dstLinklocal = dstAddr[0] == 0xfe && (dstAddr[1] & 0xc0) == 0x80;
+            if (linklocal == dstLinklocal) {
+                src = candidate;
+                break;
+            }
+        }
+        if (src == nullptr) {
+            fail(4);
+            return false;
+        }
+        frame[12] = 0x86;
+        frame[13] = 0xdd;
+        uint8_t *ip = frame + kEthLen;
+        ip[0]       = 0x60;
+        ip[4]       = static_cast<uint8_t>(udpLen >> 8);
+        ip[5]       = static_cast<uint8_t>(udpLen & 0xff);
+        ip[6]       = 17;
+        ip[7]       = 64;
+        std::memcpy(ip + 8, src, 16);
+        std::memcpy(ip + 24, dstAddr, 16);
+        udpOff = kEthLen + 40;
+    } else {
+        fail(5);
+        return false;
+    }
+
+    uint8_t *udp = frame + udpOff;
+    udp[0]       = 0;
+    udp[1]       = 123;
+    udp[2]       = static_cast<uint8_t>(dstPort >> 8);
+    udp[3]       = static_cast<uint8_t>(dstPort & 0xff);
+    udp[4]       = static_cast<uint8_t>(udpLen >> 8);
+    udp[5]       = static_cast<uint8_t>(udpLen & 0xff);
+    std::memcpy(udp + 8, payload, len);
+
+    /* IPv4 does not require a UDP checksum and a zero means "not computed";
+     * IPv6 does, over a pseudo-header. */
+    if (dstAddrLen == 16) {
+        uint32_t sum = 0;
+        sum          = sum16(frame + kEthLen + 8, 32, sum);
+        sum += udpLen;
+        sum += 17;
+        sum = sum16(udp, udpLen, sum);
+        const uint16_t c = fold(sum);
+        udp[6]           = static_cast<uint8_t>(c >> 8);
+        udp[7]           = static_cast<uint8_t>(c & 0xff);
+    }
+
+    const size_t total = udpOff + udpLen;
+    const esp_err_t err = transmit(frame, total, stampNs);
+    if (s_stats.txStamps == 0) {
+        ESP_LOGI(TAG, "first raw send: %u bytes to %u.%u.%u.%u:%u, %s",
+                 static_cast<unsigned>(total), dstAddr[0], dstAddr[1], dstAddr[2], dstAddr[3],
+                 static_cast<unsigned>(dstPort), esp_err_to_name(err));
+    }
+    if (err != ESP_OK) {
+        fail(6);
+        ESP_LOGW(TAG, "transmit: %s", esp_err_to_name(err));
+        return false;
+    }
+    if (stampNs == nullptr || *stampNs == 0) {
+        fail(7);
+        return false;
+    }
+    return true;
+}
+
+bool takeRx(const uint8_t *addr, size_t addrLen, uint16_t port, Rx *out)
+{
+    if (addr == nullptr || out == nullptr || addrLen > 16) {
+        return false;
+    }
+    const int64_t now   = nowNs();
     bool          found = false;
+    int64_t       age   = 0;
+    /* No logging inside this section: the responder's log hook sends over
+     * lwIP, and this runs with interrupts off. The first miss is reported
+     * below, once the lock is released. */
     portENTER_CRITICAL(&s_mux);
     for (size_t i = 0; i < kRing; ++i) {
         RxStamp &slot = s_ring[i];
@@ -244,17 +418,26 @@ bool takeRxStamp(const uint8_t *addr, size_t addrLen, uint16_t port, int64_t *ns
             std::memcmp(slot.addr, addr, addrLen) != 0) {
             continue;
         }
-        const int64_t age = now - slot.ns;
+        age = now - slot.ns;
         if (age < 0 || age > kStampAgeNs) {
             slot.used = false;
             continue;
         }
-        *ns       = slot.ns;
+        out->ns = slot.ns;
+        std::memcpy(out->mac, slot.mac, 6);
         slot.used = false;
         found     = true;
         break;
     }
     portEXIT_CRITICAL(&s_mux);
+
+    if (found) {
+        ++s_stats.hits;
+    } else if (s_stats.hits == 0) {
+        ESP_LOGW(TAG, "takeRx miss port %u addrLen %u (best age %lld ns; %u recorded)",
+                 static_cast<unsigned>(port), static_cast<unsigned>(addrLen),
+                 static_cast<long long>(age), static_cast<unsigned>(s_stats.rxStamps));
+    }
     return found;
 }
 

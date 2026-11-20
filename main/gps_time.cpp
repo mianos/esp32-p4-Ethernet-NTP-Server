@@ -3333,11 +3333,13 @@ void GpsTime::anchor(time_t second)
 {
     int64_t  ppsMonoUs = 0;
     int64_t  ppsMonoNs = 0;
+    int64_t  ppsPtpNs  = 0;
     uint32_t ppsCount  = 0;
 
     portENTER_CRITICAL(&m_mux);
     ppsMonoUs = m_ppsMonoUs;
     ppsMonoNs = m_ppsMonoNs;
+    ppsPtpNs  = m_ppsPtpNs;
     ppsCount  = m_ppsCount;
     /* The edge's own quantisation, from the TIM-TP that described this pulse.
      * Convention is corrected = captured - qErr (gnssdo, qerr.rs); the sawtooth
@@ -3357,6 +3359,11 @@ void GpsTime::anchor(time_t second)
             ppsMonoUs -= m_qErrNs;
             if (ppsMonoNs != 0) {
                 ppsMonoNs -= m_qErrNs;
+            }
+            /* The same correction in the counter the reply is stamped in, or
+             * the two anchors would differ by the sawtooth. */
+            if (ppsPtpNs != 0) {
+                ppsPtpNs -= m_qErrNs;
             }
         }
     }
@@ -3497,6 +3504,10 @@ void GpsTime::anchor(time_t second)
     portENTER_CRITICAL(&m_mux);
     m_anchorUtcNs  = static_cast<int64_t>(second) * 1000000000;
     m_anchorMonoUs = ppsMonoUs;
+    /* The same anchor in the counter a reply's arrival is stamped by, so the
+     * served time and the stamp need no conversion. Zero when the PHC is not
+     * running, and now() then falls back to the monotonic clock. */
+    m_anchorPhcNs  = ppsPtpNs;
     m_anchorValid  = true;
     m_lastFix      = second;
     portEXIT_CRITICAL(&m_mux);
@@ -4066,6 +4077,11 @@ GpsTime::Status GpsTime::status() const
     portENTER_CRITICAL(&m_mux);
     st.ppsCount    = m_ppsCount;
     st.ppsPtpNs    = m_ppsPtpNs;
+    if (m_anchorValid && m_anchorPhcNs != 0 && ptp::hardware()) {
+        const int64_t byPhc  = ptp::nowNs() - m_anchorPhcNs;
+        const int64_t byMono = (esp_timer_get_time() - m_anchorMonoUs) * 1000;
+        st.phcMonoDeltaNs    = byPhc - byMono;
+    }
     st.timeValid   = m_timeValid;
     st.fixType     = m_fixType;
     st.satellites  = m_satellites;
@@ -4431,19 +4447,48 @@ uint32_t GpsTime::suppressPps(uint32_t seconds)
 
 bool GpsTime::now(struct timespec &ts) const
 {
-    int64_t utcNs   = 0;
-    int64_t monoUs  = 0;
-    int32_t ratePpb = 0;
+    int64_t utcNs     = 0;
+    int64_t monoUs    = 0;
+    int64_t anchorPhc = 0;
+    int32_t ratePpb   = 0;
 
     portENTER_CRITICAL(&m_mux);
     const bool valid = m_anchorValid;
     utcNs            = m_anchorUtcNs;
     monoUs           = m_anchorMonoUs;
+    anchorPhc        = m_anchorPhcNs;
     ratePpb          = m_ratePpb;
     portEXIT_CRITICAL(&m_mux);
 
     if (!valid) {
         return false;
+    }
+
+    /* The 1588 counter is the served base while it runs: a reply's arrival
+     * stamp is taken by hardware in that base, and a served time computed in
+     * another one would have to be converted back on every packet. A stale
+     * anchor stamp -- the pair and the anchor come from the same edge, so this
+     * is only the first second of a boot -- falls through to the monotonic
+     * path. */
+    if (ptp::hardware() && anchorPhc != 0) {
+        const int64_t now       = ptp::nowNs();
+        const int64_t elapsedNs = now - anchorPhc;
+        if (elapsedNs >= 0 && elapsedNs < 2000000000LL) {
+            static bool told = false;
+            if (!told) {
+                told = true;
+                ESP_LOGI(TAG, "phc anchor: phc elapsed %lld ns, mono elapsed %lld ns",
+                         static_cast<long long>(elapsedNs),
+                         static_cast<long long>(esp_timer_get_time() * 1000 - monoUs * 1000));
+            }
+            /* Nanoseconds here, so the ppb divisor is 1e9 and not the 1e6 the
+             * microsecond path above uses: 30 ppm over half a second is 15 us,
+             * which is 15000 ns, which is 5e8 * 3e4 / 1e9. */
+            const int64_t totalNs = utcNs + elapsedNs - elapsedNs * ratePpb / 1000000000;
+            ts.tv_sec             = static_cast<time_t>(totalNs / 1000000000);
+            ts.tv_nsec            = static_cast<long>(totalNs % 1000000000);
+            return true;
+        }
     }
 
     /* The anchor plus elapsed monotonic time, with the servo's rate taken out of

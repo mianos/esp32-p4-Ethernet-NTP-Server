@@ -1,5 +1,7 @@
 #include "ntp_server.h"
 
+#include "ptp.h"
+
 #include "clock_source.h"
 #include "ntp_control.h"
 
@@ -33,6 +35,10 @@ namespace {
 
 constexpr int          kPort             = 123;
 constexpr size_t       kPacketBytes      = 48;   /* NTPv4 header, no MAC */
+/* Raw-frame replies, with the hardware transmit stamp. */
+/* Raw-frame replies with the hardware transmit stamp. Off is the old
+ * software-only path, kept because it is the fallback when a stamp is missing. */
+constexpr bool         kRawSend          = true;
 constexpr uint32_t     kReceiveTimeoutMs = 1000; /* how often the task looks up */
 constexpr uint32_t     kReportEveryMs    = 60000;
 /* 12288, not 4096: every request copies a GpsTime::Status by value (the
@@ -1103,11 +1109,73 @@ void NtpServer::serveLoop()
         const int len = recvfrom(sock, packet, sizeof(packet), 0,
                                  reinterpret_cast<sockaddr *>(&from), &fromLen);
 
-        /* lwIP has no SO_TIMESTAMP, so this read after the syscall is the
-         * receive timestamp: scheduler latency included, hardware stamping
-         * not. That is the accuracy this phase can honestly claim. */
+        /* The arrival stamp the MAC took, if it took one. This is the receive
+         * timestamp: the frame was stamped before the driver task was woken, so
+         * neither the scheduler nor the stack is in it. Without one -- the PHC
+         * off, or an entry aged out -- this falls back to a read after the
+         * syscall, which is the old behaviour and carries both. */
+        uint8_t  peer[16]  = {};
+        size_t   peerLen   = 0;
+        uint16_t peerPort  = 0;
+        if (from.ss_family == AF_INET) {
+            std::memcpy(peer, &reinterpret_cast<const sockaddr_in *>(&from)->sin_addr, 4);
+            peerLen  = 4;
+            peerPort = ntohs(reinterpret_cast<const sockaddr_in *>(&from)->sin_port);
+        } else if (from.ss_family == AF_INET6) {
+            /* The socket is dual-stack, so an IPv4 client arrives as a mapped
+             * address (::ffff:a.b.c.d) on an AF_INET6 sockaddr. The ring holds
+             * the address the frame actually carried, so the mapped form has to
+             * be unwrapped or the lookup compares four bytes with sixteen. */
+            const auto    *v6 = reinterpret_cast<const sockaddr_in6 *>(&from);
+            const uint8_t *a  = reinterpret_cast<const uint8_t *>(&v6->sin6_addr);
+            bool           mapped = true;
+            for (int i = 0; i < 10; ++i) {
+                if (a[i] != 0) {
+                    mapped = false;
+                    break;
+                }
+            }
+            if (mapped && a[10] == 0xff && a[11] == 0xff) {
+                std::memcpy(peer, a + 12, 4);
+                peerLen = 4;
+            } else {
+                std::memcpy(peer, a, 16);
+                peerLen = 16;
+            }
+            peerPort = ntohs(v6->sin6_port);
+        }
+        ptp::Rx       hwRx;
+        const bool    hardware = len >= 0 && peerLen != 0 &&
+                                 ptp::takeRx(peer, peerLen, peerPort, &hwRx);
+
+        static bool toldStamp = false;
+        if (len >= 0 && !toldStamp) {
+            toldStamp = true;
+            ESP_LOGI(TAG, "arrival stamp: %s family %d peerLen %u port %u peer0 %02x%02x",
+                     hardware ? "hardware" : "software", static_cast<int>(from.ss_family),
+                     static_cast<unsigned>(peerLen), static_cast<unsigned>(peerPort), peer[0],
+                     peer[1]);
+        }
+
         struct timespec received = {};
-        m_ref->now(received);
+        /* The stamp is in the 1588 counter's base; the reply has to be in the
+         * reference's. In the GPS case those are the same clock and the
+         * conversion is a few ns; with an upstream the counter is a free-running
+         * copy set once at boot, and the difference is whatever the upstream
+         * has stepped the system clock by. Reading both around the same instant
+         * makes it a subtraction either way. */
+        int64_t toServed = 0;
+        if (hardware) {
+            struct timespec servedNow = {};
+            m_ref->now(servedNow);
+            toServed = static_cast<int64_t>(servedNow.tv_sec) * 1000000000LL +
+                       servedNow.tv_nsec - ptp::nowNs();
+            const int64_t t2 = hwRx.ns + toServed;
+            received.tv_sec  = static_cast<time_t>(t2 / 1000000000);
+            received.tv_nsec = static_cast<long>(t2 % 1000000000);
+        } else {
+            m_ref->now(received);
+        }
 
         const uint32_t nowMs = pdTICKS_TO_MS(xTaskGetTickCount());
 
@@ -1185,11 +1253,19 @@ void NtpServer::serveLoop()
                     /* Whatever the transmit path costs, the stamp is early by
                      * it. Correcting for it is the mirror of the receive lag
                      * the dispersion already admits, and it is what keeps a
-                     * client's offset from carrying the difference. */
-                    transmitted.tv_nsec += TxLag::instance().lagNs();
-                    while (transmitted.tv_nsec >= 1000000000L) {
-                        transmitted.tv_nsec -= 1000000000L;
-                        ++transmitted.tv_sec;
+                     * client's offset from carrying the difference.
+                     *
+                     * Not on the raw path: the estimator is calibrated against
+                     * a socket sendto(), and a frame handed straight to the DMA
+                     * descriptor is on the wire in a fraction of that. Applying
+                     * the socket figure there over-corrects by its own size,
+                     * which is the whole 300 us arriving as a 150 us offset. */
+                    if (!hardware) {
+                        transmitted.tv_nsec += TxLag::instance().lagNs();
+                        while (transmitted.tv_nsec >= 1000000000L) {
+                            transmitted.tv_nsec -= 1000000000L;
+                            ++transmitted.tv_sec;
+                        }
                     }
 
                     uint8_t receiveStamp[kStampBytes] = {};
@@ -1224,12 +1300,25 @@ void NtpServer::serveLoop()
                                    &transmitted);
                     }
 
-                    /* The reply's own time in the stack, which is the number
-                     * its timestamp above should have been corrected by. */
-                    const int64_t replySent = esp_timer_get_time();
-                    const int     replyRc   =
-                        sendto(sock, reply, sizeof(reply), 0,
-                               reinterpret_cast<const sockaddr *>(&from), fromLen);
+                    /* Off the wire with a hardware stamp when one is available.
+                     * The stamp this frame gets is what an interleaved client's
+                     * *next* request is answered with, so it is measured rather
+                     * than corrected -- which is the whole point of the saved
+                     * pair. The frame's own transmit field still has to be
+                     * written before the send, so it stays the software stamp
+                     * plus the estimator; a 1588 one-step unit would fix that
+                     * and this one cannot. */
+                    int64_t       measuredTx = 0;
+                    uint8_t       measuredStamp[kStampBytes] = {};
+                    const int64_t replySent                  = esp_timer_get_time();
+                    int           replyRc                    = -1;
+                    if (kRawSend && hardware && ptp::sendUdp(peer, peerLen, peerPort, hwRx.mac, reply,
+                                                 sizeof(reply), &measuredTx)) {
+                        replyRc = static_cast<int>(sizeof(reply));
+                    } else {
+                        replyRc = sendto(sock, reply, sizeof(reply), 0,
+                                         reinterpret_cast<const sockaddr *>(&from), fromLen);
+                    }
                     const int64_t replyCost = (esp_timer_get_time() - replySent) * 1000;
                     if (replyRc < 0) {
                         ESP_LOGW(TAG, "sendto: errno %d", errno);
@@ -1249,8 +1338,16 @@ void NtpServer::serveLoop()
                         /* The key is what the client will echo: the transmit
                          * that actually went out, which in this mode is the
                          * saved one rather than the fresh one. */
+                        if (measuredTx != 0) {
+                            const int64_t servedTx = measuredTx + toServed;
+                            struct timespec measured = {};
+                            measured.tv_sec  = static_cast<time_t>(servedTx / 1000000000);
+                            measured.tv_nsec = static_cast<long>(servedTx % 1000000000);
+                            writeTimestamp(measuredStamp, measured);
+                        }
                         pairs.save(from, interleavedMode ? savedTransmit : liveStamp,
-                                   req.transmit, liveStamp, receiveStamp, nowMs);
+                                   req.transmit, measuredTx != 0 ? measuredStamp : liveStamp,
+                                   receiveStamp, nowMs);
                         TxLag::instance().recordReply(replyCost);
                         ++answered;
                         ++winAnswered;

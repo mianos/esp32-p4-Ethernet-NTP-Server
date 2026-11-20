@@ -131,6 +131,10 @@ public:
          * timestamp would come from. Zero until the first edge after the PHC
          * runs; the two are compared to see the counter track the reference. */
         int64_t  ppsPtpNs   = 0;
+        /* Served-time difference between the 1588 anchor and the monotonic one,
+         * both measured from the same edge: zero means the two agree, and
+         * anything else is the hardware path being fitted wrongly. */
+        int64_t  phcMonoDeltaNs = 0;
         bool     anchored   = false; /* an edge and a NAV-PVT have been paired */
         time_t   lastFix    = 0;     /* UTC second of the last accepted anchor */
         int64_t  offsetUs   = 0;     /* GPS minus the system clock, last measured */
@@ -760,6 +764,9 @@ private:
     uint32_t     m_ppsCount     = 0;
     int64_t      m_anchorUtcNs  = 0;
     int64_t      m_anchorMonoUs = 0;
+    /* The anchor in the 1588 counter, and the counter is the served base while
+     * it runs. Zero when the PHC is off. */
+    int64_t      m_anchorPhcNs  = 0;
     bool         m_anchorValid  = false;
     time_t       m_lastFix      = 0;
     bool         m_timeValid    = false;

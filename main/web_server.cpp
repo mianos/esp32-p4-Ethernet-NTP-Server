@@ -652,6 +652,7 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
     doc.AddItem("offset_us", static_cast<double>(gps.offsetUs));
     doc.AddItem("offset_ns", static_cast<double>(gps.offsetNs));
     doc.AddItem("pps_ptp_ns", static_cast<double>(gps.ppsPtpNs));
+    doc.AddItem("phc_mono_delta_ns", static_cast<double>(gps.phcMonoDeltaNs));
     doc.AddItem("rate_ppm", static_cast<double>(gps.ratePpb) / 1000.0);
     doc.AddItem("rate_n", static_cast<double>(gps.rateSamples));
     doc.AddItem("fit_us", static_cast<double>(gps.fitUs));
@@ -907,7 +908,7 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
 /* What /gps/info keeps: every key something reads, plus the five the standing
  * watch on this box is kept in. Everything else is /gps/bench. */
 static constexpr const char *kPolled[] = {
-    "module", "tp5_ok", "timtp", "offset_ns", "pps_ptp_ns", "rate_ppm", "rate_n", "bridge_active",
+    "module", "tp5_ok", "timtp", "offset_ns", "pps_ptp_ns", "phc_mono_delta_ns", "rate_ppm", "rate_n", "bridge_active",
     "bridge_clients", "gnss", "gnss_cfg", "time_mode", "svin_dur_s", "svin_acc_mm",
     "svin_var_mm2", "svin_obs", "svin_target_s", "svin_limit_mm", "svin_valid",
     "dispersion_us", "lock_window_s", "tp_jitter_ns", "root_delay_ns", "servo_steps",

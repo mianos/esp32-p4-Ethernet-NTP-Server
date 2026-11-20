@@ -291,7 +291,9 @@ wrong methods get the same JSON shape.
 | POST | `/firmware` | write the body into the inactive slot and reboot into it |
 
 `/healthz` reports the clock source, the responder's live claim, the receiver's
-fix and the servo. Some fields are present only when they apply, because a
+fix and the servo, and the hardware stamp path: `phc` (the 1588 counter is
+running), `hw_rx_stamps`, `hw_tx_stamps` and `hw_tx_missing` — a zero that is not
+moving is the answer. Some fields are present only when they apply, because a
 healthy box has nothing to say about them: `gps_tp5_rejected`,
 `gps_ant_cfg_rejected`, `gps_ant_short`, `gps_ant_latched`,
 `gps_pps_suppressed_s`. Address fields are omitted until each address exists.
@@ -502,8 +504,14 @@ that does have a rate knob; that is the next step.
   the servo's rate, so what is left is the fit's residual — 2 µs measured across
   a two-and-a-half-minute holdover — instead of 30 µs of crystal error per
   second.
-- The reply stamps are still software: taken after `recvfrom()` and before
-  `sendto()`, so a client also measures the LAN path and scheduler latency.
+- The arrival stamp is hardware. The EMAC's 1588 counter stamps the frame as the
+  DMA receives it, so neither the scheduler nor the stack is in it, and the reply
+  carries that instant. The served time is computed from the same counter, so the
+  two need no conversion.
+- The transmit stamp *in the packet* is still software: it has to be written
+  before the frame leaves, and this unit cannot insert a timestamp into a frame it
+  is sending (one-step). The *measured* transmit stamp is kept and used, which is
+  what an interleaved client is answered with.
 - Leap seconds come from the receiver, not from a constant. `NAV-TIMELS` carries
   the GPS-UTC offset, and an announced leap sets LI in the last minute before it.
   The indicator is gated on the change type *and* the countdown, because the
@@ -539,6 +547,10 @@ On the wire:
   bytes gets silence.
 - **Always 48 bytes out, never more than came in.** No MAC, no extension fields
   echoed.
+- **Replies go out as raw frames**, built here, so the transmit stamp comes from
+  the MAC rather than from a read after `sendto()`. The destination MAC is the one
+  the request arrived from, so no ARP or NDP lookup stands between the stamp and
+  the wire.
 - **Origin timestamp is the client's transmit field byte for byte**, including an
   all-zero one.
 - **Precision −20**, about 1 µs, which is what this clock can distinguish.

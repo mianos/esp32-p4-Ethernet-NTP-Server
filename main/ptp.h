@@ -57,16 +57,31 @@ inline IRAM_ATTR int64_t nowNs()
  * Returns the stamp in `stampNs`, or 0 when the frame went without one. */
 esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs);
 
-/* Receive stamps for UDP/123, keyed by source. Recorded in the input path, taken
- * by the responder after recvfrom() so the reply can carry the arrival as t2
- * rather than a time read after the scheduler. */
-bool takeRxStamp(const uint8_t *addr, size_t addrLen, uint16_t port, int64_t *ns);
+/* An arrival stamp for a UDP/123 datagram, with the address it came from and
+ * the MAC it came from -- the reply goes back to that MAC, so no ARP or NDP
+ * lookup stands between the stamp and the wire. */
+struct Rx {
+    int64_t ns = 0;
+    uint8_t mac[6] = {};
+};
+
+/* Recorded in the input path, taken by the responder after recvfrom() so the
+ * reply can carry the arrival as t2 rather than a time read after the
+ * scheduler. */
+bool takeRx(const uint8_t *addr, size_t addrLen, uint16_t port, Rx *out);
+
+/* One UDP datagram out from the box's own address, as a raw frame, with the
+ * transmit stamp. False when there is no route or no stamp, so the caller can
+ * fall back to sendto(). */
+bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const uint8_t dstMac[6],
+             const uint8_t *payload, size_t len, int64_t *stampNs);
 
 struct Stats {
     uint32_t frames;   /* 0x88F7 frames seen */
     uint32_t rxStamps; /* UDP/123 arrival stamps recorded */
     uint32_t txStamps; /* frames sent with a hardware stamp */
     uint32_t txMissing;
+    uint32_t hits;
     int64_t  lastNs; /* most recent stamp of either kind */
 };
 Stats stats();
