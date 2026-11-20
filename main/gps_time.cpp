@@ -4188,6 +4188,10 @@ GpsTime::Status GpsTime::status() const
     st.svinLimitMm = static_cast<double>(m_svinAccMm);
     st.svinValid = m_svinValid;
     st.holdValidated = m_holdValidated;
+    st.holdWanted    = m_holdWanted;
+    st.holdAssertInS = m_holdAssertAtUs == 0
+                           ? -1
+                           : (static_cast<double>(m_holdAssertAtUs - esp_timer_get_time()) / 1e6);
     st.svinAgeS = m_svinAtUs != 0 ? static_cast<double>(esp_timer_get_time() - m_svinAtUs) / 1e6
                                   : -1;
     st.pinSel            = m_pinSel;

@@ -380,6 +380,11 @@ public:
          * met its own accuracy limit. False is usable but unsignoff, and is
          * what a lock taken from an abandoned survey looks like. */
         bool     holdValidated = false;
+        /* Whether a hold is wanted and when it will next be asserted. A hold
+         * that is wanted but never sent is invisible otherwise, which is how one
+         * was restored and dropped on every boot. */
+        bool     holdWanted = false;
+        double   holdAssertInS = -1;
         double   svinAgeS   = -1;
         /* MON-HW's pin map: which module pins the receiver has assigned, their
          * direction and level. The antenna supervisor is a pin pair, so this is
