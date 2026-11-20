@@ -3,7 +3,7 @@ idf_component_register(SRCS "clock_source.cpp" "config_apply.cpp" "console.cpp" 
                        PRIV_REQUIRES console esp_eth esp_netif esp_http_server nvs_flash
                                      esp_app_format app_update esp_timer lwip
                                      esp_driver_uart esp_driver_gpio esp_driver_mcpwm
-                       INCLUDE_DIRS "." "${IDF_PATH}/components/console/private_include")
+                       INCLUDE_DIRS ".")
 
 # IDF's -Wall leaves these as warnings, and dead code then only surfaces when a
 # change happens to sit next to it. Members and published fields stay invisible

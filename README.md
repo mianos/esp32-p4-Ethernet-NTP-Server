@@ -215,10 +215,13 @@ $ printf 'console on\r' > /dev/ttyACM0
 | `hostname`, `serve`, `timesource`, `ntpserver`, `log` | the single-value shorthands |
 | `nvs_list`, `nvs_get`, `version`, `free`, `heap`, `tasks`, `restart` | IDF's `cmd_nvs` / `cmd_system` |
 
-The prompt is switched by rewriting the console component's own prompt buffer on
-the live REPL. Suspending the REPL task instead does not work: it is blocked in a
-UART read whenever it is idle, and its outstanding read swallows input that the
-suspended task can never process.
+The console component's REPL task is created but never started: it stays parked
+on its notification while one reader task owns the port and dispatches lines
+through `esp_console_run()`. A running REPL sits in a blocking UART read, and
+that pending read takes input away for a task that cannot run it; the REPL's own
+linenoise also fires `ESC[6n` cursor probes that arrive back as input and get
+executed as commands. The cost of the reader is line editing: backspace works,
+arrows and history do not.
 
 Every write goes through `Settings::applyJson()`, the same validation `POST
 /config` uses, so the console cannot reach a state the HTTP surface rejects: a

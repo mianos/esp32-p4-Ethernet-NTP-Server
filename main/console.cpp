@@ -4,13 +4,14 @@
 #include <cstring>
 #include <string>
 
+#include <unistd.h>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "esp_console.h"
 #include "esp_log.h"
 
-/* A C header with no extern "C" guard of its own. */
-extern "C" {
-#include "console_private.h"
-}
 
 #include "cmd_nvs.h"
 #include "cmd_system.h"
@@ -34,77 +35,52 @@ struct Context {
 
 Context s_ctx;
 
-/* The REPL runs under a fixed task name set by the console component, so it can
- * be found and suspended from inside one of its own commands. */
-std::atomic<bool> s_watching{false};
-/* Set while the console has silenced the log for its own output. */
-bool            s_silenced  = false;
-esp_log_level_t s_savedLevel = ESP_LOG_INFO;
-
-/* Quiet console.
+/* The port has two states: a log stream, which is the default, or a prompt for
+ * a debug session. `console on` means "give me the prompt" and holds the log
+ * while it is up; `console off` returns to the stream.
  *
- * The REPL task is suspended while this runs, so nothing prints a prompt and
- * linenoise stops redrawing -- but the port stays interactive: a line is read,
- * echoed, and handed to esp_console_run(), so every command still works. The
- * resume phrase is checked first because `console on` has to resume the REPL
- * rather than run inside this task.
+ * The console component's own REPL task is created but never started. It is
+ * blocked on its start notification, which is the point: a REPL that is running
+ * sits in a blocking UART read, and that pending read takes input out of the
+ * driver for a task that may not be able to run it. Reading here, in one task
+ * that dispatches through esp_console_run(), keeps exactly one reader on the
+ * port. It also avoids linenoise's terminal probes -- the `ESC[6n` cursor
+ * queries that arrive as input and get chewed as commands.
  *
- * Nothing is persisted: a reboot always comes back with a live console. */
-/* The prompt is a char buffer inside the console component's own struct, handed
- * to linenoise on every iteration, so rewriting it changes the next prompt.
- *
- * Suspending the REPL task to hide the prompt does not work: it is blocked in a
- * UART read whenever it is idle, and that outstanding read swallows whatever
- * arrives while it is suspended -- bytes vanish into a task that cannot run. The
- * prompt buffer can be rewritten on the live REPL instead, which leaves the
- * reading exactly where it was. */
-esp_console_repl_com_t *s_replCom  = nullptr;
-bool            s_quiet      = false;
+ * The cost is line editing: backspace works, arrows and history do not. */
+constexpr const char *kPrompt = "ntp> ";
 
-/* repl_core is the first member of the struct, so the handle we were given is
- * its address. */
-void setPrompt(const char *text)
-{
-    if (s_replCom != nullptr) {
-        esp_console_setup_prompt(text, s_replCom);
-    }
-}
+bool s_prompted = false;
+/* The level to come back to when the prompt goes away again. */
+esp_log_level_t s_logLevel = ESP_LOG_INFO;
 
-/* Two states, and the logging one is the default: the port is a log stream with
- * no prompt on it. `console on` is the debug state -- prompt, log silenced so
- * the session is readable. Commands work in both; only the prompt differs. */
 int cmdConsole(void *, int argc, char **argv)
 {
     const char *what = argc > 1 ? argv[1] : "";
 
     if (std::strcmp(what, "on") == 0) {
-        if (!s_quiet) {
+        if (s_prompted) {
             std::printf("console is already up\n");
             return 0;
         }
-        s_quiet = false;
-        if (!s_silenced) {
-            s_savedLevel = esp_log_level_get("*");
-            s_silenced   = true;
+        const esp_log_level_t now = esp_log_level_get("*");
+        if (now != ESP_LOG_NONE) {
+            s_logLevel = now;
         }
+        s_prompted = true;
         esp_log_level_set("*", ESP_LOG_NONE);
-        setPrompt("ntp>");
-        std::printf("\nconsole up, log silenced ('console off' restores)\n");
+        std::printf("console up: prompt, log held. 'console off' returns to the log.\n");
         return 0;
     }
 
     if (std::strcmp(what, "off") == 0) {
-        if (s_quiet) {
+        if (!s_prompted) {
             std::printf("console is already down\n");
             return 0;
         }
-        s_quiet = true;
-        if (s_silenced) {
-            esp_log_level_set("*", s_savedLevel);
-            s_silenced = false;
-        }
-        setPrompt("");
-        std::printf("console down, log back at its level ('console on' for the prompt)\n");
+        s_prompted = false;
+        esp_log_level_set("*", s_logLevel);
+        std::printf("console down: log back at its level. 'console on' for the prompt.\r\n");
         return 0;
     }
 
@@ -112,9 +88,54 @@ int cmdConsole(void *, int argc, char **argv)
         std::printf("usage: console [on | off]\n");
         return 1;
     }
-    std::printf("console %s%s\n", s_quiet ? "down (logging, no prompt)" : "up",
-                s_silenced ? ", log silenced" : "");
+    std::printf("console %s\n", s_prompted ? "up (prompt, log held)" : "down (log stream)");
     return 0;
+}
+
+/* The one reader. A prompt is printed only when one has been asked for, and the
+ * line is dispatched through the same entry point the REPL uses, so the command
+ * layer is unchanged. */
+void readerTask(void *)
+{
+    std::string line;
+
+    for (;;) {
+        if (s_prompted) {
+            std::printf("%s", kPrompt);
+            std::fflush(stdout);
+        }
+        line.clear();
+
+        for (;;) {
+            char c = 0;
+            if (read(STDIN_FILENO, &c, 1) != 1) {
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
+            if (c == '\r' || c == '\n') {
+                break;
+            }
+            if (c == 0x7f || c == 0x08) {
+                if (!line.empty()) {
+                    line.pop_back();
+                    std::fputs("\b \b", stdout);
+                    std::fflush(stdout);
+                }
+                continue;
+            }
+            if (line.size() < 512) {
+                line.push_back(c);
+                std::putchar(c);
+                std::fflush(stdout);
+            }
+        }
+
+        std::printf("\r\n");
+        if (!line.empty()) {
+            int ret = 0;
+            esp_console_run(line.c_str(), &ret);
+        }
+    }
 }
 
 void printAddressing()
@@ -429,17 +450,14 @@ esp_err_t console::start()
         ESP_LOGE(TAG, "repl: %s", esp_err_to_name(err));
         return err;
     }
-    const esp_err_t started = esp_console_start_repl(handle);
-    if (started != ESP_OK) {
-        return started;
-    }
+    /* Deliberately not esp_console_start_repl(): the REPL task stays parked on
+     * its notification while the reader below owns the port. */
+    (void)handle;
 
-    /* Boot into the logging state: no prompt on the port, commands still run.
-     * The prompt is blanked rather than the task suspended, and a blank prompt
-     * is what `console on` restores. */
-    s_replCom = reinterpret_cast<esp_console_repl_com_t *>(handle);
-    s_quiet   = true;
-    setPrompt("");
+    if (xTaskCreate(&readerTask, "console_in", 6144, nullptr, 5, nullptr) != pdPASS) {
+        ESP_LOGE(TAG, "no reader task");
+        return ESP_ERR_NO_MEM;
+    }
     std::printf("logging -- 'console on' for the prompt\r\n");
     std::fflush(stdout);
     return ESP_OK;
