@@ -29,11 +29,6 @@ constexpr int64_t kDegradeAfterUs = 15000000;
  * had before the outage. */
 constexpr int64_t kRecoverAfterUs = 20000000;
 
-/* The servo is held off for this long after the client's first sync, so the one
- * edge that lands on the same instant as the step cannot measure the step as an
- * error and undo it. The tick that flips the owner runs at 1 Hz. */
-constexpr int64_t kSettleUs = 3000000;
-
 /* How stale an upstream sync may be and still be served. Fifteen missed polls;
  * the same reasoning as the lock window it replaces: wide enough that one lost
  * reply does not flap the stratum, narrow enough that a WAN that quietly died
@@ -143,11 +138,11 @@ bool ClockSource::gpsSteers()
         m_settleUs = 0;
         return true;
     }
-    const int64_t at = nowUs();
-    if (m_settleUs == 0) {
-        m_settleUs = at;
-    }
-    return at - m_settleUs < kSettleUs;
+    /* The client has stepped the clock and the owner is about to flip. The
+     * receiver does not steer from here: this returned true for exactly the
+     * settling window it was meant to hold off for, so the edge that landed on
+     * the step measured it as an error and undid it. */
+    return false;
 }
 
 void ClockSource::observe(const bool pulseGood)

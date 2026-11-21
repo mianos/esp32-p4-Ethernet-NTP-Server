@@ -343,6 +343,9 @@ void NtpTime::stop()
         esp_netif_sntp_deinit();
         m_running.store(false, std::memory_order_relaxed);
     }
+    /* A stopped client has not synced. Left set, the next fallback inside
+     * fifteen minutes counted as synced before its first poll had answered. */
+    m_last_sync.store(0, std::memory_order_relaxed);
     m_source.store(Settings::TimeSource::Off, std::memory_order_relaxed);
     setServer({});
 }
