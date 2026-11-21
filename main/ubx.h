@@ -139,11 +139,15 @@ public:
     uint32_t droppedChecksum() const { return m_badChecksum; }
     uint32_t droppedLength() const { return m_badLength; }
 
+    /* Back to hunting for sync. For a caller that knows the stream broke under
+     * the decoder -- a rate change -- so half a frame at the old rate is not
+     * finished with bytes at the new one. */
+    void reset();
+
 private:
     enum class State : uint8_t { Idle, Sync2, Class, Id, LenLo, LenHi, Payload, CkA, CkB };
 
     void emit();
-    void reset();
     void warn(Drop why);
 
     Listener   *m_listener  = nullptr;
@@ -153,7 +157,6 @@ private:
     std::size_t m_got       = 0;
     uint8_t     m_ckA       = 0;
     uint8_t     m_ckB       = 0;
-    bool        m_overlong  = false;
     uint32_t    m_frames    = 0;
     uint32_t    m_badChecksum = 0;
     uint32_t    m_badLength   = 0;

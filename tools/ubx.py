@@ -27,7 +27,9 @@ DEFS = {
     (0x01, 0x26): (24, 24, "NAV-TIMELS"),
     (0x01, 0x27): (16, 16, "NAV-TIM-TP"),
     (0x01, 0x35): (8, 512, "NAV-SAT"),
+    (0x0D, 0x01): (16, 16, "TIM-TP"),
     (0x0D, 0x04): (28, 28, "TIM-SVIN"),
+    (0x0D, 0x12): (56, 56, "TIM-TOS"),
     (0x05, 0x00): (2, 2, "ACK-ACK"),
     (0x05, 0x01): (2, 2, "ACK-NAK"),
     (0x06, 0x00): (20, 20, "CFG-PRT"),
@@ -97,7 +99,6 @@ class Decoder:
         self._buf = bytearray()
         self._cka = self._ckb = 0
         self._got = 0
-        self._overlong = False
         self.frames: list[Frame] = []
         self.dropped_checksum: list[Frame] = []
         self.dropped_length: list[Frame] = []
@@ -129,15 +130,26 @@ class Decoder:
             self._add(byte)
             self._state = self.LENHI
         elif state == self.LENHI:
+            len_lo = self._len
             self._len |= byte << 8
             self._add(byte)
             self._buf = bytearray()
             self._got = 0
-            self._overlong = self._len > MAX_PAYLOAD
+            # A length that cannot be right is refused here, not walked: see
+            # main/ubx.cpp. The two bytes go back through the hunt because they
+            # may be the next frame's sync pair.
+            limit = DEFS.get((self._cls, self._id))
+            if self._len > MAX_PAYLOAD or (
+                limit is not None and not (limit[0] <= self._len <= limit[1])
+            ):
+                self.dropped_length.append(Frame(self._cls, self._id, b""))
+                self._state = self.IDLE
+                self._byte(len_lo)
+                self._byte(byte)
+                return
             self._state = self.CKA if self._len == 0 else self.PAYLOAD
         elif state == self.PAYLOAD:
-            if not self._overlong:
-                self._buf.append(byte)
+            self._buf.append(byte)
             self._got += 1
             self._add(byte)
             if self._got >= self._len:
@@ -161,13 +173,6 @@ class Decoder:
         self._ckb = (self._ckb + self._cka) & 0xFF
 
     def _emit(self, frame: Frame) -> None:
-        if self._overlong:
-            self.dropped_length.append(frame)
-            return
-        limit = DEFS.get((frame.cls, frame.id))
-        if limit is not None and not (limit[0] <= frame.len <= limit[1]):
-            self.dropped_length.append(frame)
-            return
         self.frames.append(frame)
 
 

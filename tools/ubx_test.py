@@ -108,6 +108,22 @@ class Framing(unittest.TestCase):
         self.assertEqual(len(d.frames), 0)
         self.assertEqual(len(d.dropped_length), 1)
 
+    def test_truncated_frame_does_not_swallow_the_stream(self):
+        """Seen on the board: NAV-TIMELS cut after its id, so the next frame's
+        sync pair was read as a length of 0x62B5 and 25 KB went unparsed."""
+        d = ubx.Decoder()
+        nxt = ubx.build(0x01, 0x07, bytes(92))
+        d.feed(bytes((ubx.SYNC1, ubx.SYNC2, 0x01, 0x26)) + nxt + nxt)
+        self.assertEqual(len(d.dropped_length), 1)
+        self.assertEqual(len(d.frames), 2)
+
+    def test_overlong_does_not_swallow_the_stream(self):
+        d = ubx.Decoder()
+        nxt = ubx.build(0x01, 0x07, bytes(92))
+        d.feed(bytes((ubx.SYNC1, ubx.SYNC2, 0x13, 0x40, 0xFF, 0xFF)) + nxt)
+        self.assertEqual(len(d.dropped_length), 1)
+        self.assertEqual(len(d.frames), 1)
+
     def test_pending_reports_mid_frame(self):
         d = ubx.Decoder()
         self.assertEqual(d.pending, 0) if hasattr(d, "pending") else None

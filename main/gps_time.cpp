@@ -985,7 +985,12 @@ void GpsTime::bridgeTask()
             }
 
             uint8_t   out[256];
-            const int got = uart_read_bytes(kUart, out, sizeof(out), 0);
+            /* Only while a client holds the port. With nobody attached the GPS
+             * task is the reader, and a second one here took whatever sat in
+             * the ring between its reads -- 7280 bytes with no session ever
+             * opened, each theft a frame with a hole in it for the clock's
+             * decoder. */
+            const int got = m_bridgeActive ? uart_read_bytes(kUart, out, sizeof(out), 0) : 0;
             moduleDecoder.feed(std::span(out, static_cast<std::size_t>(got > 0 ? got : 0)));
 
             /* The rate change, if one is armed. The old code switched the baud
@@ -1479,6 +1484,15 @@ void GpsTime::task()
             m_frameSeen   = false;
             m_lastFrameUs = 0;
             ++m_rescans;
+            /* The rate that was working a moment ago gets its full turn before
+             * the scan moves. The deadline used to be whatever the last scan
+             * left behind -- on a healthy box, fifteen seconds after boot -- so
+             * the first silent five seconds walked straight off the right rate
+             * and began configuring the module blind at the wrong ones. A
+             * decoder caught mid-frame is the likelier cause than a rate that
+             * moved, and starting it again is the whole cure for that. */
+            m_decoder.reset();
+            m_nextScanUs = nowUs + kFirstRateUs;
             ESP_LOGW(TAG, "no frames for %lld ms: rescanning the baud rate",
                      static_cast<long long>(kFrameSilenceUs / 1000));
         }
@@ -1502,6 +1516,7 @@ void GpsTime::task()
                 if (m_poorSecs >= 6) {
                     m_frameSeen = false;
                     m_poorSecs  = 0;
+                    m_decoder.reset();
                     ESP_LOGW(TAG, "only %u frames in 6 s at %u baud: rescanning",
                              static_cast<unsigned>(m_secFrames * 6), static_cast<unsigned>(m_baud));
                 }
@@ -2078,6 +2093,9 @@ void GpsTime::advanceBaud()
 
     m_baud = kBauds[m_baudIndex];
     const esp_err_t err = uart_set_baudrate(kUart, m_baud);
+    /* Half a frame read at the old rate must not be finished with bytes at the
+     * new one. */
+    m_decoder.reset();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "uart_set_baudrate(%u): %s", static_cast<unsigned>(m_baud),
                  esp_err_to_name(err));

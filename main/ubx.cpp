@@ -15,7 +15,6 @@ void Decoder::reset()
 {
     m_state    = State::Idle;
     m_got      = 0;
-    m_overlong = false;
     m_frame    = Frame{};
 }
 
@@ -64,22 +63,37 @@ void Decoder::feed(uint8_t byte)
         m_state     = State::LenHi;
         return;
 
-    case State::LenHi:
+    case State::LenHi: {
+        const uint8_t lenLo = static_cast<uint8_t>(m_frame.len);
         m_frame.len |= static_cast<uint16_t>(byte) << 8;
         m_ckA = static_cast<uint8_t>(m_ckA + byte);
         m_ckB = static_cast<uint8_t>(m_ckB + m_ckA);
-        /* Honest about the buffer: the frame is still consumed, and counted, so
-         * an over-long message costs one drop rather than the stream. */
-        m_overlong = m_frame.len > kMaxPayload;
-        m_got      = 0;
-        m_state    = m_frame.len == 0 ? State::CkA : State::Payload;
+        /* A length that cannot be right is refused here, not walked. Walking it
+         * trusts sixteen bits nothing has checked yet: a frame cut short on the
+         * line runs straight into the next one's sync pair, B5 62 reads as a
+         * length of 25269, and the decoder then sat through 25 KB of healthy
+         * stream waiting for a checksum -- five minutes of "silent receiver",
+         * a baud scan and a reset of a module that had never stopped talking.
+         * The two bytes go back through the hunt, because they may be exactly
+         * that sync pair. */
+        const Def *def = definition(m_frame.cls, m_frame.id);
+        if (m_frame.len > kMaxPayload ||
+            (def != nullptr && (m_frame.len < def->minLen || m_frame.len > def->maxLen))) {
+            ++m_badLength;
+            m_frame.payload = {};
+            warn(Drop::Length);
+            reset();
+            feed(lenLo);
+            feed(byte);
+            return;
+        }
+        m_got   = 0;
+        m_state = m_frame.len == 0 ? State::CkA : State::Payload;
         return;
+    }
 
     case State::Payload:
-        if (!m_overlong) {
-            m_payload[m_got] = byte;
-        }
-        ++m_got;
+        m_payload[m_got++] = byte;
         m_ckA = static_cast<uint8_t>(m_ckA + byte);
         m_ckB = static_cast<uint8_t>(m_ckB + m_ckA);
         if (m_got >= m_frame.len) {
@@ -93,7 +107,7 @@ void Decoder::feed(uint8_t byte)
              * first byte already disagreed, and leaving it uncounted made "the
              * line is corrupt" look like "the receiver is quiet". */
             ++m_badChecksum;
-            m_frame.payload = std::span<const uint8_t>(m_payload, m_overlong ? 0 : m_frame.len);
+            m_frame.payload = std::span<const uint8_t>(m_payload, m_frame.len);
             warn(Drop::Checksum);
             reset();
             return;
@@ -108,7 +122,7 @@ void Decoder::feed(uint8_t byte)
         if (byte != m_ckB) {
             ++m_badChecksum;
             if (m_listener != nullptr) {
-                m_frame.payload = std::span<const uint8_t>(m_payload, m_overlong ? 0 : m_frame.len);
+                m_frame.payload = std::span<const uint8_t>(m_payload, m_frame.len);
                 m_listener->onDrop(Drop::Checksum, m_frame);
             }
             reset();
@@ -122,25 +136,9 @@ void Decoder::feed(uint8_t byte)
 
 void Decoder::emit()
 {
-    if (m_overlong) {
-        ++m_badLength;
-        m_frame.payload = {};
-        return warn(Drop::Length);
-    }
-
+    /* The length was held to the buffer and to the definition when it was read,
+     * so what reaches here is a frame. */
     m_frame.payload = std::span<const uint8_t>(m_payload, m_frame.len);
-
-    /* Length against the definition, here rather than in every handler. A
-     * message this firmware does not know is passed on ungated: it is the
-     * receiver's own output or a u-center frame, and the length gate exists to
-     * protect the readers of specific fields, not to police the protocol. */
-    if (const Def *def = definition(m_frame.cls, m_frame.id)) {
-        if (m_frame.len < def->minLen || m_frame.len > def->maxLen) {
-            ++m_badLength;
-            return warn(Drop::Length);
-        }
-    }
-
     ++m_frames;
     if (m_listener != nullptr) {
         m_listener->onFrame(m_frame);
