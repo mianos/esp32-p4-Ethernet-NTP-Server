@@ -69,7 +69,9 @@ private:
     static constexpr int64_t  kPeriodUs   = 60000000;
     static constexpr uint32_t kMinSamples = 4;
 
-    void decayTo(int64_t nowUs);
+    static void decayed(int64_t nowUs, int64_t &holdNs, int64_t &lastUs);
+    /* Decay to now, raise to at least raiseToNs, and return the claim. */
+    int64_t settle(int64_t nowUs, int64_t raiseToNs);
 
     portMUX_TYPE          m_lock   = portMUX_INITIALIZER_UNLOCKED;
     int64_t               m_holdNs = kStartNs;
