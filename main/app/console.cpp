@@ -1,4 +1,4 @@
-#include "console.h"
+#include "app/console.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -19,14 +19,14 @@
 #include "cmd_nvs.h"
 #include "cmd_system.h"
 
-#include "clock_source.h"
-#include "config_apply.h"
-#include "eth_link.h"
-#include "gps_time.h"
-#include "ptp.h"
-#include "net_addr.h"
-#include "net_state.h"
-#include "settings.h"
+#include "clock/clock_source.h"
+#include "app/config_apply.h"
+#include "net/eth_link.h"
+#include "gps/gps_time.h"
+#include "ptp/ptp.h"
+#include "net/net_addr.h"
+#include "net/net_state.h"
+#include "app/settings.h"
 
 namespace {
 

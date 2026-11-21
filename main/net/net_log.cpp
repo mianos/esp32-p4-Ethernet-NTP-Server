@@ -15,7 +15,7 @@
  * Off unless both a host and a port are configured. Nothing here is a control
  * path: the console is unchanged and receives the same bytes.
  */
-#include "net_log.h"
+#include "net/net_log.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -26,7 +26,7 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "lwip/sockets.h"
-#include "settings.h"
+#include "app/settings.h"
 
 namespace {
 

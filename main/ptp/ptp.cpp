@@ -1,9 +1,9 @@
-#include "ptp.h"
+#include "ptp/ptp.h"
 
 #include "soc/emac_dma_struct.h"
 
-#include "eth_link.h"
-#include "gps_time.h"
+#include "net/eth_link.h"
+#include "gps/gps_time.h"
 
 #include "esp_attr.h"
 #include "esp_eth_mac_esp.h"

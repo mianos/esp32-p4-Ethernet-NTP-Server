@@ -33,7 +33,7 @@ receiver at all, as a stratum-3 server.
 
 Ethernet is the board's own RJ45 through its own PHY, so there is nothing to
 wire: plug it in. The RMII pins are fixed in the `kEthPins` table at the top of
-`main/eth_link.cpp`:
+`main/net/eth_link.cpp`:
 
 | Signal      | GPIO | Notes                     |
 |-------------|------|---------------------------|
@@ -52,7 +52,7 @@ PHY address 1, the IP101 default. If you swap boards, that table is the only
 thing to change.
 
 The receiver goes on UART1 and one interrupt pin. These are `kTxPin`, `kRxPin`
-and `kPpsPin` at the top of `main/gps_time.cpp`:
+and `kPpsPin` at the top of `main/gps/gps_time.cpp`:
 
 | Module pin | GPIO | Direction | Carries |
 |---|---|---|---|
@@ -874,25 +874,25 @@ the box. See `viewer/README.md`.
 
 | File | Contents |
 |---|---|
-| `main/main.cpp` | boot order only: NVS, settings, netif + event loop, the GPS, the clock, then the link |
-| `main/eth_link.[ch]pp` | EMAC + PHY bring-up, pin map, PHY diagnostics, event handlers, netif, web server and responder start, OTA confirmation |
-| `main/settings.[ch]pp` | `Settings` — the stored keys and their defaults |
-| `main/config_apply.cpp` | the sequence that runs after a setting changes: hostname, address, time source |
-| `main/web_server.[ch]pp` | the HTTP handlers |
-| `main/console.[ch]pp` | the serial console and its commands |
-| `main/time_ref.h` | what the responder may claim, and the interface both sources implement |
-| `main/gps_time.[ch]pp` | UART1 and the PPS interrupt, the UBX parsers, the anchor, the servo, the slew |
-| `main/ntp_time.[ch]pp` | upstream SNTP client |
-| `main/clock_source.[ch]pp` | which reference owns the clock, and the hand-over between them |
-| `main/ntp_server.[ch]pp` | the UDP/123 responder, reply builder, rate limiter |
-| `main/ntp_control.[ch]pp` | the mode 6 control queries |
-| `main/tx_lag.[ch]pp` | the transmit-path measurement the reply stamps are corrected by |
-| `main/serve_path.[ch]pp` | how far the served time actually moves, for the dispersion |
-| `main/net_log.[ch]pp` | the UDP log sink |
-| `main/net_addr.[ch]pp` | IPv4 literal parsing and validation |
-| `main/net_state.[ch]pp` | read-only link and address accessors |
-| `main/ubx.[ch]pp` | UBX framing: byte state machine, checksum gate |
-| `main/text.h` | formatting and parsing without a format string |
+| `main/app/main.cpp` | boot order only: NVS, settings, netif + event loop, the GPS, the clock, then the link |
+| `main/net/eth_link.[ch]pp` | EMAC + PHY bring-up, pin map, PHY diagnostics, event handlers, netif, web server and responder start, OTA confirmation |
+| `main/app/settings.[ch]pp` | `Settings` — the stored keys and their defaults |
+| `main/app/config_apply.cpp` | the sequence that runs after a setting changes: hostname, address, time source |
+| `main/http/web_server.[ch]pp` | the HTTP handlers |
+| `main/app/console.[ch]pp` | the serial console and its commands |
+| `main/clock/time_ref.h` | what the responder may claim, and the interface both sources implement |
+| `main/gps/gps_time.[ch]pp` | UART1 and the PPS interrupt, the UBX parsers, the anchor, the servo, the slew |
+| `main/clock/ntp_time.[ch]pp` | upstream SNTP client |
+| `main/clock/clock_source.[ch]pp` | which reference owns the clock, and the hand-over between them |
+| `main/ntp/ntp_server.[ch]pp` | the UDP/123 responder, reply builder, rate limiter |
+| `main/ntp/ntp_control.[ch]pp` | the mode 6 control queries |
+| `main/ntp/tx_lag.[ch]pp` | the transmit-path measurement the reply stamps are corrected by |
+| `main/ntp/serve_path.[ch]pp` | how far the served time actually moves, for the dispersion |
+| `main/net/net_log.[ch]pp` | the UDP log sink |
+| `main/net/net_addr.[ch]pp` | IPv4 literal parsing and validation |
+| `main/net/net_state.[ch]pp` | read-only link and address accessors |
+| `main/gps/ubx.[ch]pp` | UBX framing: byte state machine, checksum gate |
+| `main/app/text.h` | formatting and parsing without a format string |
 | `tools/ntp_test.py` | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
 | `tools/ubx.py`, `tools/ubx_test.py` | host twin of the decoder, and its tests |
 | `viewer/` | the local page |

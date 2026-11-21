@@ -43,7 +43,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
-#include "settings.h"
+#include "app/settings.h"
 
 /* Local ISO-8601 timestamp ("2026-11-11T13:43:22+1100"), the format /healthz,
  * POST /ntp/sync and the sync log line all use. */

@@ -4,7 +4,7 @@
 These exist because the bridge's sniffer was a byte search, and every case below
 is one it got wrong: a frame split across two reads, a sync pair occurring inside
 a payload, a corrupt byte, a frame that claims the wrong length. The same state
-machine is on both sides (tools/ubx.py and main/ubx.cpp), so a case here is a
+machine is on both sides (tools/ubx.py and main/gps/ubx.cpp), so a case here is a
 case against the firmware's shape even though the code under test is the host
 twin.
 
@@ -130,11 +130,11 @@ class Framing(unittest.TestCase):
 
 
 class Tables(unittest.TestCase):
-    """tools/ubx.py and main/ubx.h must agree, or a tool passes what the board
+    """tools/ubx.py and main/gps/ubx.h must agree, or a tool passes what the board
     drops."""
 
     def test_definitions_match(self):
-        header = (HERE / "main" / "ubx.h").read_text()
+        header = (HERE / "main" / "gps" / "ubx.h").read_text()
         found = set()
         for match in re.finditer(
             r"\{\s*0x([0-9A-Fa-f]{2}),\s*0x([0-9A-Fa-f]{2}),\s*(\d+),\s*(\d+),\s*\"([A-Za-z0-9-]+)\"\s*\}",

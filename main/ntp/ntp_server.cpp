@@ -1,9 +1,9 @@
-#include "ntp_server.h"
+#include "ntp/ntp_server.h"
 
-#include "ptp.h"
+#include "ptp/ptp.h"
 
-#include "clock_source.h"
-#include "ntp_control.h"
+#include "clock/clock_source.h"
+#include "ntp/ntp_control.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -22,12 +22,12 @@
 #include "lwip/sockets.h"
 #include "sdkconfig.h"
 
-#include "gps_time.h"
-#include "ntp_time.h"
-#include "serve_path.h"
-#include "tx_lag.h"
-#include "settings.h"
-#include "text.h"
+#include "gps/gps_time.h"
+#include "clock/ntp_time.h"
+#include "ntp/serve_path.h"
+#include "ntp/tx_lag.h"
+#include "app/settings.h"
+#include "app/text.h"
 
 namespace {
 

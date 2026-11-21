@@ -1,4 +1,4 @@
-#include "serve_path.h"
+#include "ntp/serve_path.h"
 
 #include <algorithm>
 

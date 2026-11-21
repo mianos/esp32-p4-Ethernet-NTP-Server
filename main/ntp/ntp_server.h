@@ -32,9 +32,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "ntp_control.h"
-#include "tx_lag.h"
-#include "time_ref.h"
+#include "ntp/ntp_control.h"
+#include "ntp/tx_lag.h"
+#include "clock/time_ref.h"
 
 /* Only a reference is taken to it, and lwIP is a heavy include for a header. */
 struct sockaddr_storage;

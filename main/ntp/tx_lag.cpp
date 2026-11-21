@@ -1,4 +1,4 @@
-#include "tx_lag.h"
+#include "ntp/tx_lag.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -13,7 +13,7 @@
 #include "esp_timer.h"
 #include "lwip/sockets.h"
 
-#include "net_state.h"
+#include "net/net_state.h"
 
 namespace {
 

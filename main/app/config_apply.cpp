@@ -1,17 +1,17 @@
-#include "config_apply.h"
+#include "app/config_apply.h"
 
 #include "esp_log.h"
 #include "esp_netif.h"
 
-#include "clock_source.h"
-#include "eth_link.h"
-#include "net_log.h"
-#include "net_state.h"
-#include "ntp_server.h"
-#include "ntp_time.h"
-#include "ptp.h"
-#include "settings.h"
-#include "settings.h"
+#include "clock/clock_source.h"
+#include "net/eth_link.h"
+#include "net/net_log.h"
+#include "net/net_state.h"
+#include "ntp/ntp_server.h"
+#include "clock/ntp_time.h"
+#include "ptp/ptp.h"
+#include "app/settings.h"
+#include "app/settings.h"
 
 namespace {
 

@@ -1,4 +1,4 @@
-#include "ntp_time.h"
+#include "clock/ntp_time.h"
 
 #include <cstdio>
 #include <ctime>
@@ -7,10 +7,10 @@
 #include "esp_netif.h"
 #include "esp_sntp.h"
 
-#include "clock_source.h"
+#include "clock/clock_source.h"
 #include "lwip/ip_addr.h"
-#include "net_state.h"
-#include "text.h"
+#include "net/net_state.h"
+#include "app/text.h"
 
 namespace {
 

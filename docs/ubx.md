@@ -1,7 +1,7 @@
 # UBX framing
 
 The receiver's line and the u-center bridge both carry this, and both feed one
-decoder (`main/ubx.cpp`). This note is what that code assumes, and why.
+decoder (`main/gps/ubx.cpp`). This note is what that code assumes, and why.
 
 ## A frame
 
@@ -102,7 +102,7 @@ sync pair inside a payload, a corrupt byte in the header or the payload, a
 truncated frame, an over-long one, a frame cut short ahead of the next one's
 sync, and the length gates. `tools/ubx.py` is the
 host twin the tests run against and the tools now use; a table-parity test keeps
-it and `main/ubx.h` in step.
+it and `main/gps/ubx.h` in step.
 
 ## Attribution
 

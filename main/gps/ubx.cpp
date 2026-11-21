@@ -7,7 +7,7 @@
  * 0xB5 in the second sync state stays in it, because `B5 B5 62` is a real frame
  * with a byte of noise in front.
  */
-#include "ubx.h"
+#include "gps/ubx.h"
 
 namespace ubx {
 

@@ -1,12 +1,12 @@
-#include "clock_source.h"
+#include "clock/clock_source.h"
 
 #include <ctime>
 
 #include "esp_log.h"
 #include "esp_timer.h"
 
-#include "ntp_time.h"
-#include "settings.h"
+#include "clock/ntp_time.h"
+#include "app/settings.h"
 
 namespace {
 

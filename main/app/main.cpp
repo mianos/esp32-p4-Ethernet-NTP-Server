@@ -41,12 +41,12 @@
 #include "esp_netif.h"
 #include "nvs_flash.h"
 
-#include "clock_source.h"
-#include "console.h"
-#include "eth_link.h"
-#include "gps_time.h"
-#include "ntp_time.h"
-#include "settings.h"
+#include "clock/clock_source.h"
+#include "app/console.h"
+#include "net/eth_link.h"
+#include "gps/gps_time.h"
+#include "clock/ntp_time.h"
+#include "app/settings.h"
 
 namespace {
 

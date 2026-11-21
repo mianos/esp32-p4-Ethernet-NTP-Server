@@ -1,4 +1,4 @@
-#include "net_state.h"
+#include "net/net_state.h"
 
 #if CONFIG_LWIP_IPV6
 #include <cctype>

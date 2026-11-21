@@ -22,19 +22,19 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#include "eth_link.h"
+#include "net/eth_link.h"
 
 #include "soc/emac_reg.h"
 #include "soc/soc.h"
-#include "net_addr.h"
-#include "ptp.h"
-#include "net_log.h"
-#include "net_state.h"
-#include "ntp_server.h"
-#include "ntp_time.h"
-#include "settings.h"
-#include "web_server.h"
-#include "text.h"
+#include "net/net_addr.h"
+#include "ptp/ptp.h"
+#include "net/net_log.h"
+#include "net/net_state.h"
+#include "ntp/ntp_server.h"
+#include "clock/ntp_time.h"
+#include "app/settings.h"
+#include "http/web_server.h"
+#include "app/text.h"
 
 namespace {
 

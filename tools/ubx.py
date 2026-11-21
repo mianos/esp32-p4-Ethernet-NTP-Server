@@ -1,4 +1,4 @@
-"""UBX framing, the same rules as main/ubx.cpp.
+"""UBX framing, the same rules as main/gps/ubx.cpp.
 
 The tools used to search a buffer for b"\\xb5\\x62" and trust whatever length
 followed, then delete up to it -- so one false sync inside a payload derailed
@@ -136,7 +136,7 @@ class Decoder:
             self._buf = bytearray()
             self._got = 0
             # A length that cannot be right is refused here, not walked: see
-            # main/ubx.cpp. The two bytes go back through the hunt because they
+            # main/gps/ubx.cpp. The two bytes go back through the hunt because they
             # may be the next frame's sync pair.
             limit = DEFS.get((self._cls, self._id))
             if self._len > MAX_PAYLOAD or (

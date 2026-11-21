@@ -1,7 +1,7 @@
-#include "net_log.h"
-#include "settings.h"
+#include "net/net_log.h"
+#include "app/settings.h"
 
-#include "net_addr.h"
+#include "net/net_addr.h"
 
 #include <cstdlib>
 #include <cstring>

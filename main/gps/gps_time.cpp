@@ -1,6 +1,6 @@
-#include "gps_time.h"
+#include "gps/gps_time.h"
 
-#include "ptp.h"
+#include "ptp/ptp.h"
 
 #include <cerrno>
 #include <cmath>
@@ -24,10 +24,10 @@
 #include "esp_timer.h"
 #include "hal/mcpwm_ll.h"
 
-#include "clock_source.h"
-#include "serve_path.h"
-#include "ntp_time.h"
-#include "settings.h"
+#include "clock/clock_source.h"
+#include "ntp/serve_path.h"
+#include "clock/ntp_time.h"
+#include "app/settings.h"
 
 namespace {
 

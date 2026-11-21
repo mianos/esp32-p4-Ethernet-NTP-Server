@@ -1,10 +1,10 @@
-#include "ntp_control.h"
+#include "ntp/ntp_control.h"
 
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
-#include "time_ref.h"
+#include "clock/time_ref.h"
 
 namespace {
 

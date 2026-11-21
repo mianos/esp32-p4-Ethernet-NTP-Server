@@ -1,6 +1,6 @@
-#include "web_server.h"
+#include "http/web_server.h"
 
-#include "ptp.h"
+#include "ptp/ptp.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -19,18 +19,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "clock_source.h"
-#include "config_apply.h"
-#include "eth_link.h"
-#include "gps_time.h"
-#include "net_log.h"
-#include "net_state.h"
-#include "ntp_server.h"
-#include "ntp_time.h"
-#include "serve_path.h"
-#include "tx_lag.h"
-#include "settings.h"
-#include "text.h"
+#include "clock/clock_source.h"
+#include "app/config_apply.h"
+#include "net/eth_link.h"
+#include "gps/gps_time.h"
+#include "net/net_log.h"
+#include "net/net_state.h"
+#include "ntp/ntp_server.h"
+#include "clock/ntp_time.h"
+#include "ntp/serve_path.h"
+#include "ntp/tx_lag.h"
+#include "app/settings.h"
+#include "app/text.h"
 
 namespace {
 

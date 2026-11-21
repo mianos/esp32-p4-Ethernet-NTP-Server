@@ -85,9 +85,9 @@
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 
-#include "text.h"
-#include "time_ref.h"
-#include "ubx.h"
+#include "app/text.h"
+#include "clock/time_ref.h"
+#include "gps/ubx.h"
 
 class GpsTime : private ubx::Listener {
 public:
