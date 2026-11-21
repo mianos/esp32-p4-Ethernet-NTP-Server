@@ -1,0 +1,5 @@
+# Formatting only: git blame --ignore-revs-file .git-blame-ignore-revs
+# (or: git config blame.ignoreRevsFile .git-blame-ignore-revs)
+
+# format: write the style down and apply it
+772135543a9e749fe82155a4280c85ee31cb93ee
