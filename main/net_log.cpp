@@ -64,7 +64,7 @@ void drainTask(void *)
     char buf[kLineMax];
     while (true) {
         const size_t got = xStreamBufferReceive(m_ring, buf, sizeof(buf), portMAX_DELAY);
-        if (got > 0 && m_sock >= 0) {
+        if (got > 0 && m_sock >= 0 && m_to.sin_port != 0) {
             sendto(m_sock, buf, got, 0, reinterpret_cast<sockaddr *>(&m_to), sizeof(m_to));
         }
     }
@@ -79,7 +79,11 @@ esp_err_t net_log::start()
     unsigned long      port     = 0;
     if (host.empty() || std::sscanf(settings.logPort().c_str(), "%lu", &port) != 1 || port == 0 ||
         port > 65535) {
-        return ESP_OK; /* not configured: nothing to do */
+        /* Not configured -- which is also how a running sink is switched off.
+         * This returned with the socket and the old address still in place, so
+         * clearing logHost left the log going to it until the next boot. */
+        m_to = {};
+        return ESP_OK;
     }
 
     /* A name would need the resolver here, so only dotted quads are accepted
@@ -114,6 +118,12 @@ esp_err_t net_log::start()
 
     if (xTaskCreate(&drainTask, "netlog", 3072, nullptr, kTaskPrio, nullptr) != pdPASS) {
         ESP_LOGW(TAG, "no task");
+        /* Undone, or the next call sees a socket and reports a sink that has
+         * nothing draining it. */
+        vStreamBufferDelete(m_ring);
+        m_ring = nullptr;
+        close(m_sock);
+        m_sock = -1;
         return ESP_FAIL;
     }
 

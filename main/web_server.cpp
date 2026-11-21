@@ -1281,21 +1281,18 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
     bool hard = false;
     bool power = false;
     bool defaults = false;
-    const int len = req->content_len;
-    if (len > 0 && len < 512) {
-        /* An array rather than a std::string: httpd_req_recv takes memory and
-         * a length, and the reply is parsed from what it says it wrote. */
-        char buf[512];
-        const int got = httpd_req_recv(req, buf, len);
-        if (got > 0) {
-            JsonWrapper doc = JsonWrapper::Parse(std::string(buf, static_cast<size_t>(got)));
-            if (!doc.Empty()) {
-                doc.GetField("cold", cold);
-                doc.GetField("hardware", hard);
-                doc.GetField("power", power);
-                doc.GetField("defaults", defaults);
-            }
+    /* A body that is there has to be readable. Falling through on one that was
+     * too long, cut short or not JSON queued a hot start and answered 200 to a
+     * caller who had asked for something else. */
+    if (req->content_len > 0) {
+        JsonWrapper doc;
+        if (!readJsonBodyTimed(req, doc)) {
+            return ESP_FAIL;
         }
+        doc.GetField("cold", cold);
+        doc.GetField("hardware", hard);
+        doc.GetField("power", power);
+        doc.GetField("defaults", defaults);
     }
 
     if (defaults) {
@@ -1552,14 +1549,26 @@ esp_err_t NtpWebServer::firmware_post_handler(httpd_req_t *req)
 
     /* The same shape, and the only place in the image where the size of the
      * read is a design decision: esp_ota_write takes the chunk as it comes. */
-    char buf[kOtaChunkBytes];
-    int  remaining = req->content_len;
-    int  written   = 0;
+    /* How long an upload may send nothing before it is abandoned. Handlers run
+     * on the one httpd task, so a client that went away mid-body without a FIN
+     * used to hold this loop -- and every other endpoint -- until a reboot. */
+    constexpr int64_t kOtaIdleUs = 15000000;
+
+    char    buf[kOtaChunkBytes];
+    int     remaining = req->content_len;
+    int     written   = 0;
+    int64_t lastData  = esp_timer_get_time();
     while (remaining > 0) {
         const int got = httpd_req_recv(req, buf, std::min(remaining, kOtaChunkBytes));
         if (got == HTTPD_SOCK_ERR_TIMEOUT) {
-            continue; /* httpd already waited its recv timeout; keep going */
+            if (esp_timer_get_time() - lastData > kOtaIdleUs) {
+                esp_ota_abort(handle);
+                ESP_LOGW(TAG, "firmware upload stalled at %d bytes, abandoned", written);
+                return sendJsonError(req, 408, "request body stalled");
+            }
+            continue;
         }
+        lastData = esp_timer_get_time();
         if (got <= 0) {
             esp_ota_abort(handle);
             return sendJsonError(req, 400, "request body truncated");

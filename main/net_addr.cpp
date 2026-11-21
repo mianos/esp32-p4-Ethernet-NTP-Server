@@ -1,5 +1,7 @@
 #include "net_addr.h"
 
+#include <algorithm>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -57,7 +59,10 @@ bool parseCidr(const std::string &text, esp_ip4_addr_t &addr, uint8_t &prefix)
     }
 
     const std::string len = text.substr(slash + 1);
-    if (len.size() > 2) {
+    /* Digits only: strtol stops at the first thing it does not like, so "2x"
+     * was a /2 and the typo became a 192.0.0.0 mask on a static box. */
+    if (len.size() > 2 ||
+        !std::all_of(len.begin(), len.end(), [](char c) { return c >= '0' && c <= '9'; })) {
         return false;
     }
     const long value = std::strtol(len.c_str(), nullptr, 10);

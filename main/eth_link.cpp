@@ -224,16 +224,40 @@ bool imagePendingVerify()
     return state == ESP_OTA_IMG_PENDING_VERIFY;
 }
 
+/* How many holdoffs an image may spend unreachable before it is given up on:
+ * five of them is ten minutes. */
+constexpr int kConfirmTries = 5;
+int           s_confirmTries = 0;
+
 void confirmTimerBody(void *)
 {
     if (!imagePendingVerify()) {
         return;
     }
 
+    /* Reachable means an address on a link that is up. A static address is
+     * programmed before the link exists, so the address alone confirmed an
+     * image whose Ethernet did not work, with the cable out, two minutes after
+     * boot -- and cancelled the only way back from it. */
+    if (!EthernetLink::instance().reachable()) {
+        if (++s_confirmTries >= kConfirmTries) {
+            /* Nothing else reboots an image that runs but cannot be reached,
+             * and the bootloader only returns to the old slot on a reboot. */
+            ESP_LOGE(TAG, "OTA image unreachable for %lld s: rolling back",
+                     static_cast<long long>(kConfirmTries * kConfirmHoldoffUs / 1000000));
+            esp_ota_mark_app_invalid_rollback_and_reboot();
+            return;
+        }
+        ESP_LOGW(TAG, "OTA image not confirmed: no link or address yet (%d of %d)",
+                 s_confirmTries, kConfirmTries);
+        esp_timer_start_once(s_confirmTimer, kConfirmHoldoffUs);
+        return;
+    }
+
     const esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "OTA image confirmed after %lld s: rollback cancelled",
-                 static_cast<long long>(kConfirmHoldoffUs / 1000000));
+                 static_cast<long long>((s_confirmTries + 1) * kConfirmHoldoffUs / 1000000));
     } else {
         ESP_LOGW(TAG, "could not confirm the OTA image: %s", esp_err_to_name(err));
     }
@@ -735,6 +759,11 @@ void EthernetLink::onGotIp6(const ip_event_got_ip6_t &event)
 /* -------------------------------------------------------------------------
  * Status task: says what the demo is waiting for, then goes quiet.
  * ---------------------------------------------------------------------- */
+bool EthernetLink::reachable() const
+{
+    return m_haveIp.load(std::memory_order_relaxed) && net_state::linkUp();
+}
+
 void EthernetLink::statusTaskEntry(void *arg)
 {
     static_cast<EthernetLink *>(arg)->statusLoop();
@@ -747,6 +776,10 @@ void EthernetLink::statusLoop()
         vTaskDelay(pdMS_TO_TICKS(kStatusPollMs));
         if (m_haveIp.load(std::memory_order_relaxed)) {
             m_linkDownSinceUs = 0; /* the lease is in: quiet, but still watching */
+            /* A recovery earns the budget back. It was per boot, so five bad
+             * minutes anywhere in the uptime spent it for good. */
+            m_autoRestarts     = 0;
+            m_restartCapLogged = false;
             continue;
         }
 
@@ -767,7 +800,7 @@ void EthernetLink::statusLoop()
         if (nowUs - m_linkDownSinceUs < kLinkDownRestartUs || m_restarting) {
             continue;
         }
-        if (m_restarts >= kMaxRestarts) {
+        if (m_autoRestarts >= kMaxRestarts) {
             if (!m_restartCapLogged) {
                 m_restartCapLogged = true;
                 ESP_LOGE(TAG, "link down after %" PRIu32 " restarts -- needs a power cycle",
@@ -775,6 +808,7 @@ void EthernetLink::statusLoop()
             }
             continue;
         }
+        ++m_autoRestarts;
         restart("link down");
         m_linkDownSinceUs = esp_timer_get_time();
     }

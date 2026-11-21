@@ -177,6 +177,15 @@ bool applyOne(const char *key, const std::string &value)
 
     const std::string host = s_ctx.settings->hostname();
 
+    /* Refused before it is applied. applyJson shortens a long value and keeps
+     * it, so the comparison below then said "nothing changed" about a value
+     * that was now live in RAM and would ride out on the next save. */
+    if (std::strcmp(key, "hostname") != 0 && value.size() > Settings::kMaxValueLen) {
+        std::printf("'%s': value longer than %u characters -- nothing changed\n", key,
+                    static_cast<unsigned>(Settings::kMaxValueLen));
+        return false;
+    }
+
     JsonWrapper doc;
     doc.AddItem(key, value);
     s_ctx.settings->applyJson(doc);
@@ -489,7 +498,7 @@ int cmdGps(void *, int argc, char **argv)
                     static_cast<unsigned>(st.fixType), static_cast<unsigned>(st.satellites),
                     st.anchored ? "yes" : "no", st.timeMode.c_str());
         std::printf("survey: %s, %.0f s of %.0f s, %u obs\n",
-                    st.svinValid ? "valid" : "not validated", st.svinAgeS, st.svinTargetS,
+                    st.svinValid ? "valid" : "not validated", st.svinDurS, st.svinTargetS,
                     static_cast<unsigned>(st.svinObs));
         return 0;
     }
@@ -542,8 +551,10 @@ int cmdGps(void *, int argc, char **argv)
         }
         char         *end = nullptr;
         const long    mask = std::strtol(argv[2], &end, 16);
-        if (end == argv[2] || mask <= 0 || mask > 0xFF) {
-            std::printf("'%s' is not a hex mask, 1..ff\n", argv[2]);
+        /* The same seven constellation bits HTTP takes, and nothing after
+         * the number. */
+        if (end == argv[2] || *end != '\0' || mask <= 0 || mask > 0x7F) {
+            std::printf("'%s' is not a hex mask, 1..7f\n", argv[2]);
             return 1;
         }
         gps.requestGnss(static_cast<uint8_t>(mask));
@@ -555,7 +566,15 @@ int cmdGps(void *, int argc, char **argv)
             std::printf("usage: gps suppress <seconds>  (0 to stop)\n");
             return 1;
         }
-        const uint32_t seconds = static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10));
+        /* The same hour HTTP allows, and digits only: "-1" through strtoul is
+         * 136 years of ignored edges, and a typo read as 0 ends a running test. */
+        char               *end     = nullptr;
+        const unsigned long parsed  = std::strtoul(argv[2], &end, 10);
+        if (argv[2][0] < '0' || argv[2][0] > '9' || *end != '\0' || parsed > 3600) {
+            std::printf("gps suppress: 0..3600 seconds\n");
+            return 1;
+        }
+        const uint32_t seconds = static_cast<uint32_t>(parsed);
         gps.suppressPps(seconds);
         std::printf("edges %s\n", seconds == 0 ? "counted again" : "ignored: this is a holdover "
                                                                     "and the reply says so");

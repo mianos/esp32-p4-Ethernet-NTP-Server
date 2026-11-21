@@ -67,6 +67,9 @@ public:
 
     /* How many times the link has been restarted this boot. */
     uint32_t restarts() const { return m_restarts; }
+    /* An address on a link that is up: what an OTA'd image has to show before
+     * it is kept. */
+    bool reachable() const;
 
 private:
     EthernetLink() = default;
@@ -122,6 +125,7 @@ private:
      * is atomic; the rest is only touched by whoever holds the guard. */
     std::atomic<bool> m_restarting{false};
     uint32_t          m_restarts     = 0;
+    uint32_t          m_autoRestarts = 0; /* by the link watchdog since the last address */
     int64_t           m_lastRestartUs = 0;
     /* When the current run of "no lease" began, and whether the attempt cap has
      * already been reported (it would otherwise repeat every poll). */
