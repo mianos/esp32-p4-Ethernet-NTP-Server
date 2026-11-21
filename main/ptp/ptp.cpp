@@ -254,7 +254,9 @@ uint8_t utcOffset()
     /* GPS-UTC is 18 s; TAI is GPS plus 19. The receiver's own figure is used
      * when it has one, and the known constant when NAV-TIMELS is silent --
      * announcing 19 would put a slave 18 s out. */
-    const int leap   = static_cast<int>(GpsTime::instance().status().leapSeconds);
+    /* The one byte, not status(): that is two kilobytes of this task's four,
+     * every second, and it left 156 bytes of stack. */
+    const int leap   = static_cast<int>(GpsTime::instance().leapSeconds());
     const int offset = (leap > 0 ? leap : 18) + 19;
     return static_cast<uint8_t>(offset > 127 ? 127 : offset);
 }
@@ -315,13 +317,15 @@ esp_err_t sendPtp(const uint8_t dest[6], const uint8_t *body, size_t length, int
 
 void announcedQuality(uint8_t &clockClass, uint8_t &accuracy, uint8_t &timeSource)
 {
-    const GpsTime::Status     st    = GpsTime::instance().status();
+    /* The reply facts carry both answers: locked is the lock test with the
+     * dispersion gate applied, and demoted is the lock test passing while the
+     * gate does not. status() said the same and cost this task its stack. */
     const GpsTime::ReplyFacts facts = GpsTime::instance().replyFacts();
-    if (st.locked && !facts.demoted) {
+    if (facts.locked) {
         clockClass = 6;
         accuracy   = 0x25; /* 10 us: the stamps are interrupt- and software-class */
         timeSource = 0x20;
-    } else if (st.locked) {
+    } else if (facts.demoted) {
         clockClass = 7;    /* holdover, inside the window */
         accuracy   = 0x27; /* 100 us */
         timeSource = 0x20;

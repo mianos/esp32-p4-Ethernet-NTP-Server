@@ -513,6 +513,10 @@ public:
     };
     ReplyFacts replyFacts() const;
 
+    /* The GPS-UTC offset as NAV-TIMELS last gave it, zero before it has. One
+     * byte, for a caller that has no use for the rest of status(). */
+    int8_t leapSeconds() const { return m_leapSeconds; }
+
     /* The anchor plus elapsed monotonic time. False when no edge has been
      * paired with a NAV-PVT yet, which is what the reference turns into
      * "not locked". */
