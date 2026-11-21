@@ -839,7 +839,10 @@ void GpsTime::bridgeTask()
             {
                 if (f.cls == 0x05 && (f.id == 0x00 || f.id == 0x01) && *wanted != 0 &&
                     f.len >= 2 && f.u8(0) == 0x06 && f.u8(1) == 0x00) {
-                    if (f.id == 0x00) {
+                    /* 0x01 is ACK-ACK and 0x00 the NAK. They were the other
+                     * way round here, so an accepted rate change was dropped
+                     * and a refused one followed. */
+                    if (f.id == 0x01) {
                         *acked = true;
                         *atUs  = esp_timer_get_time();
                     } else {
@@ -1017,6 +1020,7 @@ void GpsTime::bridgeTask()
                 /* The receiver has almost certainly been asked to change too, so
                  * the next PPS pairing is not comparable with the last. */
                 m_frameSeen = false;
+                moduleDecoder.reset();
             }
             if (commsClient >= 0 && esp_timer_get_time() > commsDeadline) {
                 /* The receiver ignores MON-COMMS outright -- MON-VER, CFG-PRT and
@@ -1064,7 +1068,7 @@ void GpsTime::bridgeTask()
                         if (w > 0) {
                             sent += w;
                         } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-                            vTaskDelay(pdMS_TO_TICKS(2));
+                            vTaskDelay(1); /* one tick: 2 ms rounds to none at 100 Hz, a spin */
                         } else {
                             text::Buf<48> why;
                             text::put(why, "send errno {}", errno);
@@ -1571,7 +1575,6 @@ void GpsTime::task()
                  * stop, this is written back as soon as anything is heard
                  * again, on whatever rate that turns out to be. */
                 m_baudPrev            = m_baud;
-                m_baudRevertTo        = m_baud;
                 /* Four silence windows, not two. This module can take most of
                  * ten seconds to answer at a new rate -- measured: it accepted
                  * 115200, sent frames at 8.7 s, and had already been reverted at
@@ -1606,6 +1609,17 @@ void GpsTime::task()
             m_baud      = want;
             m_frameSeen = false;
             ++m_rescans;
+            /* The new rate is listened to until the revert deadline, or for a
+             * first-rate turn when only the host moved. The scan deadline was
+             * left stale here, so the very next pass walked off the rate that
+             * had just been asked for. */
+            m_decoder.reset();
+            m_nextScanUs = module ? m_baudRevertAtUs : nowUs + kFirstRateUs;
+            for (int i = 0; i < static_cast<int>(sizeof(kBauds) / sizeof(kBauds[0])); ++i) {
+                if (kBauds[i] == want) {
+                    m_baudIndex = i;
+                }
+            }
             if (module) {
                 ESP_LOGW(TAG, "receiver and host set to %u baud; reverting to %u if frames do not "
                               "resume", static_cast<unsigned>(want), static_cast<unsigned>(m_baudPrev));
@@ -1618,6 +1632,12 @@ void GpsTime::task()
         /* The revert. Either frames came back and the old rate is written to the
          * receiver again, or the wait expires and the next rate the scan lands
          * on is treated as the one to write it at. */
+        /* Frames at the new rate: the move took, and there is nothing to put
+         * back. The old rate used to be armed for write-back at the request, so
+         * the first frame at the new rate -- success -- was what undid it. */
+        if (m_baudRevertPending && m_frameSeen) {
+            m_baudRevertPending = false;
+        }
         if (m_baudRevertPending && nowUs >= m_baudRevertAtUs) {
             m_baudRevertPending = false;
             m_baudRevertTo      = m_baudPrev;
@@ -1778,7 +1798,10 @@ void GpsTime::task()
                         std::format("{},{},{},{},{}", haveMean ? m_svinMean[0] : m_fixedMean[0],
                                     haveMean ? m_svinMean[1] : m_fixedMean[1],
                                     haveMean ? m_svinMean[2] : m_fixedMean[2],
-                                    haveMean ? m_svinAcc : m_fixedAcc,
+                                    /* mm, like the wire: this stored the
+                                     * variance, and the boot re-sent it as an
+                                     * accuracy of kilometres. */
+                                    haveMean ? isqrt(m_svinAcc) : m_fixedAcc,
                                     m_holdValidated ? 1 : 0));
                 }
                 saveTimeMode();
@@ -2054,6 +2077,7 @@ void GpsTime::advanceBaud()
      * introduced it, and every boot after. */
     if (++m_scanSteps >= kCount) {
         m_scanSteps = 0;
+        ++m_silentPasses;
         /* A whole pass with nothing at all. The module can be left in a state
          * where it says nothing on any rate -- a port configuration half
          * written, a burst of line noise taken as a frame -- and then no entry
@@ -2064,7 +2088,10 @@ void GpsTime::advanceBaud()
          * back at its own defaults, NMEA at 9600, and the scan starts from
          * there; the message set is re-asserted when frames appear. */
         const int64_t nowUs = esp_timer_get_time();
-        if (nowUs - m_lastSweepUs > 60000000LL) {
+        /* Not on the first pass. That one ends before the rate the scan left
+         * has been listened to a second time, so a walk-off from a rate that
+         * was right all along reset a healthy receiver on the way back to it. */
+        if (m_silentPasses >= 2 && nowUs - m_lastSweepUs > 60000000LL) {
             m_lastSweepUs = nowUs;
             constexpr uint8_t rst[4] = {0x00, 0x00, 0x00, 0x00}; /* hot, hardware */
             for (uint32_t baud : kBauds) {
@@ -2525,7 +2552,7 @@ void GpsTime::pump(int64_t timeoutUs)
          * have been. One reader, and this side only waits for the parser to
          * report the ACK the bridge brought in. */
         if (m_bridgeActive) {
-            vTaskDelay(pdMS_TO_TICKS(2));
+            vTaskDelay(1); /* one tick: 2 ms rounds to none at 100 Hz, a spin */
             continue;
         }
         const int got = uart_read_bytes(kUart, buf, sizeof(buf), pdMS_TO_TICKS(20));
@@ -2596,8 +2623,9 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     ++m_secFrames;
     m_recentFrames[m_recentAt++ % 16] = static_cast<uint16_t>((cls << 8) | id);
     if (!m_frameSeen) {
-        m_frameSeen = true;
-        m_scanSteps = 0;
+        m_frameSeen    = true;
+        m_scanSteps    = 0;
+        m_silentPasses = 0;
         ESP_LOGI(TAG, "UBX frames arriving at %u baud", static_cast<unsigned>(m_baud));
         /* The rate the receiver is actually on, so the next boot starts here
          * instead of scanning for it. Saved only on a change: a rate that keeps
@@ -2695,7 +2723,10 @@ void GpsTime::adoptFixedPosition(long long x, long long y, long long z, unsigned
     for (int i = 0; i < 3; ++i) {
         m_fixedMean[i] = static_cast<int32_t>(i == 0 ? x : i == 1 ? y : z);
     }
-    m_fixedAcc      = acc;
+    /* Records written before the fix above hold the variance in mm squared. No
+     * survey may ask for worse than 60 m, so anything past that is one of
+     * those and has its root taken. */
+    m_fixedAcc      = acc > 60000 ? isqrt(static_cast<uint32_t>(std::min(acc, 0xFFFFFFFFul))) : acc;
     m_fixedValid    = true;
     m_holdWanted    = true;
     m_holdValidated = validated;

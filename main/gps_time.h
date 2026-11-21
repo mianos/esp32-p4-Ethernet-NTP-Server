@@ -817,6 +817,7 @@ private:
     int      m_baudIndex    = 0;
     /* Rates tried since the pass began; a pass is kCount of them. */
     int      m_scanSteps    = 0;
+    int      m_silentPasses = 0; /* whole passes of the list with no frame */
     /* Where the scan starts and where a wrap returns to: the rate the receiver
      * was last heard on. Bounds-checked against kBauds at begin(). */
     int      m_preferredIndex = 0;
