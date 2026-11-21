@@ -76,6 +76,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <ctime>
 #include <memory>
@@ -119,9 +120,9 @@ public:
     };
 
     /* What /healthz reports about the receiver, and what the reference is
-     * allowed to claim. Copied out under the same lock the PPS interrupt takes:
-     * the HTTP task reads these while the GPS task writes them. */
-    struct Status {
+     * allowed to claim. Plain data, because it is published as a snapshot: see
+     * publishStatus() and status(). */
+    struct StatusData {
         bool     timeValid   = false; /* the NAV-PVT date and time fields are good */
         uint8_t  fixType     = 0;     /* u-blox fix type: 0 none, 2 2D, 3 3D */
         uint8_t  satellites  = 0;
@@ -205,14 +206,6 @@ public:
         uint32_t tp5PeriodUs    = 0;
         uint32_t tp5Ratio       = 0;
 
-        /* What the receiver says it is, from UBX-MON-VER, and which of this
-         * firmware's two configuration messages it refused. An empty moduleId
-         * with both flags false means the question was never answered -- a
-         * module that ignores the poll is not the same as one that answered and
-         * refused, and TIM-TP needs protocol 15, which an old unit will not
-         * have. All three go out over /healthz rather than only to a log that
-         * drops bytes at exactly the wrong moment. */
-        std::string moduleId;
         /* The bias switch, driven by the ESP because the module will not. */
         bool antBiasOn  = false;
         bool antShort   = false;
@@ -320,14 +313,6 @@ public:
         uint32_t msgSkipped  = 0;
         bool     ioSeen      = false;
         int64_t  ioAgeUs     = -1;
-        /* The last MSGPP payload as hex. The layout is subtle enough -- port
-         * outer, protocol inner -- that being able to see the bytes is worth 240
-         * characters of payload. */
-        std::string msgppHex;
-        /* The last frames by class:id, so "what is it actually sending" is
-         * answerable from the API rather than only from the serial console. */
-        std::string recentFrames;
-        std::string ioHex; /* string in Status; the 241-byte buffer is the member */
         /* The host's current rate, so utilisation can be computed against it. */
         uint32_t baud = 0;
 
@@ -343,11 +328,11 @@ public:
         /* Edges refused for landing more than 20 us from the fit: a late
          * interrupt, or the first seconds of a real step. */
         uint32_t edgeOutliers = 0;
-        /* How long status() held the PPS interrupt's lock for this read, and
-         * the longest it ever has: the proof that reading the status does not
-         * cost the pulse its stamp. */
-        uint32_t lockHoldNs    = 0;
-        uint32_t lockHoldMaxNs = 0;
+        /* Which published snapshot this is and how old it was when read. The
+         * status is a copy the GPS task publishes once a second, so these say
+         * how fresh the copy is rather than leaving it to be assumed. */
+        uint32_t snapshotSeq   = 0;
+        int64_t  snapshotAgeUs = -1;
         /* The trust test's verdict on the newest edge, and how many edges in a
          * row it has refused. Spikes are edges that arrived where nothing
          * predicted; rejects are edges that failed the spacing or the
@@ -362,25 +347,17 @@ public:
          * saying so is that "u-center does nothing" and "u-center is not
          * attached at all" are different faults and used to look the same from
          * here. */
-        bool        bridgeActive  = false;
-        int         bridgeClients = 0;
-        uint32_t    bridgeRx      = 0;
-        uint32_t    bridgeTx      = 0;
-        std::string bridgeEnd;
-        std::string bridgeLast;
-        /* What CFG-GNSS asked for, and what the receiver made of it. Reported
-         * because the answer is site and firmware dependent rather than a
-         * constant: BeiDou is refused while GLONASS or Galileo is enabled. */
-        std::string gnss;
-        std::string gnssCfg;
+        bool     bridgeActive  = false;
+        int      bridgeClients = 0;
+        uint32_t bridgeRx      = 0;
+        uint32_t bridgeTx      = 0;
         /* Time mode: disabled, surveying, or fixed. With the survey's own
          * numbers beside it, since "how far along is it and how good is it" is
          * the whole question once one is running. */
-        std::string timeMode;
-        double      svinDurS   = 0;
-        double      svinAccMm  = 0;
-        double      svinVarMm2 = 0;
-        double      svinObs    = 0;
+        double svinDurS   = 0;
+        double svinAccMm  = 0;
+        double svinVarMm2 = 0;
+        double svinObs    = 0;
         /* The mean the survey has so far, in ECEF centimetres, which is the
          * unit the message carries and the unit CFG-TMODE2 takes. Published
          * because "action":"fix" stores exactly this: without it the decision at
@@ -434,6 +411,37 @@ public:
          * so a holdover can be watched with the PPS wire soldered on. Report
          * it, so nobody mistakes an artificial state for a fault. */
         int64_t ppsSuppressUs = 0;
+    };
+
+    /* The same, with the text fields a reader wants as strings. They are apart
+     * because StatusData has to stay plain data: it is what the GPS task
+     * publishes into the snapshot ring, and a reader copies it out with no lock
+     * at all -- which a std::string cannot survive. */
+    struct Status : StatusData {
+        /* What the receiver says it is, from UBX-MON-VER, and which of this
+         * firmware's two configuration messages it refused. An empty moduleId
+         * with both flags false means the question was never answered -- a
+         * module that ignores the poll is not the same as one that answered and
+         * refused, and TIM-TP needs protocol 15, which an old unit will not
+         * have. All three go out over /healthz rather than only to a log that
+         * drops bytes at exactly the wrong moment. */
+        std::string moduleId;
+        /* The last MSGPP payload as hex. The layout is subtle enough -- port
+         * outer, protocol inner -- that being able to see the bytes is worth 240
+         * characters of payload. */
+        std::string msgppHex;
+        /* The last frames by class:id, so "what is it actually sending" is
+         * answerable from the API rather than only from the serial console. */
+        std::string recentFrames;
+        std::string ioHex; /* string in Status; the 241-byte buffer is the member */
+        std::string bridgeEnd;
+        std::string bridgeLast;
+        /* What CFG-GNSS asked for, and what the receiver made of it. Reported
+         * because the answer is site and firmware dependent rather than a
+         * constant: BeiDou is refused while GLONASS or Galileo is enabled. */
+        std::string gnss;
+        std::string gnssCfg;
+        std::string timeMode;
     };
 
     static GpsTime &instance();
@@ -729,13 +737,15 @@ private:
     void slew(int64_t offsetNs);
     /* Appends one epoch, filling in any epochs missed since the last one. Runs
      * on the servo task with the same lock discipline as the rate ring. */
-    void     recordSample(uint32_t epoch, int64_t offsetNs);
-    Sample   m_samples[kSampleRing];
-    uint32_t m_sampleSeq       = 1; /* seq 0 is the "from the oldest" sentinel */
-    uint32_t m_sampleOldest    = 1;
-    uint32_t m_lastSampleEpoch = 0;
-    bool     m_lastSampleSet   = false;
-    void     fitRate();
+    void   recordSample(uint32_t epoch, int64_t offsetNs);
+    Sample m_samples[kSampleRing];
+    /* Atomic because /gps/samples reads them with no lock: a record is whole
+     * once the sequence has moved past it. */
+    std::atomic<uint32_t> m_sampleSeq{1}; /* seq 0 is the "from the oldest" sentinel */
+    std::atomic<uint32_t> m_sampleOldest{1};
+    uint32_t              m_lastSampleEpoch = 0;
+    bool                  m_lastSampleSet   = false;
+    void                  fitRate();
 
     /* Measure the offset against the anchor, then slew or step the system clock
      * towards it if this source owns CLOCK_REALTIME. The measurement happens
@@ -944,8 +954,77 @@ private:
     int64_t  m_lastEdgeMonoUs    = 0;
     bool     m_lastEdgeMonoSet   = false;
     /* The lock gates' debounce, written from status(), which is const. */
-    mutable uint32_t m_gateBad     = 0;
-    mutable uint32_t m_gateLastPps = 0;
+    /* The lock gate's debounce in one word: the edge count it last voted on in
+     * the low 24 bits, the run of bad votes above. */
+    mutable std::atomic<uint32_t> m_gate{0};
+
+    /* ---- The published status -----------------------------------------
+     *
+     * Everything status() needs beyond StatusData: raw timestamps the reader
+     * turns into ages, and the text as fixed buffers. Plain data, like the
+     * rest of a slot. */
+    struct StatusExtras {
+        int64_t  ppsMonoUs        = 0;
+        int64_t  anchorMonoUs     = 0;
+        int64_t  anchorPhcNs      = 0;
+        int64_t  suppressUntil    = 0;
+        int64_t  navSatAtUs       = 0;
+        int64_t  pairAgeAtUs      = 0;
+        int64_t  monHwAtUs        = 0;
+        int64_t  dopAtUs          = 0;
+        int64_t  clockAtUs        = 0;
+        int64_t  navStatusAtUs    = 0;
+        int64_t  rfAtUs           = 0;
+        int64_t  ioAtUs           = 0;
+        int64_t  holdAssertAtUs   = 0;
+        int64_t  lastEdgeUs       = -1;
+        int64_t  svinAtUs         = 0;
+        int64_t  qErrAtUs         = 0;
+        int64_t  publishedUs      = 0;
+        uint32_t number           = 0;
+        uint32_t svinDur          = 0;
+        uint32_t svinAcc          = 0;
+        uint32_t svinObs          = 0;
+        uint32_t svinDurS         = 0;
+        uint32_t svinAccMm        = 0;
+        uint16_t recentFrames[16] = {};
+        uint8_t  recentAt         = 0;
+        uint8_t  gnssMask         = 0;
+        uint8_t  tmode            = 0;
+        uint8_t  satCount         = 0;
+        bool     gnssNaked        = false;
+        bool     gnssAcked        = false;
+        char     msgpp[241]       = {};
+        char     io[241]          = {};
+        char     module[160]      = {};
+        char     bridgeEnd[48]    = {};
+        char     bridgeLast[128]  = {};
+    };
+    struct StatusSlot {
+        std::atomic<uint32_t> seq{0}; /* odd while the GPS task is writing it */
+        StatusData            data;
+        StatusExtras          extra;
+    };
+    /* Few, on purpose: a reader needs one finished snapshot, and four means the
+     * one it is copying is left alone for three seconds. */
+    static constexpr uint32_t kStatusSlots = 4;
+    StatusSlot                m_statusRing[kStatusSlots];
+    std::atomic<uint32_t>     m_statusHead{0}; /* the newest finished slot */
+    uint32_t                  m_statusNumber      = 0;
+    int64_t                   m_statusPublishedUs = 0;
+    bool                      m_statusDue         = false;
+    void                      publishStatus();
+
+    /* What the PPS interrupt writes, and the counter it brackets the write
+     * with, so a task can read all four without taking the interrupt's lock. */
+    struct EdgeWords {
+        uint32_t count  = 0;
+        int64_t  monoUs = 0;
+        int64_t  ptpNs  = 0;
+        int64_t  lastUs = -1;
+    };
+    std::atomic<uint32_t> m_edgeSeq{0};
+    void                  readEdge(EdgeWords &out) const;
     /* Phase relative to the fit's base sample, for the deviation below. The
      * absolute offsets are ~1.8e18 ns and a double resolves only ~256 ns there,
      * so a second difference taken on them cancels to exactly zero -- measured
@@ -1056,41 +1135,42 @@ private:
      * receiver left moving spends the survey the hold came from while the box
      * still believes it is holding -- so the assertion is retried rather than
      * attempted once and forgotten. */
-    int64_t           m_holdAssertAtUs = 0;
-    int64_t           m_holdRetryUs    = 0;
-    volatile bool     m_resetReq       = false;
-    volatile bool     m_resetCold      = false;
-    volatile bool     m_resetHard      = false;
-    volatile bool     m_resetPower     = false;
-    volatile bool     m_defaultsReq    = false;
-    volatile bool     m_bridgeActive   = false;
-    bool              m_antBiasOn      = false;
-    bool              m_antShort       = false;
-    bool              m_antLatched     = false;
-    int               m_shortSamples   = 0;
-    int               m_senseLogged    = -1;
-    void              applyBias(bool on);
-    bool              m_reconfigForce    = false;
-    int64_t           m_reconfigAtUs     = 0;
-    int64_t           m_monHwAtUs        = 0;
-    volatile uint32_t m_bridgeRx         = 0;
-    volatile uint32_t m_bridgeTx         = 0;
-    volatile uint32_t m_bridgeSessions   = 0;
-    volatile uint32_t m_bridgeRefused    = 0;
-    volatile uint32_t m_bridgeDroppedCrc = 0;
-    volatile int      m_bridgeClients    = 0;
-    text::Buf<48>     m_bridgeEnd        = {"none"};
-    text::Buf<128>    m_bridgeLast       = {""};
-    uint8_t           m_cn0Max           = 0;
-    uint8_t           m_cn0Mean          = 0;
-    uint8_t           m_cn0Used          = 0;
-    uint8_t           m_satCount         = 0;
-    Sat               m_sats[kMaxSats]   = {};
-    int64_t           m_navSatAtUs       = 0;
-    bool              m_verLogged        = false;
-    bool              m_timTpProbed      = false;
-    int64_t           m_timTpProbeAtUs   = 0;
-    text::Buf<160>    m_moduleId         = {};
+    int64_t               m_holdAssertAtUs = 0;
+    int64_t               m_holdRetryUs    = 0;
+    volatile bool         m_resetReq       = false;
+    volatile bool         m_resetCold      = false;
+    volatile bool         m_resetHard      = false;
+    volatile bool         m_resetPower     = false;
+    volatile bool         m_defaultsReq    = false;
+    volatile bool         m_bridgeActive   = false;
+    bool                  m_antBiasOn      = false;
+    bool                  m_antShort       = false;
+    bool                  m_antLatched     = false;
+    int                   m_shortSamples   = 0;
+    int                   m_senseLogged    = -1;
+    void                  applyBias(bool on);
+    bool                  m_reconfigForce    = false;
+    int64_t               m_reconfigAtUs     = 0;
+    int64_t               m_monHwAtUs        = 0;
+    volatile uint32_t     m_bridgeRx         = 0;
+    volatile uint32_t     m_bridgeTx         = 0;
+    volatile uint32_t     m_bridgeSessions   = 0;
+    volatile uint32_t     m_bridgeRefused    = 0;
+    volatile uint32_t     m_bridgeDroppedCrc = 0;
+    volatile int          m_bridgeClients    = 0;
+    text::Buf<48>         m_bridgeEnd        = {"none"};
+    text::Buf<128>        m_bridgeLast       = {""};
+    uint8_t               m_cn0Max           = 0;
+    uint8_t               m_cn0Mean          = 0;
+    uint8_t               m_cn0Used          = 0;
+    uint8_t               m_satCount         = 0;
+    std::atomic<uint32_t> m_satsSeq{0}; /* odd while the rows are being rewritten */
+    Sat                   m_sats[kMaxSats] = {};
+    int64_t               m_navSatAtUs     = 0;
+    bool                  m_verLogged      = false;
+    bool                  m_timTpProbed    = false;
+    int64_t               m_timTpProbeAtUs = 0;
+    text::Buf<160>        m_moduleId       = {};
 };
 
 /* The GPS as the responder sees it: stratum 1 and refid "GPS" while the PPS is

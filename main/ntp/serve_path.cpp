@@ -10,57 +10,28 @@ ServePath &ServePath::instance()
     return path;
 }
 
-void ServePath::decayed(int64_t nowUs, int64_t &holdNs, int64_t &lastUs)
-{
-    if (lastUs == 0) {
-        lastUs = nowUs;
-        return;
-    }
-    const int64_t sinceUs = nowUs - lastUs;
-    if (sinceUs < kPeriodUs) {
-        return;
-    }
-    const int64_t minutes = sinceUs / kPeriodUs;
-    double        hold    = static_cast<double>(holdNs);
-    for (int64_t i = 0; i < minutes && hold > static_cast<double>(kFloorNs); ++i) {
-        hold *= 1.0 - kDecayPerMin;
-    }
-    holdNs = std::max<int64_t>(static_cast<int64_t>(hold), kFloorNs);
-    /* Keep the remainder, so a burst of observations does not stack up decay. */
-    lastUs += minutes * kPeriodUs;
-}
-
 int64_t ServePath::settle(int64_t nowUs, int64_t raiseToNs)
 {
-    /* The decay is a loop of double-precision multiplies, so it runs between
-     * two short holds rather than inside one: the lock is taken with interrupts
-     * off, and the reply path reads this for every packet. If another writer
-     * got in between, the arithmetic is done again on what it left. */
-    int64_t now = 0;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        portENTER_CRITICAL(&m_lock);
-        const int64_t hadHold = m_holdNs;
-        const int64_t hadLast = m_lastUs;
-        portEXIT_CRITICAL(&m_lock);
-
-        int64_t hold = hadHold;
-        int64_t last = hadLast;
-        decayed(nowUs, hold, last);
-        hold = std::clamp<int64_t>(std::max(hold, raiseToNs), kFloorNs, kCapNs);
-
-        portENTER_CRITICAL(&m_lock);
-        const bool mine = m_holdNs == hadHold && m_lastUs == hadLast;
-        if (mine) {
-            m_holdNs = hold;
-            m_lastUs = last;
+    /* The whole state is one word -- the claim in nanoseconds above, the minute
+     * it was last decayed at below -- so it is read, worked on and swapped back
+     * with no lock. The reply path reads this for every packet and the status
+     * every second, and a lock here is interrupts off on that core. If another
+     * caller swaps first, the arithmetic is done again on what it left. */
+    const uint32_t nowMin = static_cast<uint32_t>(nowUs / kPeriodUs) & kMinuteMask;
+    uint32_t       cur    = m_state.load(std::memory_order_relaxed);
+    for (;;) {
+        const uint32_t since = (nowMin - (cur & kMinuteMask)) & kMinuteMask;
+        double         hold  = static_cast<double>(cur >> kMinuteBits);
+        for (uint32_t i = 0; i < since && hold > static_cast<double>(kFloorNs); ++i) {
+            hold *= 1.0 - kDecayPerMin;
         }
-        now = m_holdNs;
-        portEXIT_CRITICAL(&m_lock);
-        if (mine) {
-            break;
+        const int64_t claim =
+            std::clamp<int64_t>(std::max(static_cast<int64_t>(hold), raiseToNs), kFloorNs, kCapNs);
+        const uint32_t next = (static_cast<uint32_t>(claim) << kMinuteBits) | nowMin;
+        if (next == cur || m_state.compare_exchange_weak(cur, next, std::memory_order_relaxed)) {
+            return claim;
         }
     }
-    return now;
 }
 
 void ServePath::observe(int64_t halfNs, uint32_t count)

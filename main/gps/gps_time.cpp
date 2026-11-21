@@ -79,6 +79,9 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
      * both handlers share: the capture peripheral is not always the one in use
      * (the GPIO fallback is what runs when the timer cannot be set up), and
      * anything waiting on "an edge arrived" was waiting on the wrong one. */
+    /* Odd from here to the matching bump below: a task reading these words
+     * without the lock sees the change and reads them again. */
+    m_edgeSeq.fetch_add(1, std::memory_order_release);
     m_lastEdgeUs = nowUs;
 
     /* The same edge in the 1588 counter's base, read before the lock rather
@@ -102,6 +105,7 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
         ++m_ppsCount;
     }
     portEXIT_CRITICAL_ISR(&m_mux);
+    m_edgeSeq.fetch_add(1, std::memory_order_release);
 }
 
 /* The fallback edge handler, used only if the capture timer cannot be set up.
@@ -456,6 +460,12 @@ void GpsTime::task()
          * knowing: the pulse statement and qErr are available in the mode that
          * is *worse* for timing, and absent in the mode that is better. */
         const int64_t nowUs = esp_timer_get_time();
+        /* The status is published here, once a NAV-PVT has been handled: that
+         * is a quarter of a second after the edge and most of a second before
+         * the next. With no frames arriving it still goes out, on the clock. */
+        if (m_statusDue || nowUs - m_statusPublishedUs >= 1100000) {
+            publishStatus();
+        }
         if (m_timTpCfg == 1 && nowUs - m_timTpPolledUs >= 1000000) {
             m_timTpPolledUs = nowUs;
             sendUbx(0x0D, 0x01, nullptr, 0);

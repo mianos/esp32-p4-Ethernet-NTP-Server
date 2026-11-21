@@ -380,34 +380,26 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
 size_t GpsTime::drainSamples(uint32_t since, Sample *out, size_t max, uint32_t &first,
                              uint32_t &last, uint32_t &lost) const
 {
-    portENTER_CRITICAL(&m_mux);
-    const uint32_t newest = m_sampleSeq; /* one past the last written */
-    first                 = m_sampleOldest;
+    /* No lock. The GPS task is the only writer and moves the sequence on after
+     * a record is complete, so everything below `newest` is whole; a record is
+     * only overwritten 900 s after it was written, and each copy is checked
+     * against its own sequence number in case this reader was away that long. */
+    const uint32_t newest = m_sampleSeq.load(std::memory_order_acquire);
+    const uint32_t oldest = m_sampleOldest.load(std::memory_order_acquire);
+    first                 = oldest;
     last                  = newest == 0 ? 0 : newest - 1;
-    if (since == 0 || since < m_sampleOldest) {
-        lost  = since == 0 ? 0 : m_sampleOldest - since;
-        since = m_sampleOldest;
+    if (since == 0 || since < oldest) {
+        lost  = since == 0 ? 0 : oldest - since;
+        since = oldest;
     } else {
         lost = 0;
     }
-    portEXIT_CRITICAL(&m_mux);
-
-    /* A few records per turn of the lock, not the page: four hundred of them
-     * in one hold was the PPS interrupt shut out for the whole copy. A record
-     * is only overwritten 900 s after it was written, so one that was inside
-     * the ring a moment ago still is; the sequence number is checked anyway. */
-    constexpr uint32_t kPerLock = 8;
-    size_t             copied   = 0;
-    uint32_t           seq      = since;
-    while (seq < newest && copied < max) {
-        portENTER_CRITICAL(&m_mux);
-        for (uint32_t n = 0; n < kPerLock && seq < newest && copied < max; ++n, ++seq) {
-            const Sample &from = m_samples[seq % kSampleRing];
-            if (from.seq == seq) {
-                out[copied++] = from;
-            }
+    size_t copied = 0;
+    for (uint32_t seq = since; seq < newest && copied < max; ++seq) {
+        out[copied] = m_samples[seq % kSampleRing];
+        if (out[copied].seq == seq) {
+            ++copied;
         }
-        portEXIT_CRITICAL(&m_mux);
     }
     return copied;
 }

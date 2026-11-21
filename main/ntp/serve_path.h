@@ -69,12 +69,15 @@ private:
     static constexpr int64_t  kPeriodUs   = 60000000;
     static constexpr uint32_t kMinSamples = 4;
 
-    static void decayed(int64_t nowUs, int64_t &holdNs, int64_t &lastUs);
     /* Decay to now, raise to at least raiseToNs, and return the claim. */
     int64_t settle(int64_t nowUs, int64_t raiseToNs);
 
-    portMUX_TYPE          m_lock   = portMUX_INITIALIZER_UNLOCKED;
-    int64_t               m_holdNs = kStartNs;
-    int64_t               m_lastUs = 0;
+    /* The claim (18 bits holds the 200 us cap) and the minute it was last
+     * decayed at (14 bits, compared modulo: it is read every second, and wraps
+     * every eleven days). */
+    static constexpr uint32_t kMinuteBits = 14;
+    static constexpr uint32_t kMinuteMask = (1u << kMinuteBits) - 1;
+    static_assert(kCapNs < (1 << (32 - kMinuteBits)), "the claim has to fit beside the minute");
+    std::atomic<uint32_t> m_state{static_cast<uint32_t>(kStartNs) << kMinuteBits};
     std::atomic<uint32_t> m_minutes{0};
 };

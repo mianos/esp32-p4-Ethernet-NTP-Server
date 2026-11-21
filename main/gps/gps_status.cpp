@@ -8,15 +8,24 @@ using namespace gps_detail;
 
 uint8_t GpsTime::copySats(Sat *out, uint8_t max) const
 {
-    /* One short critical section around the whole copy: the rows are written by
-     * the GPS task on a 2 s message, so a torn read here would mix two samples
-     * into one plot. Callers pass their own buffer; /gps/sats is the only one. */
-    portENTER_CRITICAL(&m_mux);
-    const uint8_t n = m_satCount < max ? m_satCount : max;
-    for (uint8_t i = 0; i < n; ++i) {
-        out[i] = m_sats[i];
+    /* The rows are rewritten by the GPS task on a 2 s message, bracketed by two
+     * bumps of m_satsSeq, so a copy taken while the count was odd or moving is
+     * a mix of two skies and is taken again. No lock: /gps/sats is the caller,
+     * and it has no business holding the PPS interrupt off. */
+    uint8_t n = 0;
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        const uint32_t before = m_satsSeq.load(std::memory_order_acquire);
+        if ((before & 1u) == 0) {
+            n = m_satCount < max ? m_satCount : max;
+            for (uint8_t i = 0; i < n; ++i) {
+                out[i] = m_sats[i];
+            }
+            if (m_satsSeq.load(std::memory_order_acquire) == before) {
+                return n;
+            }
+        }
+        vTaskDelay(1);
     }
-    portEXIT_CRITICAL(&m_mux);
     return n;
 }
 
@@ -62,62 +71,71 @@ bool GpsTime::evaluateLock(const LockInputs &in) const
 
     /* Debounced per edge, not per call: this runs on every reply and every
      * health poll, so a counter advanced per call would saturate inside a
-     * second. m_gateLastPps makes it one vote per edge. A single glitched pulse,
+     * second. the count kept in m_gate makes it one vote per edge. A single glitched pulse,
      * or one sample outside the band on its way back from a step, is then not
      * worth a demotion and a relock line -- three consecutive seconds is. */
+    /* One word, so the vote needs no lock: the edge count in the low 24 bits
+     * and the streak above it. Only a count newer than the last one votes -- a
+     * status read working from a snapshot must not vote a second time for an
+     * edge a reply has already counted. */
     uint32_t badFor = 0;
-    portENTER_CRITICAL(&m_mux);
-    if (m_gateLastPps != in.ppsCount) {
-        m_gateLastPps = in.ppsCount;
-        m_gateBad     = bad ? m_gateBad + 1 : 0;
+    uint32_t cur    = m_gate.load(std::memory_order_relaxed);
+    for (;;) {
+        const uint32_t streak = cur >> 24;
+        const uint32_t ahead  = (in.ppsCount - cur) & 0xFFFFFFu;
+        if (ahead == 0 || ahead >= 0x800000u) {
+            badFor = streak;
+            break;
+        }
+        const uint32_t voted = bad ? std::min<uint32_t>(streak + 1, 255) : 0;
+        if (m_gate.compare_exchange_weak(cur, (voted << 24) | (in.ppsCount & 0xFFFFFFu),
+                                         std::memory_order_relaxed)) {
+            badFor = voted;
+            break;
+        }
     }
-    badFor = m_gateBad;
-    portEXIT_CRITICAL(&m_mux);
     return badFor < kGateStreak;
 }
 
-GpsTime::Status GpsTime::status() const
+void GpsTime::readEdge(EdgeWords &out) const
 {
-    Status  st;
-    int64_t ppsMonoUs     = 0;
-    int64_t anchorMonoUs  = 0;
-    int64_t suppressUntil = 0;
-    int64_t navSatAtUs    = 0;
-    int64_t pairAgeAtUs   = 0;
-    int64_t monHwAtUs     = 0;
-    int64_t dopAtUs       = 0;
-    int64_t clockAtUs     = 0;
-    int64_t navStatusAtUs = 0;
-    int64_t rfAtUs        = 0;
-    int64_t ioAtUs        = 0;
-    uint8_t recentAt      = 0;
+    /* The interrupt is the only writer and brackets its update with two bumps
+     * of m_edgeSeq, so an odd value or a changed one means it ran meanwhile and
+     * the read is taken again. No lock: this is what lets the status be read
+     * without ever holding the interrupt off. */
+    for (;;) {
+        const uint32_t before = m_edgeSeq.load(std::memory_order_acquire);
+        if ((before & 1u) == 0) {
+            out.count  = m_ppsCount;
+            out.monoUs = m_ppsMonoUs;
+            out.ptpNs  = m_ppsPtpNs;
+            out.lastUs = m_lastEdgeUs;
+            if (m_edgeSeq.load(std::memory_order_acquire) == before) {
+                return;
+            }
+        }
+    }
+}
 
-    /* String-ish state captured as raw bytes and mask bits. Nothing below
-     * allocates: a copy into a local array is a memcpy, and building the
-     * std::string happens after the lock is dropped. */
-    char    localMsgpp[241]      = {};
-    char    localIo[241]         = {};
-    char    localModule[160]     = {};
-    char    localBridgeEnd[48]   = {};
-    char    localBridgeLast[128] = {};
-    size_t  msgppLen = 0, ioLen = 0, moduleLen = 0, endLen = 0, lastLen = 0;
-    uint8_t gnssMask  = 0;
-    bool    gnssNaked = false, gnssAcked = false;
-    uint8_t tmode = 0;
+void GpsTime::publishStatus()
+{
+    /* One complete status, written into the next slot of a small ring and then
+     * named as the newest. A reader copies the slot that is named and never
+     * waits: the slot it is reading is not written again for kStatusSlots - 1
+     * seconds, and nothing here or there takes the PPS interrupt's lock.
+     *
+     * Called from the GPS task only, just after a NAV-PVT has been handled --
+     * a couple of hundred milliseconds past the edge, with the next one most
+     * of a second away. Nearly every field is this task's own; the few that are
+     * not are read by the two means below. */
+    const uint32_t next = (m_statusHead.load(std::memory_order_relaxed) + 1) % kStatusSlots;
+    StatusSlot    &slot = m_statusRing[next];
+    const uint32_t seq  = slot.seq.load(std::memory_order_relaxed);
+    slot.seq.store(seq + 1, std::memory_order_release); /* odd: being written */
 
-    /* The lock below is the one the PPS interrupt takes, and it is held with
-     * interrupts off: whatever it costs is added to the stamp of an edge that
-     * arrives meanwhile. It used to cover string scans, two settings parses,
-     * seven clock reads and a run of double-precision divisions -- tens of
-     * microseconds, once a second from the task and again on every /healthz.
-     * Nothing under it now costs more than a load and a store; anything that
-     * needs arithmetic is copied raw and worked out afterwards. */
-    int64_t  anchorPhcNs    = 0;
-    int64_t  holdAssertAtUs = 0;
-    int64_t  lastEdgeUs     = 0;
-    int64_t  svinAtUs       = 0;
-    uint32_t svinDur = 0, svinAcc = 0, svinObs = 0, svinDurS = 0, svinAccMm = 0;
-    uint8_t  satCount = 0;
+    StatusData   &st = slot.data;
+    StatusExtras &ex = slot.extra;
+    st               = StatusData{};
 
     {
         const uint32_t lo = systimer_ll_get_counter_value_low(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);
@@ -129,212 +147,263 @@ GpsTime::Status GpsTime::status() const
             esp_timer_get_time();
     }
 
-    portENTER_CRITICAL(&m_mux);
-    const uint32_t heldFrom = esp_cpu_get_cycle_count();
-    st.ppsCount             = m_ppsCount;
-    st.ppsPtpNs             = m_ppsPtpNs;
-    anchorPhcNs             = m_anchorPhcNs;
-    st.timeValid            = m_timeValid;
-    st.fixType              = m_fixType;
-    st.satellites           = m_satellites;
-    st.anchored             = m_anchorValid;
-    st.lastFix              = m_lastFix;
-    st.offsetUs             = m_offsetUs;
-    st.offsetNs             = m_offsetNs;
-    st.frames               = m_decoder.frames();
-    st.droppedChecksum      = m_decoder.droppedChecksum();
-    st.droppedLength        = m_decoder.droppedLength();
-    st.rescans              = m_rescans;
-    st.bridgeDroppedCrc     = m_bridgeDroppedCrc;
-    st.ratePpb              = m_ratePpb;
-    st.rateSamples          = m_rateSamples;
-    st.leapSeconds          = m_leapSeconds;
-    st.leapChange           = m_leapChange;
-    st.leapInS              = m_leapInS;
-    st.leapValid            = m_leapValid;
-    st.lastHoldoverUs       = m_lastHoldoverUs;
-    st.lastHoldoverErrNs    = m_lastHoldoverErrNs;
-    st.timTpCount           = m_timTpCount;
-    st.qErrNs               = std::abs(m_qErrNs);
-    st.qErrValid            = m_qErrValid;
-    st.jitterNs             = m_jitterNs;
-    st.pairAgeUs            = m_pairAgeUs;
-    st.pairAgeMaxUs         = m_pairAgeMaxUs;
-    pairAgeAtUs             = m_pairAgeAtUs;
-    st.pulseOnSecond        = m_pulseOnSecond;
-    st.pulseOffsetNs        = m_pulseOffsetNs;
-    st.pvtNanoNs            = m_pvtNanoNs;
-    st.pvtItowMs            = m_pvtItowMs;
-    st.timTpFlags           = m_timTpFlags;
-    st.tosFlags             = m_tosFlags;
-    st.tosUtcOffsetNs       = m_tosUtcOffset;
-    st.tosUtcUncNs          = m_tosUtcUnc;
-    st.tosCfg               = static_cast<uint8_t>(m_tosCfg);
-    st.timTpTimN            = m_timTpTimN;
-    st.timTpNavN            = m_timTpNavN;
-    st.rateCfg              = static_cast<uint8_t>(m_rateCfg);
-    st.nav5Cfg              = static_cast<uint8_t>(m_nav5Cfg);
-    st.tp5CableNs           = m_tp5CableNs;
-    st.tp5UserNs            = m_tp5UserNs;
-    st.tp5Flags             = m_tp5Flags;
-    st.tp5PeriodUs          = m_tp5Period;
-    st.tp5Ratio             = m_tp5Ratio;
-    st.tp5Rejected          = m_tp5Naked;
-    st.timTpRejected        = m_timTpNaked;
-    st.timTpAcked           = m_timTpAcked;
-    st.antBiasOn            = m_antBiasOn;
-    st.antShort             = m_antShort;
-    st.antLatched           = m_antLatched;
-    st.antCfgAcked          = m_antCfgAcked;
-    st.antCfgRejected       = m_antCfgNaked;
-    st.antStatus            = m_antStatus;
-    st.antPower             = m_antPower;
-    st.noisePerMs           = m_noisePerMs;
-    st.agcCnt               = m_agcCnt;
-    st.jamInd               = m_jamInd;
-    st.jamState             = m_jamState;
-    st.monHwValid           = m_monHwValid;
-    st.fitUs                = m_fitUs;
-    st.gDop                 = m_gDop;
-    st.pDop                 = m_pDop;
-    st.hDop                 = m_hDop;
-    st.vDop                 = m_vDop;
-    st.clkBiasNs            = m_clkBiasNs;
-    st.clkDriftNsPerS       = m_clkDriftNsPerS;
-    st.tAccNs               = m_tAccNs;
-    st.fAccPsPerS           = m_fAccPsPerS;
-    st.navStatusFlags       = m_navStatusFlags;
-    st.navStatusFlags2      = m_navStatusFlags2;
-    st.ttffMs               = m_ttffMs;
-    st.rfBands              = m_rfBands;
-    st.rfJamWorst           = m_rfJamWorst;
-    st.rfAntWorst           = m_rfAntWorst;
-    st.rfAgcMin             = m_rfAgcMin;
-    st.rfSeen               = m_rfSeen;
-    st.rfCfg                = static_cast<uint8_t>(m_rfCfg);
-    st.tieMaxNs             = m_tieMaxNs;
-    st.tieRmsNs             = m_tieRmsNs;
-    st.ioRxBytes            = m_ioRxBytes;
-    st.ioTxBytes            = m_ioTxBytes;
-    st.ioParity             = m_ioParity;
-    st.ioFraming            = m_ioFraming;
-    st.ioOverrun            = m_ioOverrun;
-    st.rbufPending          = m_rbufPending;
-    st.rbufPeak             = m_rbufPeak;
-    st.tbufPending          = m_tbufPending;
-    st.tbufPeak             = m_tbufPeak;
-    st.tbufErrors           = m_tbufErrors;
-    st.msgUbx               = m_msgUbx;
-    recentAt                = m_recentAt;
-    st.msgSkipped           = m_msgSkipped;
-    st.ioSeen               = m_ioSeen;
-    st.baud                 = m_baud;
-    ioAtUs                  = m_ioAtUs;
-    st.servoSteps           = m_servoSteps;
-    st.servoClamps          = m_servoClamps;
-    st.edgeSpikes           = m_edgeSpikes;
-    st.edgeOutliers         = m_edgeOutliers;
-    st.edgeRejects          = m_edgeRejects;
-    st.lastEdgeTrusted      = m_lastEdgeTrusted;
-    dopAtUs                 = m_dopAtUs;
-    clockAtUs               = m_clockAtUs;
-    navStatusAtUs           = m_navStatusAtUs;
-    rfAtUs                  = m_rfAtUs;
-    st.bridgeSessions       = m_bridgeSessions;
-    st.bridgeRefused        = m_bridgeRefused;
-    st.bridgeActive         = m_bridgeActive;
-    st.bridgeClients        = m_bridgeClients;
-    st.bridgeRx             = m_bridgeRx;
-    st.bridgeTx             = m_bridgeTx;
+    EdgeWords edge;
+    readEdge(edge);
+    st.ppsCount   = edge.count;
+    st.ppsPtpNs   = edge.ptpNs;
+    ex.ppsMonoUs  = edge.monoUs;
+    ex.lastEdgeUs = edge.lastUs;
+    /* Written by whoever arms the holdover test, as two words: read until two
+     * reads agree rather than locked. */
+    do {
+        ex.suppressUntil = m_ppsSuppressUntilUs;
+    } while (ex.suppressUntil != m_ppsSuppressUntilUs);
+
+    ex.anchorPhcNs       = m_anchorPhcNs;
+    st.timeValid         = m_timeValid;
+    st.fixType           = m_fixType;
+    st.satellites        = m_satellites;
+    st.anchored          = m_anchorValid;
+    st.lastFix           = m_lastFix;
+    st.offsetUs          = m_offsetUs;
+    st.offsetNs          = m_offsetNs;
+    st.frames            = m_decoder.frames();
+    st.droppedChecksum   = m_decoder.droppedChecksum();
+    st.droppedLength     = m_decoder.droppedLength();
+    st.rescans           = m_rescans;
+    st.bridgeDroppedCrc  = m_bridgeDroppedCrc;
+    st.ratePpb           = m_ratePpb;
+    st.rateSamples       = m_rateSamples;
+    st.leapSeconds       = m_leapSeconds;
+    st.leapChange        = m_leapChange;
+    st.leapInS           = m_leapInS;
+    st.leapValid         = m_leapValid;
+    st.lastHoldoverUs    = m_lastHoldoverUs;
+    st.lastHoldoverErrNs = m_lastHoldoverErrNs;
+    st.timTpCount        = m_timTpCount;
+    st.qErrNs            = std::abs(m_qErrNs);
+    st.qErrValid         = m_qErrValid;
+    st.jitterNs          = m_jitterNs;
+    st.pairAgeUs         = m_pairAgeUs;
+    st.pairAgeMaxUs      = m_pairAgeMaxUs;
+    ex.pairAgeAtUs       = m_pairAgeAtUs;
+    st.pulseOnSecond     = m_pulseOnSecond;
+    st.pulseOffsetNs     = m_pulseOffsetNs;
+    st.pvtNanoNs         = m_pvtNanoNs;
+    st.pvtItowMs         = m_pvtItowMs;
+    st.timTpFlags        = m_timTpFlags;
+    st.tosFlags          = m_tosFlags;
+    st.tosUtcOffsetNs    = m_tosUtcOffset;
+    st.tosUtcUncNs       = m_tosUtcUnc;
+    st.tosCfg            = static_cast<uint8_t>(m_tosCfg);
+    st.timTpTimN         = m_timTpTimN;
+    st.timTpNavN         = m_timTpNavN;
+    st.rateCfg           = static_cast<uint8_t>(m_rateCfg);
+    st.nav5Cfg           = static_cast<uint8_t>(m_nav5Cfg);
+    st.tp5CableNs        = m_tp5CableNs;
+    st.tp5UserNs         = m_tp5UserNs;
+    st.tp5Flags          = m_tp5Flags;
+    st.tp5PeriodUs       = m_tp5Period;
+    st.tp5Ratio          = m_tp5Ratio;
+    st.tp5Rejected       = m_tp5Naked;
+    st.timTpRejected     = m_timTpNaked;
+    st.timTpAcked        = m_timTpAcked;
+    st.antBiasOn         = m_antBiasOn;
+    st.antShort          = m_antShort;
+    st.antLatched        = m_antLatched;
+    st.antCfgAcked       = m_antCfgAcked;
+    st.antCfgRejected    = m_antCfgNaked;
+    st.antStatus         = m_antStatus;
+    st.antPower          = m_antPower;
+    st.noisePerMs        = m_noisePerMs;
+    st.agcCnt            = m_agcCnt;
+    st.jamInd            = m_jamInd;
+    st.jamState          = m_jamState;
+    st.monHwValid        = m_monHwValid;
+    st.fitUs             = m_fitUs;
+    st.gDop              = m_gDop;
+    st.pDop              = m_pDop;
+    st.hDop              = m_hDop;
+    st.vDop              = m_vDop;
+    st.clkBiasNs         = m_clkBiasNs;
+    st.clkDriftNsPerS    = m_clkDriftNsPerS;
+    st.tAccNs            = m_tAccNs;
+    st.fAccPsPerS        = m_fAccPsPerS;
+    st.navStatusFlags    = m_navStatusFlags;
+    st.navStatusFlags2   = m_navStatusFlags2;
+    st.ttffMs            = m_ttffMs;
+    st.rfBands           = m_rfBands;
+    st.rfJamWorst        = m_rfJamWorst;
+    st.rfAntWorst        = m_rfAntWorst;
+    st.rfAgcMin          = m_rfAgcMin;
+    st.rfSeen            = m_rfSeen;
+    st.rfCfg             = static_cast<uint8_t>(m_rfCfg);
+    st.tieMaxNs          = m_tieMaxNs;
+    st.tieRmsNs          = m_tieRmsNs;
+    st.ioRxBytes         = m_ioRxBytes;
+    st.ioTxBytes         = m_ioTxBytes;
+    st.ioParity          = m_ioParity;
+    st.ioFraming         = m_ioFraming;
+    st.ioOverrun         = m_ioOverrun;
+    st.rbufPending       = m_rbufPending;
+    st.rbufPeak          = m_rbufPeak;
+    st.tbufPending       = m_tbufPending;
+    st.tbufPeak          = m_tbufPeak;
+    st.tbufErrors        = m_tbufErrors;
+    st.msgUbx            = m_msgUbx;
+    ex.recentAt          = m_recentAt;
+    st.msgSkipped        = m_msgSkipped;
+    st.ioSeen            = m_ioSeen;
+    st.baud              = m_baud;
+    ex.ioAtUs            = m_ioAtUs;
+    st.servoSteps        = m_servoSteps;
+    st.servoClamps       = m_servoClamps;
+    st.edgeSpikes        = m_edgeSpikes;
+    st.edgeOutliers      = m_edgeOutliers;
+    st.edgeRejects       = m_edgeRejects;
+    st.lastEdgeTrusted   = m_lastEdgeTrusted;
+    ex.dopAtUs           = m_dopAtUs;
+    ex.clockAtUs         = m_clockAtUs;
+    ex.navStatusAtUs     = m_navStatusAtUs;
+    ex.rfAtUs            = m_rfAtUs;
+    st.bridgeSessions    = m_bridgeSessions;
+    st.bridgeRefused     = m_bridgeRefused;
+    st.bridgeActive      = m_bridgeActive;
+    st.bridgeClients     = m_bridgeClients;
+    st.bridgeRx          = m_bridgeRx;
+    st.bridgeTx          = m_bridgeTx;
     /* Named rather than numeric: the interesting thing is which constellations
      * are being solved, and a reader should not have to hold the gnssId table
      * in their head to find out. */
-    gnssMask                  = m_gnssMask;
-    gnssNaked                 = m_gnssNaked;
-    gnssAcked                 = m_gnssAcked;
-    tmode                     = m_tmode;
-    svinDur                   = m_svinDur;
-    svinAcc                   = m_svinAcc;
-    svinObs                   = m_svinObs;
-    st.svinMeanCm[0]          = m_svinMean[0];
-    st.svinMeanCm[1]          = m_svinMean[1];
-    st.svinMeanCm[2]          = m_svinMean[2];
-    svinDurS                  = m_svinDurS;
-    svinAccMm                 = m_svinAccMm;
-    st.svinValid              = m_svinValid;
-    st.holdValidated          = m_holdValidated;
-    st.holdWanted             = m_holdWanted;
-    holdAssertAtUs            = m_holdAssertAtUs;
-    lastEdgeUs                = m_lastEdgeUs;
-    satCount                  = m_satCount;
-    svinAtUs                  = m_svinAtUs;
-    st.pinSel                 = m_pinSel;
-    st.pinDir                 = m_pinDir;
-    st.pinVal                 = m_pinVal;
-    st.cn0Max                 = m_cn0Max;
-    st.cn0Mean                = m_cn0Mean;
-    st.cn0Used                = m_cn0Used;
-    navSatAtUs                = m_navSatAtUs;
-    monHwAtUs                 = m_monHwAtUs;
-    ppsMonoUs                 = m_ppsMonoUs;
-    anchorMonoUs              = m_anchorMonoUs;
-    suppressUntil             = m_ppsSuppressUntilUs;
-    const uint32_t heldCycles = esp_cpu_get_cycle_count() - heldFrom;
-    portEXIT_CRITICAL(&m_mux);
+    ex.gnssMask       = m_gnssMask;
+    ex.gnssNaked      = m_gnssNaked;
+    ex.gnssAcked      = m_gnssAcked;
+    ex.tmode          = m_tmode;
+    ex.svinDur        = m_svinDur;
+    ex.svinAcc        = m_svinAcc;
+    ex.svinObs        = m_svinObs;
+    st.svinMeanCm[0]  = m_svinMean[0];
+    st.svinMeanCm[1]  = m_svinMean[1];
+    st.svinMeanCm[2]  = m_svinMean[2];
+    ex.svinDurS       = m_svinDurS;
+    ex.svinAccMm      = m_svinAccMm;
+    st.svinValid      = m_svinValid;
+    st.holdValidated  = m_holdValidated;
+    st.holdWanted     = m_holdWanted;
+    ex.holdAssertAtUs = m_holdAssertAtUs;
+    ex.satCount       = m_satCount;
+    ex.svinAtUs       = m_svinAtUs;
+    st.pinSel         = m_pinSel;
+    st.pinDir         = m_pinDir;
+    st.pinVal         = m_pinVal;
+    st.cn0Max         = m_cn0Max;
+    st.cn0Mean        = m_cn0Mean;
+    st.cn0Used        = m_cn0Used;
+    ex.navSatAtUs     = m_navSatAtUs;
+    ex.monHwAtUs      = m_monHwAtUs;
+    ex.anchorMonoUs   = m_anchorMonoUs;
 
-    /* How long that was, measured rather than promised: the cycle counter is
-     * read inside the lock at both ends, so a migration cannot get between. */
-    {
-        static std::atomic<uint32_t> worst{0};
-        uint32_t                     seen = worst.load(std::memory_order_relaxed);
-        while (heldCycles > seen &&
-               !worst.compare_exchange_weak(seen, heldCycles, std::memory_order_relaxed)) {
+    /* The two clocks against the anchor. The reads have to be adjacent, so the
+     * counter is read either side of the timer and the pair is kept only if
+     * nothing got in between. */
+    if (st.anchored && ex.anchorPhcNs != 0 && ptp::hardware()) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            const int64_t phcBefore = ptp::nowNs();
+            const int64_t monoNow   = esp_timer_get_time();
+            const int64_t phcAfter  = ptp::nowNs();
+            if (phcAfter - phcBefore < 2000) {
+                st.phcMonoDeltaNs = ((phcBefore + phcAfter) / 2 - ex.anchorPhcNs) -
+                                    (monoNow - ex.anchorMonoUs) * 1000;
+                break;
+            }
         }
-        const uint32_t perUs = esp_rom_get_cpu_ticks_per_us();
-        st.lockHoldNs        = perUs != 0 ? heldCycles * 1000u / perUs : 0;
-        st.lockHoldMaxNs     = perUs != 0 ? std::max(seen, heldCycles) * 1000u / perUs : 0;
     }
 
-    /* The two clocks against the anchor. The reads have to be adjacent and
-     * nothing else does, so they get a lock of their own, two registers long. */
-    if (st.anchored && anchorPhcNs != 0 && ptp::hardware()) {
-        portENTER_CRITICAL(&m_mux);
-        const int64_t phcNow  = ptp::nowNs();
-        const int64_t monoNow = esp_timer_get_time();
-        portEXIT_CRITICAL(&m_mux);
-        st.phcMonoDeltaNs = (phcNow - anchorPhcNs) - (monoNow - anchorMonoUs) * 1000;
+    for (int i = 0; i < 16; ++i) {
+        ex.recentFrames[i] = m_recentFrames[i];
     }
+    /* The bridge task writes two of these; the worst a copy can be is a line
+     * caught mid-update, and each buffer keeps its terminator. */
+    std::memcpy(ex.msgpp, m_msgppHex.data(), sizeof(ex.msgpp));
+    std::memcpy(ex.io, m_ioHex.data(), sizeof(ex.io));
+    std::memcpy(ex.module, m_moduleId.data(), sizeof(ex.module));
+    std::memcpy(ex.bridgeEnd, m_bridgeEnd.data(), sizeof(ex.bridgeEnd));
+    std::memcpy(ex.bridgeLast, m_bridgeLast.data(), sizeof(ex.bridgeLast));
+
+    ex.qErrAtUs    = m_qErrAtUs;
+    ex.publishedUs = esp_timer_get_time();
+    ex.number      = ++m_statusNumber;
+
+    slot.seq.store(seq + 2, std::memory_order_release);
+    m_statusHead.store(next, std::memory_order_release);
+    m_statusPublishedUs = ex.publishedUs;
+    m_statusDue         = false;
+}
+
+GpsTime::Status GpsTime::status() const
+{
+    Status       st;
+    StatusExtras ex;
+
+    /* The newest finished snapshot, copied with no lock. The check afterwards
+     * is for a reader descheduled for seconds in the middle of the copy, which
+     * is the only way the writer can come round to the same slot. */
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        const StatusSlot &slot        = m_statusRing[m_statusHead.load(std::memory_order_acquire)];
+        const uint32_t    before      = slot.seq.load(std::memory_order_acquire);
+        static_cast<StatusData &>(st) = slot.data;
+        ex                            = slot.extra;
+        if ((before & 1u) == 0 && slot.seq.load(std::memory_order_acquire) == before) {
+            break;
+        }
+    }
+
+    /* The edge itself is read live, by the same lock-free means the snapshot
+     * used: the snapshot is up to a second old, and an edge that has arrived
+     * since should not read as a second of age. */
+    EdgeWords edge;
+    readEdge(edge);
+    st.ppsCount   = edge.count;
+    st.ppsPtpNs   = edge.ptpNs;
+    ex.ppsMonoUs  = edge.monoUs;
+    ex.lastEdgeUs = edge.lastUs;
+
+    const int64_t ppsMonoUs      = ex.ppsMonoUs;
+    const int64_t anchorMonoUs   = ex.anchorMonoUs;
+    const int64_t suppressUntil  = ex.suppressUntil;
+    const int64_t navSatAtUs     = ex.navSatAtUs;
+    const int64_t pairAgeAtUs    = ex.pairAgeAtUs;
+    const int64_t monHwAtUs      = ex.monHwAtUs;
+    const int64_t dopAtUs        = ex.dopAtUs;
+    const int64_t clockAtUs      = ex.clockAtUs;
+    const int64_t navStatusAtUs  = ex.navStatusAtUs;
+    const int64_t rfAtUs         = ex.rfAtUs;
+    const int64_t ioAtUs         = ex.ioAtUs;
+    const int64_t holdAssertAtUs = ex.holdAssertAtUs;
+    const int64_t lastEdgeUs     = ex.lastEdgeUs;
+    const int64_t svinAtUs       = ex.svinAtUs;
+    const uint8_t recentAt       = ex.recentAt;
+    const uint8_t gnssMask       = ex.gnssMask;
+    const bool    gnssNaked      = ex.gnssNaked;
+    const bool    gnssAcked      = ex.gnssAcked;
+    const uint8_t tmode          = ex.tmode;
+    const uint8_t satCount       = ex.satCount;
 
     text::getList(Settings::instance().antDelayNs(), ',', st.antDelayNs);
     text::getList(Settings::instance().gpsUserDelayNs(), ',', st.userDelayNs);
 
-    st.svinDurS    = static_cast<double>(svinDur);
-    st.svinAccMm   = static_cast<double>(isqrt(svinAcc));
-    st.svinVarMm2  = static_cast<double>(svinAcc);
-    st.svinObs     = static_cast<double>(svinObs);
-    st.svinTargetS = static_cast<double>(svinDurS);
-    st.svinLimitMm = static_cast<double>(svinAccMm);
+    st.svinDurS    = static_cast<double>(ex.svinDur);
+    st.svinAccMm   = static_cast<double>(isqrt(ex.svinAcc));
+    st.svinVarMm2  = static_cast<double>(ex.svinAcc);
+    st.svinObs     = static_cast<double>(ex.svinObs);
+    st.svinTargetS = static_cast<double>(ex.svinDurS);
+    st.svinLimitMm = static_cast<double>(ex.svinAccMm);
 
-    /* The diagnostic strings are read without the lock, like the frame ring
-     * below: each is a fixed buffer the GPS task rewrites in place, so the
-     * worst a reader gets is a hex dump caught mid-update, and the length is
-     * taken again from the copy so a moved terminator cannot run it on. */
-    const auto copyText = [](const char *from, size_t cap, char *to) {
-        const size_t n = ::strnlen(from, cap);
-        std::memcpy(to, from, n);
-        return ::strnlen(to, n);
-    };
-    msgppLen  = copyText(m_msgppHex.data(), sizeof(m_msgppHex) - 1, localMsgpp);
-    ioLen     = copyText(m_ioHex.data(), sizeof(m_ioHex) - 1, localIo);
-    endLen    = copyText(m_bridgeEnd.data(), sizeof(m_bridgeEnd) - 1, localBridgeEnd);
-    lastLen   = copyText(m_bridgeLast.data(), sizeof(m_bridgeLast) - 1, localBridgeLast);
-    moduleLen = copyText(m_moduleId.data(), sizeof(m_moduleId) - 1, localModule);
-
-    st.msgppHex.assign(localMsgpp, msgppLen);
-    st.ioHex.assign(localIo, ioLen);
-    st.moduleId.assign(localModule, moduleLen);
-    st.bridgeEnd.assign(localBridgeEnd, endLen);
-    st.bridgeLast.assign(localBridgeLast, lastLen);
+    st.msgppHex.assign(ex.msgpp, ::strnlen(ex.msgpp, sizeof(ex.msgpp) - 1));
+    st.ioHex.assign(ex.io, ::strnlen(ex.io, sizeof(ex.io) - 1));
+    st.moduleId.assign(ex.module, ::strnlen(ex.module, sizeof(ex.module) - 1));
+    st.bridgeEnd.assign(ex.bridgeEnd, ::strnlen(ex.bridgeEnd, sizeof(ex.bridgeEnd) - 1));
+    st.bridgeLast.assign(ex.bridgeLast, ::strnlen(ex.bridgeLast, sizeof(ex.bridgeLast) - 1));
     {
         static constexpr const char *kNames[] = {"GPS",  "SBAS", "Galileo", "BeiDou",
                                                  "IMES", "QZSS", "GLONASS"};
@@ -350,17 +419,16 @@ GpsTime::Status GpsTime::status() const
     st.gnssCfg  = gnssNaked ? "rejected" : gnssAcked ? "accepted" : "silent";
     st.timeMode = tmode == 1 ? "survey" : tmode == 2 ? "fixed" : "moving";
 
-    /* Built out here too: sixteen std::format calls are sixteen heap operations.
-     * The ring is read without the lock, so a list taken while a frame lands can
-     * mix two samples -- acceptable for a diagnostic. */
+    /* Sixteen std::format calls are sixteen heap operations, so they happen
+     * here, on the reader's copy. */
     st.recentFrames.clear();
     for (uint8_t i = 0; i < 16; ++i) {
         const uint8_t at = static_cast<uint8_t>((recentAt + 15 - i) % 16);
-        if (m_recentFrames[at] == 0) {
+        if (ex.recentFrames[at] == 0) {
             continue;
         }
         st.recentFrames +=
-            std::format("{:02x}:{:02x} ", m_recentFrames[at] >> 8, m_recentFrames[at] & 0xFF);
+            std::format("{:02x}:{:02x} ", ex.recentFrames[at] >> 8, ex.recentFrames[at] & 0xFF);
     }
 
     const int64_t nowUs = esp_timer_get_time();
@@ -370,6 +438,8 @@ GpsTime::Status GpsTime::status() const
     if (st.anchored) {
         st.anchorAgeUs = nowUs - anchorMonoUs;
     }
+    st.snapshotSeq   = ex.number;
+    st.snapshotAgeUs = ex.publishedUs != 0 ? nowUs - ex.publishedUs : -1;
     st.holdAssertInS =
         holdAssertAtUs == 0 ? -1 : (static_cast<double>(holdAssertAtUs - nowUs) / 1e6);
     st.lastEdgeAgeMs = lastEdgeUs < 0 ? -1 : (static_cast<double>(nowUs - lastEdgeUs) / 1e3);
@@ -456,10 +526,7 @@ GpsTime::Status GpsTime::status() const
          * 133 ms) with margin, and the 30 s grace keeps a mode change from
          * widening it. Capped at 200 ms, which is six times the worst error seen
          * and still finite. */
-        int64_t lastTpUs = 0;
-        portENTER_CRITICAL(&m_mux);
-        lastTpUs = m_qErrAtUs;
-        portEXIT_CRITICAL(&m_mux);
+        const int64_t lastTpUs = ex.qErrAtUs;
         /* Published inside the budget below as well as on its own, so a wide
          * bound can be told from a bad clock. */
         st.pulseUnobservedNs = unobservedNs();
