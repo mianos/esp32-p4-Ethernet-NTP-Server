@@ -43,6 +43,7 @@ esp_eth_mac_t   *s_mac      = nullptr;
 esp_netif_t     *s_netif    = nullptr;
 bool             s_attached = false;
 bool             s_enabled  = false;
+volatile bool    gSteered   = false;
 
 }  // namespace
 
@@ -673,6 +674,7 @@ esp_err_t enable(bool restart)
      * restart disables it first and puts the counter back on the clock
      * afterwards, since ptp_start() zeroes it. */
     if (restart && s_enabled && s_mac != nullptr) {
+        gSteered = false;
         (void)esp_eth_mac_ptp_disable(s_mac);
     }
 
@@ -738,6 +740,39 @@ esp_err_t enable(bool restart)
 bool enabled()
 {
     return s_enabled;
+}
+
+esp_err_t setRatePpb(int32_t ppb)
+{
+    if (!s_enabled || s_mac == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const esp_err_t err = esp_eth_mac_adj_ptp_time(s_mac, ppb);
+    if (err == ESP_OK) {
+        gSteered = true;
+    }
+    return err;
+}
+
+bool steered()
+{
+    return gSteered;
+}
+
+bool correctPhc()
+{
+    if (!s_enabled || s_mac == nullptr) {
+        return false;
+    }
+    struct timeval tv = {};
+    gettimeofday(&tv, nullptr);
+    const int64_t realtime = static_cast<int64_t>(tv.tv_sec) * 1000000000LL +
+                             static_cast<int64_t>(tv.tv_usec) * 1000;
+    const int64_t diff = realtime - nowNs();
+    if (diff <= 1000000LL && diff >= -1000000LL) {
+        return false;
+    }
+    return stepToRealtime() == ESP_OK;
 }
 
 esp_err_t stepToRealtime()

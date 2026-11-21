@@ -36,6 +36,21 @@ bool      enabled();
 /* Move the counter onto CLOCK_REALTIME. A boot sets it while the clock is still
  * 1970, so the counter is stepped with the clock -- PTP counts epoch seconds
  * and a stamp 56 years out is not a small error. */
+/* Steer the counter's rate by `ppb` (positive speeds it up). The servo measures the
+ * crystal; without this the counter the PTP stamps come from free-runs at that
+ * error while everything else is corrected. */
+esp_err_t setRatePpb(int32_t ppb);
+
+/* Whether the counter is being steered, so a caller that also scales elapsed
+ * time knows not to do it twice. Cleared when the counter is re-initialised. */
+bool steered();
+
+/* Step the counter onto CLOCK_REALTIME when it has drifted more than a
+ * millisecond from it. True when it stepped, in which case the caller's anchor
+ * stamp is stale. The counter is set before the clock on a boot, so the first
+ * lock can leave it milliseconds out and every PTP stamp carries that. */
+bool correctPhc();
+
 esp_err_t stepToRealtime();
 
 /* Set from a task, read from the PPS interrupt: a plain word, so the handler

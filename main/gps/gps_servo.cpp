@@ -4,6 +4,7 @@
  */
 #include "gps/gps_internal.h"
 
+
 using namespace gps_detail;
 
 void GpsTime::anchor(time_t second)
@@ -208,6 +209,16 @@ void GpsTime::anchor(time_t second)
     m_anchorValid = true;
     m_lastFix     = second;
     portEXIT_CRITICAL(&m_mux);
+
+    /* The counter is set from CLOCK_REALTIME at start-up, when that may still
+     * be 1970; the step to the first fix leaves the two milliseconds apart and
+     * every PTP stamp then carries the difference. Correct it here, and drop the
+     * PHC anchor when it moves so the served time falls back for one edge. */
+    if (ptp::correctPhc()) {
+        portENTER_CRITICAL(&m_mux);
+        m_anchorPhcNs = 0;
+        portEXIT_CRITICAL(&m_mux);
+    }
 
     if (gapUs >= kLockWindowUs) {
         /* The edge had gone stale and the servo carried the clock: this is what
@@ -513,6 +524,24 @@ void GpsTime::fitRate()
     m_rateSamples = static_cast<uint16_t>(m_rateCount);
     portEXIT_CRITICAL(&m_mux);
 
+    /* The counter the PTP stamps come from is not the one the servo steers by
+     * reading, and left alone it drifts at exactly the rate just fitted -- 30 ppm
+     * is 120 ms in an hour. Push the fit into it, throttled: only when it moves
+     * materially, and otherwise once every thirty seconds so a lost push (a MAC
+     * restart re-initialises the block) comes back. */
+    {
+        static int32_t lastPpb = 0;
+        static int64_t lastUs  = 0;
+        const int64_t  nowUs   = esp_timer_get_time();
+        if (ptp::hardware() && m_rateSamples >= kRateMinSamples &&
+            (std::abs(static_cast<int32_t>(ppb) - lastPpb) >= 500 || nowUs - lastUs > 30000000)) {
+            if (ptp::setRatePpb(static_cast<int32_t>(-ppb)) == ESP_OK) {
+                lastPpb = static_cast<int32_t>(ppb);
+                lastUs  = nowUs;
+            }
+        }
+    }
+
     /* Residual: the thing that says the samples are actually samples of a
      * clock and not of the receiver's mood -- and, while the servo is running,
      * the bound this reference states. Each edge's distance from the line
@@ -716,10 +745,15 @@ bool GpsTime::now(struct timespec &ts) const
                          static_cast<long long>(elapsedNs),
                          static_cast<long long>(esp_timer_get_time() * 1000 - monoUs * 1000));
             }
-            /* Nanoseconds here, so the ppb divisor is 1e9 and not the 1e6 the
-             * microsecond path above uses: 30 ppm over half a second is 15 us,
-             * which is 15000 ns, which is 5e8 * 3e4 / 1e9. */
-            const int64_t totalNs = utcNs + elapsedNs - elapsedNs * ratePpb / 1000000000;
+            /* Once the counter itself is being steered by this same fit, the
+             * elapsed part is already in real seconds and scaling it again
+             * would take the correction out twice. Until the first push lands
+             * it is not, and the scaling is what makes the served time rate
+             * right. Nanoseconds here, so the divisor is 1e9 and not the 1e6
+             * of the microsecond path below. */
+            const int64_t totalNs =
+                ptp::steered() ? utcNs + elapsedNs
+                               : utcNs + elapsedNs - elapsedNs * ratePpb / 1000000000;
             ts.tv_sec             = static_cast<time_t>(totalNs / 1000000000);
             ts.tv_nsec            = static_cast<long>(totalNs % 1000000000);
             return true;
