@@ -14,6 +14,7 @@
 #include "lwip/sockets.h"
 
 #include "net/net_state.h"
+#include "app/cores.h"
 
 namespace {
 
@@ -61,7 +62,8 @@ esp_err_t TxLag::begin()
     if (m_task != nullptr) {
         return ESP_OK;
     }
-    if (xTaskCreate(&TxLag::taskEntry, "tx_lag", kTaskStack, this, kTaskPrio, &m_task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(&TxLag::taskEntry, "tx_lag", kTaskStack, this, kTaskPrio, &m_task,
+                                cores::kWork) != pdPASS) {
         m_task = nullptr;
         return ESP_ERR_NO_MEM;
     }

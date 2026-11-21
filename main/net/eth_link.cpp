@@ -23,6 +23,7 @@
 #include "freertos/task.h"
 
 #include "net/eth_link.h"
+#include "app/cores.h"
 
 #include "soc/emac_reg.h"
 #include "soc/soc.h"
@@ -398,6 +399,9 @@ esp_err_t EthernetLink::begin()
 esp_err_t EthernetLink::installDriver()
 {
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
+    /* The receive task stays on the core that installs the driver, which is the
+     * work core: every caller of this is a task pinned there (app/cores.h). */
+    mac_config.flags |= ETH_MAC_FLAG_PIN_TO_CORE;
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
     phy_config.phy_addr         = kEthPins.phyAddr;
     phy_config.reset_gpio_num   = kEthPins.phyReset;
@@ -565,8 +569,8 @@ esp_err_t EthernetLink::restart(const char *why)
 
 esp_err_t EthernetLink::startStatusTask()
 {
-    if (xTaskCreate(&statusTaskEntry, "eth_status", kStatusTaskStack, this, kStatusTaskPrio,
-                    nullptr) != pdPASS) {
+    if (xTaskCreatePinnedToCore(&statusTaskEntry, "eth_status", kStatusTaskStack, this,
+                                kStatusTaskPrio, nullptr, cores::kWork) != pdPASS) {
         ESP_LOGW(TAG, "could not start the link status task");
         return ESP_ERR_NO_MEM;
     }

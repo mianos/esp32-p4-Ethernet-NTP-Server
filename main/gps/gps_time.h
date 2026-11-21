@@ -634,6 +634,8 @@ private:
     void        recordEdge(int64_t edgeNs);
     esp_err_t   beginCapture();
     esp_err_t   beginInterruptEdge();
+    esp_err_t   beginEdge();
+    esp_err_t   beginEdgeOnTimingCore();
     static void taskEntry(void *arg);
     static void bridgeTaskEntry(void *arg);
     void        bridgeTask();

@@ -27,6 +27,7 @@
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 #include "app/settings.h"
+#include "app/cores.h"
 
 namespace {
 
@@ -116,7 +117,8 @@ esp_err_t net_log::start()
         return ESP_FAIL;
     }
 
-    if (xTaskCreate(&drainTask, "netlog", 3072, nullptr, kTaskPrio, nullptr) != pdPASS) {
+    if (xTaskCreatePinnedToCore(&drainTask, "netlog", 3072, nullptr, kTaskPrio, nullptr,
+                                cores::kWork) != pdPASS) {
         ESP_LOGW(TAG, "no task");
         /* Undone, or the next call sees a socket and reports a sink that has
          * nothing draining it. */

@@ -217,7 +217,7 @@ the new state.
 
 | Command | Effect |
 |---|---|
-| `help [cmd]`, `version`, `restart`, `free`, `heap`, `tasks` | usage, build, reboot, memory, task list |
+| `help [cmd]`, `version`, `restart`, `free`, `heap`, `tasks` | usage, build, reboot, memory, task list with each task's core |
 | `log_level <level> [tag]` | log level, all tags or one |
 | `nvs_namespace`, `nvs_list`, `nvs_get`, `nvs_set`, `nvs_erase`, `nvs_erase_namespace` | read and write the NVS partition directly |
 
@@ -515,6 +515,10 @@ that does have a rate knob; that is the next step.
 
 - The edge is stamped in the interrupt handler: single-digit microseconds,
   limited by interrupt latency. Not sub-microsecond.
+- That interrupt has core 1 to itself. Every task, and so every other driver
+  interrupt, is on core 0, so a masked stretch in the network stack or the heap
+  cannot hold the edge off. IDF's tick, idle task and flash-write parking still
+  run on core 1. `tasks` and `intr` on the console show who is where.
 - Between edges the anchor is extended with `esp_timer_get_time()`, corrected by
   the servo's rate, so what is left is the fit's residual — 2 µs measured across
   a two-and-a-half-minute holdover — instead of 30 µs of crystal error per
@@ -879,6 +883,7 @@ the box. See `viewer/README.md`.
 | `settings.{cpp,h}` | `Settings` — the stored keys and their defaults |
 | `config_apply.{cpp,h}` | the sequence that runs after a setting changes: hostname, address, time source |
 | `console.{cpp,h}` | the serial console and its commands |
+| `cores.h` | which core is kept for the PPS interrupt and which runs everything else |
 | `text.h` | formatting and parsing without a format string |
 | **`main/gps/`** | **the receiver and the clock built on it** |
 | `gps_time.h` | the `GpsTime` class: everything below is its implementation |

@@ -3,6 +3,7 @@
 #include "soc/emac_dma_struct.h"
 
 #include "net/eth_link.h"
+#include "app/cores.h"
 #include "gps/gps_time.h"
 
 #include "esp_attr.h"
@@ -1138,7 +1139,8 @@ esp_err_t start(Mode value, uint8_t domain, uint8_t priority1)
         gDelay[i].seq = 0xffff;
     }
     gMode = static_cast<uint8_t>(value);
-    if (xTaskCreate(&ptpTask, "ptp", kTaskStack, nullptr, 6, &gTask) != pdPASS) {
+    if (xTaskCreatePinnedToCore(&ptpTask, "ptp", kTaskStack, nullptr, 6, &gTask, cores::kWork) !=
+        pdPASS) {
         gMode = 0;
         return ESP_ERR_NO_MEM;
     }

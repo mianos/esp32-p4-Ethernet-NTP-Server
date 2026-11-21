@@ -34,7 +34,7 @@ dependencies:
       git: git@github.com:mianos/mianesp.git
       path: components/jsonwrapper
       type: git
-    version: 8a3dc6fb82134c67db4e1945b164e16c7f9cd8b3
+    version: 01a3dddcfcdfba84025eef5ea5cd66d2d0a7a858
   nvsstoragemanager:
     component_hash: 17abcaed9caf3c8dc23e40baaa180de517980b84cc45c1d668065b7851e58ed2
     dependencies: []
@@ -42,7 +42,7 @@ dependencies:
       git: git@github.com:mianos/mianesp.git
       path: components/nvsstoragemanager
       type: git
-    version: 8a3dc6fb82134c67db4e1945b164e16c7f9cd8b3
+    version: 01a3dddcfcdfba84025eef5ea5cd66d2d0a7a858
   settingsbase:
     component_hash: 6605801bc4e427e3d35041e5a2b6c4cad366cfe12171e3f9ac246a77ba8d68ab
     dependencies:
@@ -58,9 +58,9 @@ dependencies:
       git: git@github.com:mianos/mianesp.git
       path: components/settingsbase
       type: git
-    version: 8a3dc6fb82134c67db4e1945b164e16c7f9cd8b3
+    version: 01a3dddcfcdfba84025eef5ea5cd66d2d0a7a858
   webserver:
-    component_hash: 0f160fda1ed1eb4cf320e6e985de937f0ad986a4c4d5e4bd88deca699440b0c3
+    component_hash: 7ded32300f49d3374a256ccccdd8ff2a8e3f5d67c448cdf1d73f336a16b721f1
     dependencies:
     - git: git@github.com:mianos/mianesp.git
       name: jsonwrapper
@@ -74,7 +74,7 @@ dependencies:
       git: git@github.com:mianos/mianesp.git
       path: components/webserver
       type: git
-    version: 8af0f72ffc80f2bdfcee9c9717780622dccfbc27
+    version: 01a3dddcfcdfba84025eef5ea5cd66d2d0a7a858
 direct_dependencies:
 - cmd_nvs
 - cmd_system

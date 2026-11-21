@@ -1,5 +1,7 @@
 #include "ntp/ntp_server.h"
 
+#include "app/cores.h"
+
 #include "ptp/ptp.h"
 
 #include "clock/clock_source.h"
@@ -765,8 +767,8 @@ esp_err_t NtpServer::begin()
 
     m_sock = sock;
     m_running.store(true, std::memory_order_relaxed);
-    if (xTaskCreate(&NtpServer::taskEntry, "ntp_serve", kTaskStack, this, kTaskPriority, &m_task) !=
-        pdPASS) {
+    if (xTaskCreatePinnedToCore(&NtpServer::taskEntry, "ntp_serve", kTaskStack, this, kTaskPriority,
+                                &m_task, cores::kWork) != pdPASS) {
         m_running.store(false, std::memory_order_relaxed);
         m_sock = -1;
         close(sock);

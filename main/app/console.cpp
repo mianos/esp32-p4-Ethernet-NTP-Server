@@ -12,6 +12,7 @@
 
 #include "esp_app_desc.h"
 #include "esp_console.h"
+#include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -21,6 +22,7 @@
 
 #include "clock/clock_source.h"
 #include "app/config_apply.h"
+#include "app/cores.h"
 #include "net/eth_link.h"
 #include "gps/gps_time.h"
 #include "ptp/ptp.h"
@@ -592,6 +594,11 @@ int cmdGps(void *, int argc, char **argv)
     return 1;
 }
 
+int cmdIntr(void *, int, char **)
+{
+    return esp_intr_dump(stdout) == ESP_OK ? 0 : 1;
+}
+
 void add(const char *name, const char *help, const char *hint,
          esp_console_cmd_func_with_context_t func)
 {
@@ -619,6 +626,7 @@ esp_err_t console::start()
     repl.max_cmdline_length        = 512;
     /* The default 4096 is thin for stdio plus argtable. */
     repl.task_stack_size = 6144;
+    repl.task_core_id    = cores::kWork;
 
     esp_console_register_help_command();
     register_system_common();
@@ -636,6 +644,7 @@ esp_err_t console::start()
     add("ntpserver", "Upstream server for timeSource=static", "[host]", cmdNtpServer);
     add("log", "UDP log sink", "[<ip> <port>]", cmdLog);
     add("status", "One screen: link, addressing, fix, serving", "", cmdStatus);
+    add("intr", "Which interrupt is on which core", "", cmdIntr);
     add("eth", "Link state, or restart the MAC", "[restart]", cmdEth);
     add("gps", "Receiver state, survey, reset, antenna, mask, holdover test",
         "[survey <stop|fix> | reset [soft|hard|power|cold] | ant <on|off> | gnss <hex> | "
@@ -667,7 +676,8 @@ esp_err_t console::start()
      * its notification while the reader below owns the port. */
     (void)handle;
 
-    if (xTaskCreate(&readerTask, "console_in", 6144, nullptr, 5, nullptr) != pdPASS) {
+    if (xTaskCreatePinnedToCore(&readerTask, "console_in", 6144, nullptr, 5, nullptr,
+                                cores::kWork) != pdPASS) {
         ESP_LOGE(TAG, "no reader task");
         return ESP_ERR_NO_MEM;
     }

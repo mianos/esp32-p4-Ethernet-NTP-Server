@@ -88,8 +88,26 @@ CONFIG_LWIP_MAX_SOCKETS=16
 # `tasks` in the console needs both; nothing else in the firmware does.
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+# And a core column in it, to check that nothing but IDF's own per-core tasks
+# is on core 1.
+CONFIG_FREERTOS_VTASKLIST_INCLUDE_COREID=y
 
 # lwIP, the NTP responder's raw replies and the PTP task all transmit, from
-# three tasks on two cores, and the EMAC's descriptor ring has no lock of its
-# own.
+# three tasks that preempt one another, and the EMAC's descriptor ring has no
+# lock of its own.
 CONFIG_ETH_TRANSMIT_MUTEX=y
+
+# Core 1 is kept for the PPS interrupt (main/app/cores.h). The firmware's own
+# tasks are pinned in the code; these are the ones IDF and the web server
+# component start, which otherwise run on whichever core is free.
+CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0=y
+CONFIG_FREERTOS_TIMER_TASK_AFFINITY_CPU0=y
+CONFIG_PTHREAD_DEFAULT_CORE_0=y
+CONFIG_WEBSERVER_TASK_AFFINITY_CPU0=y
+
+# With one work core, a client that keeps the HTTP server busy keeps core 0
+# from ever idling. The task watchdog then prints its report from an interrupt
+# handler, for long enough that the GPS UART's FIFO overflows and frames fail
+# their checksum. Core 1's idle task is still watched, and the interrupt
+# watchdog still covers a real hang.
+CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0=n

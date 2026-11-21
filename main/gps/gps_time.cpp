@@ -166,6 +166,71 @@ void GpsTime::taskEntry(void *arg)
     static_cast<GpsTime *>(arg)->task();
 }
 
+esp_err_t GpsTime::beginEdge()
+{
+    /* The pin is configured here and not with the UART, because the GPIO driver
+     * fixes the core of its interrupt at the first pin whose interrupt is
+     * enabled, and that has to be this call on the timing core. */
+    gpio_config_t pps = {};
+    pps.pin_bit_mask  = 1ull << kPpsPin;
+    pps.mode          = GPIO_MODE_INPUT;
+    pps.pull_up_en    = GPIO_PULLUP_DISABLE;
+    /* Pulled down so an unconnected pin reads 0 rather than picking up noise;
+     * the module drives the line push-pull, so the resistor never fights it. */
+    pps.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    pps.intr_type    = GPIO_INTR_POSEDGE;
+    esp_err_t err    = gpio_config(&pps);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "GPIO%d: %s -- no PPS", static_cast<int>(kPpsPin), esp_err_to_name(err));
+        return err;
+    }
+
+    err = kCaptureEdge ? beginCapture() : ESP_ERR_NOT_SUPPORTED;
+    if (err != ESP_OK) {
+        /* The capture is how the edge is stamped without interrupt latency in
+         * it, but a plain GPIO interrupt is a working second best and it is not
+         * worth refusing to run over. */
+        ESP_LOGW(TAG, "MCPWM capture unavailable (%s): falling back to an interrupt stamp",
+                 esp_err_to_name(err));
+        err = beginInterruptEdge();
+    }
+    return err;
+}
+
+/* An interrupt is bound to the core that installs it, and the installer cannot
+ * be handed to esp_ipc: the GPIO driver makes its own IPC call to the same core
+ * and would wait on the one it is running in. So a task pinned there does it
+ * and goes away. */
+esp_err_t GpsTime::beginEdgeOnTimingCore()
+{
+    struct Call {
+        GpsTime          *self;
+        TaskHandle_t      waiter;
+        esp_err_t         err;
+        std::atomic<bool> done;
+    } call{this, xTaskGetCurrentTaskHandle(), ESP_FAIL, false};
+
+    const auto run = [](void *arg) {
+        auto *const        c      = static_cast<Call *>(arg);
+        const TaskHandle_t waiter = c->waiter;
+        c->err                    = c->self->beginEdge();
+        /* Nothing of `c` is touched after this store: the waiter's frame is
+         * free to go the moment it reads true. */
+        c->done.store(true, std::memory_order_release);
+        xTaskNotifyGive(waiter);
+        vTaskDelete(nullptr);
+    };
+    if (xTaskCreatePinnedToCore(run, "pps_bind", 4096, &call, kTaskPriority, nullptr,
+                                cores::kTiming) != pdPASS) {
+        return ESP_ERR_NO_MEM;
+    }
+    /* A notification from anywhere else must not end the wait early. */
+    while (!call.done.load(std::memory_order_acquire)) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
+    return call.err;
+}
+
 /* The fallback: a GPIO interrupt that stamps on entry. Level 3, above the UART\'s
  * level 1 and the Ethernet\'s, so the edge nests over a serial or MAC handler
  * already running instead of waiting for it, and IRAM so it survives the flash
@@ -182,7 +247,8 @@ esp_err_t GpsTime::beginInterruptEdge()
         err = gpio_isr_handler_add(kPpsPin, &GpsTime::ppsIsr, this);
     }
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "PPS edge: GPIO interrupt (stamp on entry, interrupt latency included)");
+        ESP_LOGI(TAG, "PPS edge: GPIO interrupt on core %d (stamp on entry, latency included)",
+                 static_cast<int>(xPortGetCoreID()));
     }
     return err;
 }
@@ -332,36 +398,14 @@ esp_err_t GpsTime::begin()
         return err;
     }
 
-    gpio_config_t pps = {};
-    pps.pin_bit_mask  = 1ull << kPpsPin;
-    pps.mode          = GPIO_MODE_INPUT;
-    pps.pull_up_en    = GPIO_PULLUP_DISABLE;
-    /* Pulled down so an unconnected pin reads 0 rather than picking up noise;
-     * the module drives the line push-pull, so the resistor never fights it. */
-    pps.pull_down_en = GPIO_PULLDOWN_ENABLE;
-    pps.intr_type    = GPIO_INTR_POSEDGE;
-    err              = gpio_config(&pps);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "GPIO%d: %s -- no PPS", static_cast<int>(kPpsPin), esp_err_to_name(err));
-        return err;
-    }
-
-    err = kCaptureEdge ? beginCapture() : ESP_ERR_NOT_SUPPORTED;
-    if (err != ESP_OK) {
-        /* The capture is how the edge is stamped without interrupt latency in
-         * it, but a plain GPIO interrupt is a working second best and it is not
-         * worth refusing to run over. */
-        ESP_LOGW(TAG, "MCPWM capture unavailable (%s): falling back to an interrupt stamp",
-                 esp_err_to_name(err));
-        err = beginInterruptEdge();
-    }
+    err = beginEdgeOnTimingCore();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "PPS edge on GPIO%d: %s", static_cast<int>(kPpsPin), esp_err_to_name(err));
         return err;
     }
 
-    if (xTaskCreate(&GpsTime::taskEntry, "gps", kTaskStack, this, kTaskPriority, nullptr) !=
-        pdPASS) {
+    if (xTaskCreatePinnedToCore(&GpsTime::taskEntry, "gps", kTaskStack, this, kTaskPriority,
+                                nullptr, cores::kWork) != pdPASS) {
         ESP_LOGE(TAG, "cannot start the GPS task");
         return ESP_ERR_NO_MEM;
     }
@@ -385,7 +429,8 @@ esp_err_t GpsTime::begin()
                  kAntSensePin);
     }
 
-    if (xTaskCreate(&GpsTime::bridgeTaskEntry, "gpsbridge", 4096, this, 3, nullptr) != pdPASS) {
+    if (xTaskCreatePinnedToCore(&GpsTime::bridgeTaskEntry, "gpsbridge", 4096, this, 3, nullptr,
+                                cores::kWork) != pdPASS) {
         ESP_LOGW(TAG, "no bridge task: u-center passthrough unavailable");
     }
 

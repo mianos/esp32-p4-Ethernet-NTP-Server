@@ -30,6 +30,7 @@
 #include "clock/clock_source.h"
 #include "ntp/serve_path.h"
 #include "clock/ntp_time.h"
+#include "app/cores.h"
 #include "app/settings.h"
 
 #include "gps/gps_time.h"
@@ -303,7 +304,11 @@ constexpr int64_t kEdgeOutlierNs = 20000; /* 20 us */
  * responder hit, and this task builds Status in its own log helpers. */
 constexpr int kTaskStack = 8192;
 
-constexpr UBaseType_t kTaskPriority = 4; /* below the responder: it answers packets */
+/* Below the responder and the network stack, which answer packets, and above
+ * the HTTP server, the console and PTP. All of them share one core now
+ * (app/cores.h), and at 4 a client polling the HTTP API kept this task off the
+ * UART for as long as it polled: no frames, no anchors, then a baud rescan. */
+constexpr UBaseType_t kTaskPriority = 7;
 
 /* NTP refid for this reference, spelled the way RFC 5905 spells it: four ASCII
  * bytes, the last a NUL that the responder's text formatter trims. */
