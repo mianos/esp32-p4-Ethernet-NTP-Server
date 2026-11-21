@@ -85,8 +85,10 @@ void GpsTime::anchor(time_t second)
     int64_t predictedNs = 0;
     int64_t gapUs       = 0;
     bool    hadAnchor   = false;
+    bool    rateKnown   = false;
     {
         portENTER_CRITICAL(&m_mux);
+        rateKnown = m_rateSamples >= kRateMinSamples;
         if (m_anchorValid && ppsMonoUs > m_anchorMonoUs) {
             hadAnchor   = true;
             gapUs       = ppsMonoUs - m_anchorMonoUs;
@@ -136,7 +138,16 @@ void GpsTime::anchor(time_t second)
      * one missed edge and that, the spanning sample would still be fitted and
      * the edge is refused instead. */
     const bool resumed = m_lastEdgeMonoSet && edgeGapUs >= kRateGapNs / 1000;
-    const bool trusted = advance && (regular || resumed);
+    const bool spaced  = advance && (regular || resumed);
+
+    /* And a third question, once there is a fit to ask it of: is the edge where
+     * the fit said it would be? Only for ordinary edges, as with the spike
+     * count below -- across a holdover the prediction has been running on the
+     * crystal and its error is the thing being measured. See kEdgeOutlierNs. */
+    const int64_t errorNs = static_cast<int64_t>(second) * 1000000000 - predictedNs;
+    const bool    outlier = spaced && hadAnchor && rateKnown && gapUs < kLockWindowUs &&
+                         (errorNs > kEdgeOutlierNs || errorNs < -kEdgeOutlierNs);
+    const bool trusted = spaced && !outlier;
 
     /* A pulse arriving a millisecond or more from where the fit and the anchor
      * put it is being corrupted rather than merely late. Measured against the
@@ -145,12 +156,18 @@ void GpsTime::anchor(time_t second)
      * slew is in flight. Only for ordinary edges: across a holdover the
      * prediction has been running on the crystal for seconds and its error is
      * expected, so testing there would count every return from a gap. */
-    if (trusted && hadAnchor && gapUs < kLockWindowUs &&
-        (static_cast<int64_t>(second) * 1000000000 - predictedNs > kEdgeSpikeNs ||
-         predictedNs - static_cast<int64_t>(second) * 1000000000 > kEdgeSpikeNs)) {
+    if (spaced && hadAnchor && gapUs < kLockWindowUs &&
+        (errorNs > kEdgeSpikeNs || errorNs < -kEdgeSpikeNs)) {
         portENTER_CRITICAL(&m_mux);
         ++m_edgeSpikes;
         portEXIT_CRITICAL(&m_mux);
+    }
+    if (outlier) {
+        portENTER_CRITICAL(&m_mux);
+        ++m_edgeOutliers;
+        portEXIT_CRITICAL(&m_mux);
+        ESP_LOGW(TAG, "edge %+lld us from the fit: not anchored",
+                 static_cast<long long>(errorNs / 1000));
     }
 
     m_lastEdgeSecond    = second;

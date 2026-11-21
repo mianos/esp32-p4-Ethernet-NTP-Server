@@ -340,6 +340,9 @@ public:
         uint32_t servoSteps  = 0;
         uint32_t servoClamps = 0;
         uint32_t edgeSpikes  = 0;
+        /* Edges refused for landing more than 20 us from the fit: a late
+         * interrupt, or the first seconds of a real step. */
+        uint32_t edgeOutliers = 0;
         /* The trust test's verdict on the newest edge, and how many edges in a
          * row it has refused. Spikes are edges that arrived where nothing
          * predicted; rejects are edges that failed the spacing or the
@@ -925,6 +928,7 @@ private:
     uint32_t     m_servoSteps      = 0;
     uint32_t     m_servoClamps     = 0;
     uint32_t     m_edgeSpikes      = 0;
+    uint32_t     m_edgeOutliers    = 0;
     /* The trust test's history: how many edges in a row it has refused, and
      * the module's second at the previous edge (kept separately from m_lastFix,
      * which only advances on an edge that was actually anchored). */

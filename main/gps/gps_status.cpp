@@ -227,6 +227,7 @@ GpsTime::Status GpsTime::status() const
     st.servoSteps      = m_servoSteps;
     st.servoClamps     = m_servoClamps;
     st.edgeSpikes      = m_edgeSpikes;
+    st.edgeOutliers    = m_edgeOutliers;
     st.edgeRejects     = m_edgeRejects;
     st.lastEdgeTrusted = m_lastEdgeTrusted;
     dopAtUs            = m_dopAtUs;

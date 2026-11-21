@@ -282,6 +282,17 @@ constexpr int64_t kPostStepSlewNs = 2000000; /* 2 ms */
  * tens of microseconds a second, and the loop only ever sees the remainder. */
 constexpr int64_t kEdgeSpikeNs = 1000000; /* 1 ms */
 
+/* An edge this far from where the fit put it is not used. The pulse is stamped
+ * by an interrupt, and an interrupt can be held off: one edge stamped 45 us
+ * late was anchored, entered the fit, and held the worst residual over
+ * kLockTieMaxNs for the 300 s it took to leave the window -- five minutes at
+ * stratum 16 for one late interrupt, on a fit whose RMS was 0.36 us. The limit
+ * is the lock test's own, so a sample that is let in cannot close it alone.
+ *
+ * A real step in the pulse is refused too, and that is bounded: three refusals
+ * make a gap the fit restarts across, and the fourth edge is taken as it is. */
+constexpr int64_t kEdgeOutlierNs = 20000; /* 20 us */
+
 /* 6 kB, raised from 4096 when the sky view landed. The decoder, the servo fit
  * and the NAV-SAT walk all run here, and a frame walk that keeps a row per
  * satellite is what pushed the old figure over: it overflowed into a panic
