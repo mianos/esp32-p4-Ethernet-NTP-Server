@@ -77,7 +77,11 @@ bool wants(const uint8_t *field, size_t len, const char *var)
 class Writer {
 public:
     Writer(uint8_t *out, size_t cap, const uint8_t *filter, size_t filterLen)
-        : m_out(out), m_cap(cap < kHeaderLen + kMaxData ? cap : kHeaderLen + kMaxData),
+        /* The whole buffer less the padding, not one fragment's worth: the
+         * list is written entire and cut into fragments afterwards. Clamped to
+         * a fragment it stopped at 468 octets and the rest of the list was
+         * dropped without the client being told. */
+        : m_out(out), m_cap(cap >= 3 ? cap - 3 : 0),
           m_filter(filter), m_filterLen(filterLen)
     {
         m_len = kHeaderLen;
@@ -316,6 +320,12 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
      * version we do not speak is not answered at all. */
     const uint8_t version = static_cast<uint8_t>((req[0] >> 3) & 0x07);
     if (version < 1 || version > 4) {
+        return 0;
+    }
+
+    /* A response is never answered. Without this two servers that speak mode 6
+     * answer each other's answers for ever, started by one spoofed datagram. */
+    if ((req[1] & kBitResponse) != 0) {
         return 0;
     }
 

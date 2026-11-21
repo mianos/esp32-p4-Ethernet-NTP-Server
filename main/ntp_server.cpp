@@ -1158,12 +1158,19 @@ void NtpServer::serveLoop()
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 ESP_LOGW(TAG, "recvfrom: errno %d", errno);
             }
+        } else if ((packet[0] & 0x07) == kModeControl &&
+                   limiter.check(from, nowMs) != Action::Answer) {
+            /* Over the limit: silence, because a KoD is not a shape ntpq
+             * expects. Control queries used to sit outside the limiter on the
+             * grounds that they are read-only -- but a 12-byte READVAR is
+             * answered with 480, to a source address nobody has verified. The
+             * sixteen-packet burst still covers several ntpq -p runs. */
+            ++dropped;
+            ++winDropped;
+            m_dropped.store(dropped, std::memory_order_relaxed);
         } else if ((packet[0] & 0x07) == kModeControl) {
             /* Control messages share the socket but not the protocol, and are
-             * answered ahead of the client path and outside the rate limiter:
-             * one ntpq -p run is three packets, and a KoD is not a shape it
-             * expects for a control query. Read-only, so metering them buys
-             * little. */
+             * answered ahead of the client path. */
             const TimeReference ref = m_ref->reference();
             ControlFacts        facts;
             fillControlFacts(facts, ref);
