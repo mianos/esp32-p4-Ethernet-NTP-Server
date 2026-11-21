@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdlib>
 /*
  * Device settings — a SettingsBase subclass (mianesp's settingsbase component).
@@ -96,8 +97,16 @@ public:
     /* PTP: off, master or slave; the domain and the priority1 the Announce
      * carries. Read by the responder at start and by the console. */
     const std::string &ptpMode() const { return m_ptpMode; }
-    uint8_t ptpDomain() const { return static_cast<uint8_t>(std::strtoul(m_ptpDomain.c_str(), nullptr, 10)); }
-    uint8_t ptpPriority1() const { return static_cast<uint8_t>(std::strtoul(m_ptpPriority1.c_str(), nullptr, 10)); }
+    /* Clamped, not cast: "300" through a uint8_t cast is 44, which is a
+     * different domain rather than a refused one. */
+    uint8_t ptpDomain() const
+    {
+        return static_cast<uint8_t>(std::min(std::strtoul(m_ptpDomain.c_str(), nullptr, 10), 127ul));
+    }
+    uint8_t ptpPriority1() const
+    {
+        return static_cast<uint8_t>(std::min(std::strtoul(m_ptpPriority1.c_str(), nullptr, 10), 255ul));
+    }
 
     /* Where the receiver's time mode was left, so a power cut does not cost it.
      * The grid goes off, and a locked position or a survey in progress lives in

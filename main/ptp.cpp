@@ -366,16 +366,16 @@ void sendSync()
     /* The counter is read before the frame: without a hardware stamp that is
      * the best the Follow_Up can carry, and it is within the send cost of the
      * truth. With one, the measured value replaces it. */
-    int64_t syncNs = 0;
-    if (kTxStamp) {
-        if (sendPtp(kMulticast, sync, kSyncLen, &syncNs) != ESP_OK || syncNs == 0) {
-            return;
-        }
-    } else {
-        syncNs = ptp::nowNs();
-        if (sendPtp(kMulticast, sync, kSyncLen, nullptr) != ESP_OK) {
-            return;
-        }
+    const int64_t beforeNs = ptp::nowNs();
+    int64_t       syncNs   = 0;
+    if (sendPtp(kMulticast, sync, kSyncLen, kTxStamp ? &syncNs : nullptr) != ESP_OK) {
+        return;
+    }
+    /* A Sync that left without a stamp still gets its Follow_Up. Returning here
+     * meant a timestamp unit that had stopped stamping left slaves with an
+     * announced master and nothing to synchronise to. */
+    if (syncNs == 0) {
+        syncNs = beforeNs;
     }
     uint8_t follow[kFollowUpLen] = {};
     putHeader(follow, kMsgFollowUp, kFollowUpLen, seq, kFlagTwoStep, 0);
@@ -502,11 +502,27 @@ void onDelayResp(const uint8_t *frame, int64_t rxNs, uint16_t seq)
     if (seq != gSlave.delaySeq || gSlave.t3 == 0 || gSlave.t1 == 0 || gSlave.t2 == 0) {
         return;
     }
-    /* offset = ((t2 - t1) - (t4 - t3)) / 2, all four on the counter's base. */
-    const int64_t t4     = rxNs;
-    const int64_t offset = ((gSlave.t2 - gSlave.t1) - (t4 - gSlave.t3)) / 2;
+    /* offset = ((t2 - t1) - (t4 - t3)) / 2. t1 and t4 are the master's, and t4
+     * is the receiveTimestamp in this message's body -- when the master heard
+     * the Delay_Req -- not when its answer got here: with the local arrival in
+     * its place the two path terms were both ours and the master's turnaround
+     * was read as offset. The master's stamps are TAI and the counter is UTC,
+     * so the announced offset comes off them first. */
+    const uint8_t *stamp   = frame + 14 + kHeader;
+    uint64_t       seconds = 0;
+    for (int i = 0; i < 6; ++i) {
+        seconds = (seconds << 8) | stamp[i];
+    }
+    uint32_t fraction = 0;
+    for (int i = 0; i < 4; ++i) {
+        fraction = (fraction << 8) | stamp[6 + i];
+    }
+    const int64_t taiToUtc = static_cast<int64_t>(utcOffset()) * 1000000000LL;
+    const int64_t t4 = static_cast<int64_t>(seconds) * 1000000000LL + fraction - taiToUtc;
+    const int64_t t1 = gSlave.t1 - taiToUtc;
+    const int64_t offset = ((gSlave.t2 - t1) - (t4 - gSlave.t3)) / 2;
     gSlave.offsetNs      = offset;
-    gSlave.delayNs       = ((t4 - gSlave.t3) + (gSlave.t2 - gSlave.t1)) / 2;
+    gSlave.delayNs       = ((t4 - gSlave.t3) + (gSlave.t2 - t1)) / 2;
     gSlave.t3            = 0;
     gSlave.t1            = 0;
     gSlave.t2            = 0;
@@ -514,7 +530,6 @@ void onDelayResp(const uint8_t *frame, int64_t rxNs, uint16_t seq)
     ++s_stats.measured;
     s_stats.lastPeerNs    = rxNs;
     s_stats.slaveOffsetNs = offset;
-    (void)frame;
 }
 
 void slaveTick()
@@ -580,11 +595,17 @@ esp_err_t inputHandler(esp_eth_handle_t, uint8_t *buffer, uint32_t length, void 
                 case kMsgSync:
                     onSync(buffer, ns, get16(buffer + 14 + 30));
                     break;
+                /* Both read a ten-octet stamp after the header, and the
+                 * guard above only promises the header. */
                 case kMsgFollowUp:
-                    onFollowUp(buffer, get16(buffer + 14 + 30));
+                    if (length >= 14 + kHeader + kStamp) {
+                        onFollowUp(buffer, get16(buffer + 14 + 30));
+                    }
                     break;
                 case kMsgDelayResp:
-                    onDelayResp(buffer, ns, get16(buffer + 14 + 30));
+                    if (length >= 14 + kHeader + kStamp) {
+                        onDelayResp(buffer, ns, get16(buffer + 14 + 30));
+                    }
                     break;
                 default:
                     break;
@@ -974,16 +995,25 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
         sum += udpLen;
         sum += 17;
         sum = sum16(udp, udpLen, sum);
-        const uint16_t c = fold(sum);
-        udp[6]           = static_cast<uint8_t>(c >> 8);
+        /* Zero means "no checksum", which IPv6 does not allow: a sum that
+         * comes out as zero goes on the wire as all ones (RFC 8200 8.1). */
+        const uint16_t folded = fold(sum);
+        const uint16_t c      = folded == 0 ? 0xffff : folded;
+        udp[6]                = static_cast<uint8_t>(c >> 8);
         udp[7]           = static_cast<uint8_t>(c & 0xff);
     }
 
     const size_t total = udpOff + udpLen;
-    /* No transmit stamp: the reply's arrival is the one that matters, and its
-     * transmit field has to be written before the frame goes. */
-    const esp_err_t err = transmit(frame, total, nullptr);
-    if (s_stats.txStamps == 0) {
+    /* A transmit stamp only when the caller asks for one. A basic reply has no
+     * use for it -- its transmit field is written before the frame goes -- and
+     * every stamped frame is a turn through the descriptor's timestamp bit, so
+     * the responder asks only for a client that may come back interleaved. */
+    const esp_err_t err = transmit(frame, total, stampNs);
+    /* Once. This was keyed on the stamp count, which a reply no longer moves,
+     * so with PTP off every reply logged from inside the responder. */
+    static bool firstLogged = false;
+    if (!firstLogged) {
+        firstLogged = true;
         ESP_LOGI(TAG, "first raw send: %u bytes to %u.%u.%u.%u:%u, %s",
                  static_cast<unsigned>(total), dstAddr[0], dstAddr[1], dstAddr[2], dstAddr[3],
                  static_cast<unsigned>(dstPort), esp_err_to_name(err));
@@ -1010,6 +1040,10 @@ bool takeRx(const uint8_t *addr, size_t addrLen, uint16_t port, Rx *out)
      * lwIP, and this runs with interrupts off. The first miss is reported
      * below, once the lock is released. */
     portENTER_CRITICAL(&s_mux);
+    /* The oldest live match, not the first in the array: two requests queued
+     * from one address and port otherwise swap stamps whenever the ring has
+     * wrapped between them. */
+    RxStamp *best = nullptr;
     for (size_t i = 0; i < kRing; ++i) {
         RxStamp &slot = s_ring[i];
         if (!slot.used || slot.port != port || slot.addrLen != addrLen ||
@@ -1021,11 +1055,15 @@ bool takeRx(const uint8_t *addr, size_t addrLen, uint16_t port, Rx *out)
             slot.used = false;
             continue;
         }
-        out->ns = slot.ns;
-        std::memcpy(out->mac, slot.mac, 6);
-        slot.used = false;
-        found     = true;
-        break;
+        if (best == nullptr || slot.ns < best->ns) {
+            best = &slot;
+        }
+    }
+    if (best != nullptr) {
+        out->ns = best->ns;
+        std::memcpy(out->mac, best->mac, 6);
+        best->used = false;
+        found      = true;
     }
     portEXIT_CRITICAL(&s_mux);
 
@@ -1075,11 +1113,18 @@ void stop()
     if (gMode != 0) {
         gMode = 0;
         /* The task deletes itself on its next tick; wait for it to be gone so a
-         * restart cannot leave two senders. */
-        for (int i = 0; i < 30 && gTask != nullptr; ++i) {
+         * restart cannot leave two senders. The tick is a second, so 300 ms of
+         * waiting usually gave up first and the restart did leave two. */
+        for (int i = 0; i < 150 && gTask != nullptr; ++i) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
+}
+
+void setIdentity(uint8_t domain, uint8_t priority1)
+{
+    gDomain    = static_cast<uint8_t>(domain > 127 ? 127 : domain);
+    gPriority1 = priority1;
 }
 
 Mode mode()

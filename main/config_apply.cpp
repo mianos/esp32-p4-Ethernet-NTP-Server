@@ -57,8 +57,10 @@ void config_apply::afterChange(const std::string &hostnameBefore, bool logChange
     NtpTime::instance().applySettings();
     /* And so does serveNtp: off stops the responder, on starts it. */
     NtpServer::instance().applySettings();
-    /* PTP is decided entirely by these three keys, so it is re-started rather
-     * than toggled: a changed domain or priority has to reach the Announce. */
+    /* PTP is decided entirely by these three keys. A changed domain or priority
+     * has to reach the Announce, and the mode test below never restarted for
+     * one, so they are handed over directly. */
+    ptp::setIdentity(settings.ptpDomain(), settings.ptpPriority1());
     const std::string &mode = settings.ptpMode();
     ptp::Mode wanted = ptp::Mode::Off;
     if (mode == "master") {

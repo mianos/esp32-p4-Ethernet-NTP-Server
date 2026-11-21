@@ -75,9 +75,10 @@ struct Rx {
  * scheduler. */
 bool takeRx(const uint8_t *addr, size_t addrLen, uint16_t port, Rx *out);
 
-/* One UDP datagram out from the box's own address, as a raw frame, with the
- * transmit stamp. False when there is no route or no stamp, so the caller can
- * fall back to sendto(). */
+/* One UDP datagram out from the box's own address, as a raw frame. With a
+ * non-null `stampNs` the frame is sent for a hardware transmit stamp, and
+ * `*stampNs` is zero when the MAC did not give one. False when the frame could
+ * not be built or sent, so the caller can fall back to sendto(). */
 bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const uint8_t dstMac[6],
              const uint8_t *payload, size_t len, int64_t *stampNs);
 
@@ -87,6 +88,9 @@ enum class Mode : uint8_t { Off = 0, Master = 1, Slave = 2 };
  * now; the slave side shares the same frames and the same counter. */
 esp_err_t start(Mode mode, uint8_t domain, uint8_t priority1);
 void stop();
+/* Domain and priority1 for a task that is already running: both are read per
+ * message, so a change reaches the next Announce without a restart. */
+void setIdentity(uint8_t domain, uint8_t priority1);
 Mode mode();
 const char *modeText(Mode value);
 
