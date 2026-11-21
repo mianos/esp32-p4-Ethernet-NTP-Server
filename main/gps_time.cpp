@@ -1098,6 +1098,12 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
      * anything waiting on "an edge arrived" was waiting on the wrong one. */
     m_lastEdgeUs = nowUs;
 
+    /* The same edge in the 1588 counter's base, read before the lock rather
+     * than under it: the other core can hold m_mux for the length of a status
+     * copy, and a read taken after that wait put the counter's anchor late by
+     * the wait while the esp_timer stamp, taken on entry, was not. */
+    const int64_t edgePhcNs = ptp::hardware() ? ptp::nowNs() : 0;
+
     portENTER_CRITICAL_ISR(&m_mux);
     /* The POST /gps/pps hook swallows the edge here rather than further up, so
      * what it produces is the real holdover code path and not an imitation of
@@ -1107,11 +1113,8 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
         (m_ppsCount == 0 || nowUs - m_ppsMonoUs >= kMinEdgeSpacingUs)) {
         m_ppsMonoUs = nowUs;
         m_ppsMonoNs = edgeNs;
-        /* The same edge in the 1588 counter's base. Read here rather than from a
-         * task: the point of the counter is that the distance from the edge to
-         * the read is a register access, not a wake-up. */
-        if (ptp::hardware()) {
-            m_ppsPtpNs = ptp::nowNs();
+        if (edgePhcNs != 0) {
+            m_ppsPtpNs = edgePhcNs;
         }
         ++m_ppsCount;
     }
@@ -3323,13 +3326,11 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
      * edge. Requiring UTC here marked a perfectly placed pulse as off. */
     const bool onSecond = offsetNs > -2000000 && offsetNs < 2000000;
 
-    int32_t qErrNs = qErrPs / 1000;
-    if (qErrNs < 0) {
-        qErrNs = -qErrNs;
-    }
-    if (qErrNs > kMaxQErrNs) {
-        qErrNs = kMaxQErrNs;
-    }
+    /* Signed. The correction in anchor() is "captured - qErr", and with the
+     * magnitude stored here it moved every edge the same way: right for one
+     * half of the sawtooth and doubling it for the other. */
+    const int32_t qErrNs = static_cast<int32_t>(
+        std::clamp<int64_t>(qErrPs / 1000, -kMaxQErrNs, kMaxQErrNs));
 
     /* The position itself, not just whether it is inside the window: this is
      * the receiver stating where its own pulse sits against the second it
@@ -3400,7 +3401,9 @@ void GpsTime::anchor(time_t second)
     if (m_qErrValid && (m_timTpFlags & 0x03) == 0x03 && m_qErrAtUs != 0) {
         const int64_t ageUs = ppsMonoUs - m_qErrAtUs;
         if (ageUs >= -50000 && ageUs <= 1200000) {
-            ppsMonoUs -= m_qErrNs;
+            /* Nanoseconds off a microsecond stamp: without the division a
+             * 10 ns sawtooth moved the edge 10 us, and the clamp allowed 5 ms. */
+            ppsMonoUs -= m_qErrNs / 1000;
             if (ppsMonoNs != 0) {
                 ppsMonoNs -= m_qErrNs;
             }
@@ -3500,7 +3503,7 @@ void GpsTime::anchor(time_t second)
      * pushRateSample() anyway, so admitting it costs the fit nothing. Between
      * one missed edge and that, the spanning sample would still be fitted and
      * the edge is refused instead. */
-    const bool resumed = m_lastEdgeMonoSet && edgeGapUs >= kRateGapNs;
+    const bool resumed = m_lastEdgeMonoSet && edgeGapUs >= kRateGapNs / 1000;
     const bool trusted = advance && (regular || resumed);
 
     /* A pulse arriving a millisecond or more from where the fit and the anchor
@@ -3603,7 +3606,7 @@ int64_t GpsTime::sampleErrorNs() const
      * sawtooth is uniform over the step and a bound is about the worst case
      * from the middle of it. The moving part, the drift of the served time, is
      * measured on the wire and added in dispersionNs(). */
-    return kIsrLatencyNs + (m_qErrValid ? m_qErrNs / 2 : 0);
+    return kIsrLatencyNs + (m_qErrValid ? std::abs(m_qErrNs) / 2 : 0);
 }
 
 int64_t GpsTime::unobservedNs() const
@@ -4101,6 +4104,7 @@ GpsTime::Status GpsTime::status() const
 {
     Status   st;
     int64_t  ppsMonoUs     = 0;
+    int64_t  anchorMonoUs  = 0;
     int64_t  suppressUntil = 0;
     int64_t  navSatAtUs    = 0;
     int64_t  pairAgeAtUs   = 0;
@@ -4154,7 +4158,7 @@ GpsTime::Status GpsTime::status() const
     st.lastHoldoverUs    = m_lastHoldoverUs;
     st.lastHoldoverErrNs = m_lastHoldoverErrNs;
     st.timTpCount        = m_timTpCount;
-    st.qErrNs            = m_qErrNs;
+    st.qErrNs            = std::abs(m_qErrNs);
     st.qErrValid         = m_qErrValid;
     st.jitterNs          = m_jitterNs;
     st.pairAgeUs         = m_pairAgeUs;
@@ -4301,6 +4305,7 @@ GpsTime::Status GpsTime::status() const
     moduleLen = ::strnlen(m_moduleId.data(), sizeof(m_moduleId) - 1);
     std::memcpy(localModule, m_moduleId.data(), moduleLen);
     ppsMonoUs      = m_ppsMonoUs;
+    anchorMonoUs   = m_anchorMonoUs;
     suppressUntil  = m_ppsSuppressUntilUs;
     portEXIT_CRITICAL(&m_mux);
 
@@ -4344,6 +4349,9 @@ GpsTime::Status GpsTime::status() const
     if (st.ppsCount != 0) {
         st.ppsAgeUs = nowUs - ppsMonoUs;
     }
+    if (st.anchored) {
+        st.anchorAgeUs = nowUs - anchorMonoUs;
+    }
     if (suppressUntil > nowUs) {
         st.ppsSuppressUs = suppressUntil - nowUs;
     }
@@ -4386,7 +4394,7 @@ GpsTime::Status GpsTime::status() const
     in.anchored     = st.anchored;
     in.timeValid    = st.timeValid;
     in.fixType      = st.fixType;
-    in.ppsAgeUs     = st.ppsAgeUs;
+    in.ppsAgeUs     = st.anchorAgeUs;
     in.trusted      = st.lastEdgeTrusted;
     in.offsetNs     = st.offsetNs;
     in.rateKnown    = rateKnown;
@@ -4431,7 +4439,7 @@ GpsTime::Status GpsTime::status() const
         /* Published inside the budget below as well as on its own, so a wide
          * bound can be told from a bad clock. */
         st.pulseUnobservedNs = unobservedNs();
-        st.dispersionNs      = dispersionNs(st.ppsAgeUs, st.pulseUnobservedNs);
+        st.dispersionNs      = dispersionNs(st.anchorAgeUs, st.pulseUnobservedNs);
         if (m_timTpCfg == 1) {
             const int64_t silentS = (esp_timer_get_time() - lastTpUs) / 1000000;
             if (silentS > 30) {
@@ -4567,12 +4575,12 @@ std::string GpsTime::describe() const
     const Status st = status();
 
     if (st.locked) {
-        if (st.ppsAgeUs > kLockWindowUs) {
+        if (st.anchorAgeUs > kLockWindowUs) {
             /* Still servable, and worth saying why in a line somebody reads
              * later: this is the holdover the servo bought. */
             return std::format("GPS/PPS, {} fix, {} satellites, holding over {:.1f} s",
                                fixText(st.fixType), st.satellites,
-                               static_cast<double>(st.ppsAgeUs) / 1e6);
+                               static_cast<double>(st.anchorAgeUs) / 1e6);
         }
         return std::format("GPS/PPS, {} fix, {} satellites", fixText(st.fixType), st.satellites);
     }
@@ -4607,9 +4615,9 @@ void GpsTime::logLockChange()
      * back into the band until this servo steers again, and the servo is gated
      * off until the arbiter hands back. Judging the return on the lock alone
      * therefore never returns: each waits for the other. */
-    const bool holding = st.locked && st.ppsAgeUs > kLockWindowUs;
+    const bool holding = st.locked && st.anchorAgeUs > kLockWindowUs;
     const bool pulseGood = !holding && st.anchored && st.timeValid && st.fixType >= 2 &&
-                           st.ppsAgeUs >= 0 && st.ppsAgeUs <= kLockWindowUs &&
+                           st.anchorAgeUs >= 0 && st.anchorAgeUs <= kLockWindowUs &&
                            st.lastEdgeTrusted;
     ClockSource::instance().observe(pulseGood);
 
@@ -4700,7 +4708,12 @@ GpsTime::ReplyFacts GpsTime::replyFacts() const
     in.anchored  = m_anchorValid;
     in.timeValid = m_timeValid;
     in.fixType   = m_fixType;
-    in.ppsAgeUs  = m_ppsCount == 0 ? -1 : esp_timer_get_time() - m_ppsMonoUs;
+    /* Since the last edge that became an anchor, not since the last edge. The
+     * interrupt stamps every pulse whether or not a frame ever dated it, so
+     * with the receiver's frames gone and its pulse still arriving the raw age
+     * stayed under a second: "locked", fresh, and no wander charged, on an
+     * anchor that was minutes old. */
+    in.ppsAgeUs  = !m_anchorValid ? -1 : esp_timer_get_time() - m_anchorMonoUs;
     in.trusted   = m_lastEdgeTrusted;
     in.offsetNs  = m_offsetNs;
     in.rateKnown = m_rateSamples >= kRateMinSamples;

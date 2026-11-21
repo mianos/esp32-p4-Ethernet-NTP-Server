@@ -127,6 +127,7 @@ public:
         uint8_t  satellites = 0;
         uint32_t ppsCount   = 0;
         int64_t  ppsAgeUs   = -1;    /* since the last edge; -1 means never */
+        int64_t  anchorAgeUs = -1;   /* since the last edge that was paired and trusted */
         /* The last edge in the 1588 counter's base, which is where a hardware
          * timestamp would come from. Zero until the first edge after the PHC
          * runs; the two are compared to see the counter track the reference. */
