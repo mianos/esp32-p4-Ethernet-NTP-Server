@@ -42,6 +42,14 @@ public:
      * floor it starts at. */
     uint32_t minutes() const { return m_minutes.load(std::memory_order_relaxed); }
 
+    /* A client that steps its clock must not set the claim for the day -- and
+     * must not be able to demote the server either. The reference stops calling
+     * itself locked past kServeHonestNs of dispersion, and this term is built
+     * from stamps the clients supply: at the old 500 us it was above that gate,
+     * so one host with careless transmit stamps took a locked box to stratum 16
+     * for everyone, six minutes a time. gps_time.cpp asserts the order. */
+    static constexpr int64_t kCapNs = 200000;
+
 private:
     ServePath() = default;
 
@@ -51,8 +59,6 @@ private:
     /* Where a boot starts, so the first minute is not optimistic before there is
      * anything measured. It decays to the floor if the path deserves it. */
     static constexpr int64_t kStartNs = 150000;
-    /* A client that steps its clock must not set the claim for the day. */
-    static constexpr int64_t kCapNs = 500000;
     /* Forgotten proportionally, so an excursion of any size fades in about the
      * same time instead of a 40 ms one taking all day. 4 % a minute is most of
      * the way back in half an hour. */

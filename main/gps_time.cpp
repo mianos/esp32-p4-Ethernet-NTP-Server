@@ -4686,6 +4686,10 @@ void GpsTime::logLockChange()
  * work the falseticker out for itself; a client that trusts stratum alone would
  * have taken the 258 ms. */
 constexpr int64_t kServeHonestNs = 400000;
+/* What clients report about the path may widen the claim, never close the
+ * gate: only the reference's own terms get to say it is no longer one. */
+static_assert(ServePath::kCapNs <= kServeHonestNs / 2,
+              "the client-measured path term must leave the gate to the reference");
 
 GpsTime::ReplyFacts GpsTime::replyFacts() const
 {

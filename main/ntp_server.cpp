@@ -1041,7 +1041,10 @@ void NtpServer::reportServePath(int64_t nowUs)
         }
         halves[j] = v;
     }
-    ServePath::instance().observe(halves[clients / 2], samples);
+    /* The lower middle when the count is even: with two clients the upper one
+     * is simply the worse of the pair, which is the maximum this was written to
+     * avoid. */
+    ServePath::instance().observe(halves[(clients - 1) / 2], samples);
 }
 
 void NtpServer::serveLoop()
