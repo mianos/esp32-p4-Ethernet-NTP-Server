@@ -8,6 +8,7 @@
 #include "driver/gptimer.h"
 #include "driver/gptimer_etm.h"
 #include "esp_etm.h"
+#include "esp_attr.h"
 #include "esp_log.h"
 
 namespace pps_latency {
@@ -15,19 +16,19 @@ namespace {
 
 constexpr const char *TAG = "pps_latency";
 
-/* The timer runs from PLL_F80M, so a tick is 12.5 ns; the division keeps the
- * result in whole nanoseconds without a floating point multiply in the ISR. */
-constexpr int64_t  kTicksToNsNum = 125;
-constexpr int64_t  kTicksToNsDen = 10;
-constexpr uint32_t kResolutionHz = 80000000;
+/* Half of PLL_F80M, because the P4's timer prescaler cannot divide by one: 80 MHz
+ * asserts in timer_ll_set_clock_prescale. */
+constexpr int64_t  kTickNs       = 25;
+constexpr uint32_t kResolutionHz = 40000000;
 
 /* An interrupt that took longer than this did not merely wait behind a masked
  * stretch, so the capture belongs to an earlier edge or none at all. */
 constexpr int64_t kMaxPlausibleNs = 100000;
 
 /* Upper edges of the buckets, in ns. The sixth bucket is unbounded. */
-constexpr int64_t kBucketNs[] = {1000, 2000, 5000, 10000, 20000};
-constexpr int     kBuckets    = 6;
+/* In DRAM: the handler reads it, and .rodata is in flash, gone while OTA writes. */
+DRAM_ATTR constexpr int64_t kBucketNs[] = {1000, 2000, 5000, 10000, 20000};
+constexpr int               kBuckets    = 6;
 
 gptimer_handle_t         s_timer;
 esp_etm_channel_handle_t s_channel;
@@ -38,13 +39,16 @@ esp_etm_task_handle_t    s_task;
  * even sequence, because the 64-bit fields are not atomic on RV32 and readers
  * run on the other core. */
 std::atomic<uint32_t> s_seq{0};
-uint32_t              s_edges;
-uint32_t              s_unmatched;
-int64_t               s_lastStampUs;
-int64_t               s_lastNs = -1;
-int64_t               s_minNs  = INT64_MAX;
-int64_t               s_maxNs;
-uint32_t              s_hist[kBuckets];
+/* s_timer exists from the first setup step, but an edge read before the capture
+ * is wired would record a bogus zero as the floor. */
+std::atomic<bool> s_live{false};
+uint32_t          s_edges;
+uint32_t          s_unmatched;
+int64_t           s_lastStampUs;
+int64_t           s_lastNs = -1;
+int64_t           s_minNs  = INT64_MAX;
+int64_t           s_maxNs;
+uint32_t          s_hist[kBuckets];
 
 void teardown()
 {
@@ -79,49 +83,40 @@ esp_err_t begin(const int pin)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "step: timer");
     gptimer_config_t timer = {};
     timer.clk_src          = GPTIMER_CLK_SRC_PLL_F80M;
     timer.direction        = GPTIMER_COUNT_UP;
     timer.resolution_hz    = kResolutionHz;
     esp_err_t err          = gptimer_new_timer(&timer, &s_timer);
 
-    ESP_LOGI(TAG, "step: event");
     if (err == ESP_OK) {
         gpio_etm_event_config_t event = {};
         event.edge                    = GPIO_ETM_EVENT_EDGE_POS;
         err                           = gpio_new_etm_event(&event, &s_event);
     }
-    ESP_LOGI(TAG, "step: bind");
     if (err == ESP_OK) {
         err = gpio_etm_event_bind_gpio(s_event, pin);
     }
-    ESP_LOGI(TAG, "step: task");
     if (err == ESP_OK) {
         gptimer_etm_task_config_t task = {};
         task.task_type                 = GPTIMER_ETM_TASK_CAPTURE;
         err                            = gptimer_new_etm_task(s_timer, &task, &s_task);
     }
-    ESP_LOGI(TAG, "step: channel");
     if (err == ESP_OK) {
         esp_etm_channel_config_t channel = {};
         err                              = esp_etm_new_channel(&channel, &s_channel);
     }
-    ESP_LOGI(TAG, "step: connect");
     if (err == ESP_OK) {
         err = esp_etm_channel_connect(s_channel, s_event, s_task);
     }
     /* The timer is started before the channel is enabled, or an edge in between
      * would capture while it is stopped. */
-    ESP_LOGI(TAG, "step: enable");
     if (err == ESP_OK) {
         err = gptimer_enable(s_timer);
     }
-    ESP_LOGI(TAG, "step: start");
     if (err == ESP_OK) {
         err = gptimer_start(s_timer);
     }
-    ESP_LOGI(TAG, "step: channel enable");
     if (err == ESP_OK) {
         err = esp_etm_channel_enable(s_channel);
     }
@@ -129,15 +124,16 @@ esp_err_t begin(const int pin)
         teardown();
         return err;
     }
+    s_live.store(true, std::memory_order_release);
 
-    ESP_LOGI(TAG, "GPIO%d: hardware capture at %" PRIu32 " Hz, latency in 12.5 ns ticks", pin,
-             kResolutionHz);
+    ESP_LOGI(TAG, "GPIO%d: hardware capture at %" PRIu32 " Hz, latency in %lld ns ticks", pin,
+             kResolutionHz, static_cast<long long>(kTickNs));
     return ESP_OK;
 }
 
 void IRAM_ATTR onEdge(const int64_t stampUs)
 {
-    if (s_timer == nullptr) {
+    if (!s_live.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -149,8 +145,7 @@ void IRAM_ATTR onEdge(const int64_t stampUs)
         gptimer_get_raw_count(s_timer, &raw) != ESP_OK) {
         return;
     }
-    const int64_t ns = (static_cast<int64_t>(raw) - static_cast<int64_t>(captured)) *
-                       kTicksToNsNum / kTicksToNsDen;
+    const int64_t ns = (static_cast<int64_t>(raw) - static_cast<int64_t>(captured)) * kTickNs;
 
     const uint32_t seq = s_seq.load(std::memory_order_relaxed) + 1;
     s_seq.store(seq, std::memory_order_relaxed);
@@ -179,7 +174,7 @@ void IRAM_ATTR onEdge(const int64_t stampUs)
 
 bool forEdge(const int64_t stampUs, int64_t *ns)
 {
-    if (s_timer == nullptr || ns == nullptr) {
+    if (!s_live.load(std::memory_order_acquire) || ns == nullptr) {
         return false;
     }
     for (;;) {
@@ -200,7 +195,7 @@ bool forEdge(const int64_t stampUs, int64_t *ns)
 
 bool stats(Stats *out)
 {
-    if (s_timer == nullptr || out == nullptr) {
+    if (!s_live.load(std::memory_order_acquire) || out == nullptr) {
         return false;
     }
     for (;;) {

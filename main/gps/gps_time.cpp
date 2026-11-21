@@ -198,10 +198,6 @@ esp_err_t GpsTime::beginEdge()
         return err;
     }
 
-    /* The latency probe is armed from app_main() once the link is up, so its
-     * failure is readable over the network console. It measures the interrupt
-     * stamp below; the capture path does not need it. */
-
     err = kCaptureEdge ? beginCapture() : ESP_ERR_NOT_SUPPORTED;
     if (err != ESP_OK) {
         /* The capture is how the edge is stamped without interrupt latency in
@@ -209,6 +205,12 @@ esp_err_t GpsTime::beginEdge()
          * worth refusing to run over. */
         ESP_LOGW(TAG, "MCPWM capture unavailable (%s): falling back to an interrupt stamp",
                  esp_err_to_name(err));
+        /* Only this path has a latency to measure. A probe that will not start
+         * costs the measurement, not the edge. */
+        const esp_err_t probe = pps_latency::begin(kPpsPin);
+        if (probe != ESP_OK) {
+            ESP_LOGW(TAG, "PPS latency probe unavailable: %s", esp_err_to_name(probe));
+        }
         err = beginInterruptEdge();
     }
     return err;
@@ -237,7 +239,9 @@ esp_err_t GpsTime::beginEdgeOnTimingCore()
         xTaskNotifyGive(waiter);
         vTaskDelete(nullptr);
     };
-    if (xTaskCreatePinnedToCore(run, "pps_bind", 4096, &call, kTaskPriority, nullptr,
+    /* 6 KB for the latency probe's timer and ETM setup on top of the GPIO's; the
+     * task is gone once the edge is armed. */
+    if (xTaskCreatePinnedToCore(run, "pps_bind", 6144, &call, kTaskPriority, nullptr,
                                 cores::kTiming) != pdPASS) {
         return ESP_ERR_NO_MEM;
     }

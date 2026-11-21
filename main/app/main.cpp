@@ -39,17 +39,12 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "nvs_flash.h"
 
 #include "clock/clock_source.h"
 #include "app/console.h"
 #include "net/eth_link.h"
-#include "net/net_state.h"
-#include "gps/gps_internal.h"
 #include "gps/gps_time.h"
-#include "gps/pps_latency.h"
 #include "clock/ntp_time.h"
 #include "app/settings.h"
 
@@ -72,14 +67,6 @@ void initNvs()
     ESP_ERROR_CHECK(err);
 }
 
-/* A boot-progress marker in a key that is readable over HTTP after the image
- * has rolled back: `boots` is the only persisted string /healthz exposes. */
-void mark(const char *value)
-{
-    Settings::instance().setBoots(value);
-    Settings::instance().save();
-}
-
 }  // namespace
 
 extern "C" void app_main()
@@ -89,62 +76,29 @@ extern "C" void app_main()
 
     initNvs();
     Settings::instance().begin();
-    mark("9001");
 
     /* The console comes up before anything that can hang, because it is the way
      * back in when a stored address is wrong or the link never comes up. Not
      * fatal: a box without a console still has to boot and serve. */
-    mark("9002");
     if (console::start() != ESP_OK) {
         ESP_LOGW(TAG, "console unavailable; continuing without it");
     }
 
-    mark("9003");
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     /* The arbiter's quiet timer starts before the receiver does: under
      * timeSource=auto a device that boots with no antenna has to fall back
      * fifteen seconds from here, and the timer is what counts it. */
-    mark("9004");
     ClockSource::instance().begin();
 
     /* The receiver's UART and PPS line: a fix takes tens of seconds to settle,
      * so the sooner it is listening the sooner the clock is real. */
-    mark("9005");
     ESP_ERROR_CHECK(GpsTime::instance().begin());
-
-    /* Diagnostic only. Started from here rather than beginEdge() so the link
-     * and the UDP console are up first: a panic in it is then readable without
-     * a cable. Its own task, because the setup is more than the 4 KB pinning
-     * task should carry. */
-    xTaskCreatePinnedToCore(
-        [](void *) {
-            /* Not just a delay: the UDP sink is only installed with the first
-             * address, and it is what carries the panic if the probe dies. */
-            for (int i = 0; i < 40 && !net_state::linkUp(); ++i) {
-                vTaskDelay(pdMS_TO_TICKS(500));
-            }
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            mark(net_state::linkUp() ? "9013" : "9010");
-            mark("9011");
-            ESP_LOGI(TAG, "PPS latency probe: starting");
-            const esp_err_t err = pps_latency::begin(gps_detail::kPpsPin);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "PPS latency probe: %s", esp_err_to_name(err));
-            }
-            mark("9012");
-            vTaskDelete(nullptr);
-        },
-        "pps_latency", 6144, nullptr, 4, nullptr, cores::kTiming);
-    mark("9006");
 
     /* Armed before the first DHCP DISCOVER: lwIP only keeps an option-42 NTP
      * server if sntp_servermode_dhcp() is on when the ACK is processed. */
-    mark("9007");
     ESP_ERROR_CHECK(NtpTime::instance().begin());
 
-    mark("9008");
     ESP_ERROR_CHECK(EthernetLink::instance().begin());
-    mark("9009");
 }

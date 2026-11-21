@@ -154,15 +154,16 @@ void GpsTime::anchor(time_t second)
     /* The edge's wait for the interrupt next to its distance from the fit, and
      * only when one of the two is worth looking at. An error that tracks the
      * wait is core 1 having been held off; one without it is the receiver
-     * having moved the pulse. The overhead is logged so it can be subtracted. */
+     * having moved the pulse. Measured from the fastest edge seen, because the
+     * fixed part of the path (about 3.5 us) is constant and the fit absorbs it. */
     if (rateKnown) {
-        int64_t latencyNs = 0;
-        if (pps_latency::forEdge(rawPpsMonoUs, &latencyNs) &&
-            (latencyNs >= 2000 || (hadAnchor && (errorNs >= 4000 || errorNs <= -4000)))) {
-            pps_latency::Stats probe      = {};
-            const int64_t      overheadNs = pps_latency::stats(&probe) ? probe.minNs : 0;
-            ESP_LOGW(TAG, "edge latency %lld ns (overhead %lld), %+lld ns from the fit",
-                     static_cast<long long>(latencyNs), static_cast<long long>(overheadNs),
+        int64_t            latencyNs = 0;
+        pps_latency::Stats probe     = {};
+        if (pps_latency::forEdge(rawPpsMonoUs, &latencyNs) && pps_latency::stats(&probe) &&
+            (latencyNs - probe.minNs >= 2000 ||
+             (hadAnchor && (errorNs >= 4000 || errorNs <= -4000)))) {
+            ESP_LOGW(TAG, "edge latency %lld ns (floor %lld), %+lld ns from the fit",
+                     static_cast<long long>(latencyNs), static_cast<long long>(probe.minNs),
                      static_cast<long long>(errorNs));
         }
     }

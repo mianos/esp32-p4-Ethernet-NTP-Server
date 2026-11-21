@@ -4,7 +4,8 @@
  * two unrelated reasons: the pulse was late, or the handler was. This tells
  * them apart by latching a timer in hardware at the edge and reading it in the
  * handler, both with no CPU in between. The difference is the interrupt
- * latency, and the smallest one seen is the fixed cost of the two reads.
+ * latency. Its floor, about 3.6 us, is the fixed path from the edge to the
+ * read and cancels in the fit; what moves the time is the spread above it.
  *
  * A GPIO event drives a GPTimer capture through the ETM, so neither the GPIO
  * driver nor a second ISR is involved. The timer is only a probe: nothing is
@@ -22,7 +23,7 @@ struct Stats {
     uint32_t edges;
     uint32_t unmatched; /* the capture did not land between the reads */
     int64_t  lastNs;
-    int64_t  minNs; /* the read overhead: subtract it to get the wait itself */
+    int64_t  minNs; /* the floor: the fixed path, which the fit absorbs */
     int64_t  maxNs;
     uint32_t hist[6];
 };

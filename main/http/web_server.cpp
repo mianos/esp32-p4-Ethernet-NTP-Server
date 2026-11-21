@@ -801,7 +801,7 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
     doc.AddItem("tie_rms_ns", gps.tieRmsNs);
     /* How long the edge waited for its interrupt, captured in hardware at the
      * edge. The same question as tie_* asks, but of the stamp rather than the
-     * fit; min is the two reads' own cost and belongs subtracted. */
+     * fit; min is the fixed path, and the spread above it is what matters. */
     pps_latency::Stats latency = {};
     if (pps_latency::stats(&latency)) {
         doc.AddItem("pps_latency_last_ns", static_cast<double>(latency.lastNs));

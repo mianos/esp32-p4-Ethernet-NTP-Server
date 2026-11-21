@@ -521,8 +521,9 @@ that does have a rate knob; that is the next step.
   run on core 1. `tasks` and `intr` on the console show who is where.
 - What the interrupt itself cost is measured, not inferred. A GPTimer capture is
   latched by the edge through the ETM and read at the top of the handler;
-  `pps_latency_*` publishes the result, and its `min` is the two reads' own
-  overhead. Nothing is corrected with it yet.
+  `pps_latency_*` publishes the result. `min` (about 3.6 µs) is the fixed path
+  from edge to read, which the fit absorbs; the spread above it (about 0.5 µs,
+  idle or under HTTP load) is what moves the stamp. Nothing is corrected with it.
 - Between edges the anchor is extended with `esp_timer_get_time()`, corrected by
   the servo's rate, so what is left is the fit's residual — 2 µs measured across
   a two-and-a-half-minute holdover — instead of 30 µs of crystal error per
