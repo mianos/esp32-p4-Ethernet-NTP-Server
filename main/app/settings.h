@@ -48,11 +48,11 @@ public:
      * see clock_source.cpp. "gps" stays strict, so a device configured before
      * this existed keeps the behaviour it was configured for. */
     enum class TimeSource {
-        Off,    // leave the clock alone: it runs from reset
-        Dhcp,   // ask the DHCP server for option 42
-        Static, // poll ntpServer()
-        Gps,    // u-blox over UART plus PPS
-        Auto,   // GPS while it is healthy, the upstream while it is not
+        Off,     // leave the clock alone: it runs from reset
+        Dhcp,    // ask the DHCP server for option 42
+        Static,  // poll ntpServer()
+        Gps,     // u-blox over UART plus PPS
+        Auto,    // GPS while it is healthy, the upstream while it is not
     };
 
     static Settings &instance();
@@ -101,11 +101,13 @@ public:
      * different domain rather than a refused one. */
     uint8_t ptpDomain() const
     {
-        return static_cast<uint8_t>(std::min(std::strtoul(m_ptpDomain.c_str(), nullptr, 10), 127ul));
+        return static_cast<uint8_t>(
+            std::min(std::strtoul(m_ptpDomain.c_str(), nullptr, 10), 127ul));
     }
     uint8_t ptpPriority1() const
     {
-        return static_cast<uint8_t>(std::min(std::strtoul(m_ptpPriority1.c_str(), nullptr, 10), 255ul));
+        return static_cast<uint8_t>(
+            std::min(std::strtoul(m_ptpPriority1.c_str(), nullptr, 10), 255ul));
     }
 
     /* Where the receiver's time mode was left, so a power cut does not cost it.
@@ -125,13 +127,13 @@ public:
      * Coax runs about 5 ns/m whatever its loss class, so the number is ~5x the
      * cable length. */
     const std::string &antDelayNs() const { return m_antDelayNs; }
-    void setAntDelayNs(const std::string &v) { m_antDelayNs = v; }
+    void               setAntDelayNs(const std::string &v) { m_antDelayNs = v; }
     /* The calibration term: what the pulse was measured to be out, entered as a
      * delay so the receiver moves the edge by the same amount. Nothing inside
      * the receiver can see a constant error, which is why it has to be measured
      * outside and written in. */
     const std::string &gpsUserDelayNs() const { return m_gpsUserDelayNs; }
-    void setGpsUserDelayNs(const std::string &v) { m_gpsUserDelayNs = v; }
+    void               setGpsUserDelayNs(const std::string &v) { m_gpsUserDelayNs = v; }
     /* Power cuts are a normal event here -- street works, storms -- so the count
      * of boots is worth carrying: a survey that vanished is otherwise
      * indistinguishable from one that was never started. */
@@ -163,19 +165,19 @@ public:
      * scan stays as the fallback for a module that has been reset to something
      * else. Written by GpsTime, read once in its begin(). */
     const std::string &gpsBaud() const { return m_gpsBaud; }
-    void setGpsBaud(const std::string &v) { m_gpsBaud = v; }
+    void               setGpsBaud(const std::string &v) { m_gpsBaud = v; }
 
     const std::string &ipMode() const { return m_ipMode; }
     const std::string &ipAddress() const { return m_ipAddress; }
     const std::string &ipGateway() const { return m_ipGateway; }
     const std::string &ipDns() const { return m_ipDns; }
-    void setIpMode(const std::string &v) { m_ipMode = v; }
-    void setIpAddress(const std::string &v) { m_ipAddress = v; }
-    void setIpGateway(const std::string &v) { m_ipGateway = v; }
-    void setIpDns(const std::string &v) { m_ipDns = v; }
-    void setGpsTimeMode(const std::string &v) { m_gpsTimeMode = v; }
-    void setGpsFixedPos(const std::string &v) { m_gpsFixedPos = v; }
-    void setGpsSurvey(const std::string &v) { m_gpsSurvey = v; }
+    void               setIpMode(const std::string &v) { m_ipMode = v; }
+    void               setIpAddress(const std::string &v) { m_ipAddress = v; }
+    void               setIpGateway(const std::string &v) { m_ipGateway = v; }
+    void               setIpDns(const std::string &v) { m_ipDns = v; }
+    void               setGpsTimeMode(const std::string &v) { m_gpsTimeMode = v; }
+    void               setGpsFixedPos(const std::string &v) { m_gpsFixedPos = v; }
+    void               setGpsSurvey(const std::string &v) { m_gpsSurvey = v; }
 
     /* Apply whichever registered keys are present in `doc`; unknown keys and
      * wrong-typed values are ignored. Long values are truncated to
@@ -201,20 +203,20 @@ private:
     std::string m_tz         = "AEST-10AEDT,M10.1.0,M4.1.0/3";
     std::string m_timeSource = "dhcp";
     std::string m_ntpServer;
-    std::string m_serveNtp   = "on";
-    std::string m_ptpMode     = "off";
-    std::string m_ptpDomain   = "0";
+    std::string m_serveNtp     = "on";
+    std::string m_ptpMode      = "off";
+    std::string m_ptpDomain    = "0";
     std::string m_ptpPriority1 = "128";
-    std::string m_gpsTimeMode = "moving";
+    std::string m_gpsTimeMode  = "moving";
     std::string m_gpsFixedPos;
     std::string m_gpsSurvey;
-    std::string m_antDelayNs = "0";
+    std::string m_antDelayNs     = "0";
     std::string m_gpsUserDelayNs = "0";
     std::string m_logHost;
-    std::string m_logPort    = "5514";
-    std::string m_boots      = "0";
-    std::string m_gpsBaud    = "38400";
-    std::string m_ipMode     = "dhcp";
+    std::string m_logPort = "5514";
+    std::string m_boots   = "0";
+    std::string m_gpsBaud = "38400";
+    std::string m_ipMode  = "dhcp";
     std::string m_ipAddress;
     std::string m_ipGateway;
     std::string m_ipDns;

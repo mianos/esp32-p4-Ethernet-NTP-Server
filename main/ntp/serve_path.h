@@ -65,13 +65,13 @@ private:
     static constexpr double kDecayPerMin = 0.04;
     /* The first minutes after a boot are the servo converging and every client
      * rediscovering the box, so a range taken there is a boot fact. */
-    static constexpr int64_t kSettleUs = 180000000;
-    static constexpr int64_t kPeriodUs      = 60000000;
-    static constexpr uint32_t kMinSamples   = 4;
+    static constexpr int64_t  kSettleUs   = 180000000;
+    static constexpr int64_t  kPeriodUs   = 60000000;
+    static constexpr uint32_t kMinSamples = 4;
 
     void decayTo(int64_t nowUs);
 
-    portMUX_TYPE          m_lock = portMUX_INITIALIZER_UNLOCKED;
+    portMUX_TYPE          m_lock   = portMUX_INITIALIZER_UNLOCKED;
     int64_t               m_holdNs = kStartNs;
     int64_t               m_lastUs = 0;
     std::atomic<uint32_t> m_minutes{0};

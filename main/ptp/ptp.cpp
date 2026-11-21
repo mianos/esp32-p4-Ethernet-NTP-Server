@@ -26,7 +26,7 @@ constexpr const char *TAG = "ptp";
 /* Enough for the NTP excursions of a burst plus a PTP exchange's worth; the
  * responder takes its entry immediately after recvfrom(), so entries are only
  * briefly live. */
-constexpr size_t kRing = 16;
+constexpr size_t  kRing       = 16;
 constexpr int64_t kStampAgeNs = 500000000LL; /* an entry older than this is noise */
 
 struct RxStamp {
@@ -38,13 +38,13 @@ struct RxStamp {
     int64_t  ns;
 };
 
-esp_eth_handle_t s_eth   = nullptr;
-esp_eth_mac_t   *s_mac   = nullptr;
-esp_netif_t     *s_netif = nullptr;
+esp_eth_handle_t s_eth      = nullptr;
+esp_eth_mac_t   *s_mac      = nullptr;
+esp_netif_t     *s_netif    = nullptr;
 bool             s_attached = false;
 bool             s_enabled  = false;
 
-} // namespace
+}  // namespace
 
 namespace ptp {
 volatile bool gHardwareOn = false;
@@ -55,8 +55,8 @@ namespace {
 portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 RxStamp      s_ring[kRing];
 size_t       s_next = 0;
-ptp::Stats    s_stats{};
-uint8_t       s_lastFail = 0;
+ptp::Stats   s_stats{};
+uint8_t      s_lastFail = 0;
 
 void fail(uint8_t reason)
 {
@@ -139,17 +139,17 @@ void maybeRecordUdp(const uint8_t *frame, uint32_t len, int64_t ns)
  * against its own clock and the right answer against another PTP node.
  */
 
-constexpr uint8_t kMsgSync     = 0x00;
-constexpr uint8_t kMsgDelayReq = 0x01;
-constexpr uint8_t kMsgFollowUp = 0x08;
+constexpr uint8_t kMsgSync      = 0x00;
+constexpr uint8_t kMsgDelayReq  = 0x01;
+constexpr uint8_t kMsgFollowUp  = 0x08;
 constexpr uint8_t kMsgDelayResp = 0x09;
-constexpr uint8_t kMsgAnnounce = 0x0B;
-constexpr uint8_t kPtpVersion  = 2;
+constexpr uint8_t kMsgAnnounce  = 0x0B;
+constexpr uint8_t kPtpVersion   = 2;
 
-constexpr size_t kHeader = 34;
-constexpr size_t kStamp  = 10; /* 48-bit seconds, 32-bit nanoseconds */
-constexpr size_t kSyncLen = kHeader + kStamp;
-constexpr size_t kFollowUpLen = kHeader + kStamp;
+constexpr size_t kHeader       = 34;
+constexpr size_t kStamp        = 10; /* 48-bit seconds, 32-bit nanoseconds */
+constexpr size_t kSyncLen      = kHeader + kStamp;
+constexpr size_t kFollowUpLen  = kHeader + kStamp;
 constexpr size_t kDelayRespLen = kHeader + kStamp + 10;
 constexpr size_t kAnnounceLen  = kHeader + 30;
 
@@ -180,14 +180,14 @@ constexpr int kTaskStack = 4096;
  * just before the send, which is what any non-stamped master does. */
 constexpr bool kTxStamp = true;
 
-volatile uint8_t gMode      = 0;
-uint8_t          gClock[8]  = {};
-uint16_t         gPort      = 1;
-uint8_t          gDomain    = 0;
-uint8_t          gPriority1 = 128;
-uint16_t         gSeq[16]   = {};
-TaskHandle_t     gTask      = nullptr;
-SemaphoreHandle_t s_txMux   = nullptr;
+volatile uint8_t  gMode      = 0;
+uint8_t           gClock[8]  = {};
+uint16_t          gPort      = 1;
+uint8_t           gDomain    = 0;
+uint8_t           gPriority1 = 128;
+uint16_t          gSeq[16]   = {};
+TaskHandle_t      gTask      = nullptr;
+SemaphoreHandle_t s_txMux    = nullptr;
 
 struct DelayReq {
     uint8_t  mac[6];
@@ -203,11 +203,11 @@ constexpr size_t kDelayRing = 8;
  * reported, not applied, so a pipelined design buys nothing. */
 struct Exchange {
     bool     syncSeen;
-    int64_t  t2;      /* arrival of the Sync */
+    int64_t  t2; /* arrival of the Sync */
     uint16_t syncSeq;
     uint8_t  clock[8]; /* the master's port identity */
     uint16_t port;
-    int64_t  t3;       /* egress of our Delay_Req */
+    int64_t  t3; /* egress of our Delay_Req */
     uint16_t delaySeq;
     int64_t  t1; /* the master's origin, from the Follow_Up */
     int64_t  offsetNs;
@@ -215,11 +215,11 @@ struct Exchange {
     uint32_t measured;
     uint32_t timeouts;
 };
-Exchange gSlave = {};
-uint32_t gLastReportS = 0;
-DelayReq  gDelay[kDelayRing];
-size_t    gDelayNext = 0;
-portMUX_TYPE gDelayMux = portMUX_INITIALIZER_UNLOCKED;
+Exchange     gSlave       = {};
+uint32_t     gLastReportS = 0;
+DelayReq     gDelay[kDelayRing];
+size_t       gDelayNext = 0;
+portMUX_TYPE gDelayMux  = portMUX_INITIALIZER_UNLOCKED;
 
 void put16(uint8_t *p, uint16_t v)
 {
@@ -315,14 +315,14 @@ esp_err_t sendPtp(const uint8_t dest[6], const uint8_t *body, size_t length, int
 
 void announcedQuality(uint8_t &clockClass, uint8_t &accuracy, uint8_t &timeSource)
 {
-    const GpsTime::Status  st    = GpsTime::instance().status();
+    const GpsTime::Status     st    = GpsTime::instance().status();
     const GpsTime::ReplyFacts facts = GpsTime::instance().replyFacts();
     if (st.locked && !facts.demoted) {
         clockClass = 6;
         accuracy   = 0x25; /* 10 us: the stamps are interrupt- and software-class */
         timeSource = 0x20;
     } else if (st.locked) {
-        clockClass = 7; /* holdover, inside the window */
+        clockClass = 7;    /* holdover, inside the window */
         accuracy   = 0x27; /* 100 us */
         timeSource = 0x20;
     } else {
@@ -334,11 +334,11 @@ void announcedQuality(uint8_t &clockClass, uint8_t &accuracy, uint8_t &timeSourc
 
 void sendAnnounce()
 {
-    uint8_t body[kAnnounceLen] = {};
-    const uint8_t flags0 = 0;
-    uint8_t       quality = 0;
-    uint8_t       accuracy = 0;
-    uint8_t       source = 0;
+    uint8_t       body[kAnnounceLen] = {};
+    const uint8_t flags0             = 0;
+    uint8_t       quality            = 0;
+    uint8_t       accuracy           = 0;
+    uint8_t       source             = 0;
     announcedQuality(quality, accuracy, source);
     putHeader(body, kMsgAnnounce, kAnnounceLen, gSeq[kMsgAnnounce]++, flags0,
               static_cast<uint8_t>(kFlagUtcValid | kFlagTimescale | kFlagTraceable));
@@ -348,7 +348,7 @@ void sendAnnounce()
     body[kHeader + 14] = quality;
     body[kHeader + 15] = accuracy;
     put16(body + kHeader + 16, 0x8000); /* offsetScaledLogVariance: unknown */
-    body[kHeader + 18] = 255;            /* priority2 */
+    body[kHeader + 18] = 255;           /* priority2 */
     std::memcpy(body + kHeader + 19, gClock, 8);
     put16(body + kHeader + 27, 0); /* stepsRemoved */
     body[kHeader + 29] = source;
@@ -360,7 +360,7 @@ void sendAnnounce()
  * a slave may not use the Sync's own timestamp. */
 void sendSync()
 {
-    const uint16_t seq = gSeq[kMsgSync]++;
+    const uint16_t seq            = gSeq[kMsgSync]++;
     uint8_t        sync[kSyncLen] = {};
     putHeader(sync, kMsgSync, kSyncLen, seq, kFlagTwoStep, 0);
     /* The counter is read before the frame: without a hardware stamp that is
@@ -456,8 +456,8 @@ void sendDelayReq(const uint8_t mac[6], const uint8_t clock[8], uint16_t port)
 {
     (void)clock;
     (void)port;
-    uint8_t body[kHeader + kStamp] = {};
-    const uint16_t seq = gSeq[kMsgDelayReq]++;
+    uint8_t        body[kHeader + kStamp] = {};
+    const uint16_t seq                    = gSeq[kMsgDelayReq]++;
     putHeader(body, kMsgDelayReq, kHeader + kStamp, seq, 0, 0);
     putStamp(body + kHeader, taiNs());
     int64_t egress = 0;
@@ -473,7 +473,7 @@ void onSync(const uint8_t *frame, int64_t rxNs, uint16_t seq)
     gSlave.t2       = rxNs;
     gSlave.syncSeq  = seq;
     std::memcpy(gSlave.clock, frame + 14 + 20, 8);
-    gSlave.port     = get16(frame + 14 + 28);
+    gSlave.port = get16(frame + 14 + 28);
 }
 
 void onFollowUp(const uint8_t *frame, uint16_t seq)
@@ -481,9 +481,9 @@ void onFollowUp(const uint8_t *frame, uint16_t seq)
     if (!gSlave.syncSeen || seq != gSlave.syncSeq || gSlave.t2 == 0) {
         return;
     }
-    gSlave.syncSeen = false;
-    const uint8_t *stamp = frame + 14 + kHeader;
-    uint64_t seconds = 0;
+    gSlave.syncSeen        = false;
+    const uint8_t *stamp   = frame + 14 + kHeader;
+    uint64_t       seconds = 0;
     for (int i = 0; i < 6; ++i) {
         seconds = (seconds << 8) | stamp[i];
     }
@@ -518,14 +518,14 @@ void onDelayResp(const uint8_t *frame, int64_t rxNs, uint16_t seq)
         fraction = (fraction << 8) | stamp[6 + i];
     }
     const int64_t taiToUtc = static_cast<int64_t>(utcOffset()) * 1000000000LL;
-    const int64_t t4 = static_cast<int64_t>(seconds) * 1000000000LL + fraction - taiToUtc;
-    const int64_t t1 = gSlave.t1 - taiToUtc;
-    const int64_t offset = ((gSlave.t2 - t1) - (t4 - gSlave.t3)) / 2;
-    gSlave.offsetNs      = offset;
-    gSlave.delayNs       = ((t4 - gSlave.t3) + (gSlave.t2 - t1)) / 2;
-    gSlave.t3            = 0;
-    gSlave.t1            = 0;
-    gSlave.t2            = 0;
+    const int64_t t4       = static_cast<int64_t>(seconds) * 1000000000LL + fraction - taiToUtc;
+    const int64_t t1       = gSlave.t1 - taiToUtc;
+    const int64_t offset   = ((gSlave.t2 - t1) - (t4 - gSlave.t3)) / 2;
+    gSlave.offsetNs        = offset;
+    gSlave.delayNs         = ((t4 - gSlave.t3) + (gSlave.t2 - t1)) / 2;
+    gSlave.t3              = 0;
+    gSlave.t1              = 0;
+    gSlave.t2              = 0;
     ++gSlave.measured;
     ++s_stats.measured;
     s_stats.lastPeerNs    = rxNs;
@@ -565,18 +565,18 @@ void notePeer(const uint8_t *frame)
 {
     std::memset(s_stats.lastPeer, 0, sizeof(s_stats.lastPeer));
     std::memcpy(s_stats.lastPeer, frame + 6, 4);
-    s_stats.lastPeer[4]  = frame[10];
-    s_stats.lastPeer[5]  = frame[11];
-    s_stats.lastPeerLen  = 4; /* an IPv4-shaped summary; the MAC is what matters */
+    s_stats.lastPeer[4] = frame[10];
+    s_stats.lastPeer[5] = frame[11];
+    s_stats.lastPeerLen = 4; /* an IPv4-shaped summary; the MAC is what matters */
 }
 
 esp_err_t inputHandler(esp_eth_handle_t, uint8_t *buffer, uint32_t length, void *priv, void *info)
 {
-    const auto *stamp = static_cast<const eth_mac_time_t *>(info);
-    const bool  valid = stamp != nullptr && stamp->seconds != 0;
-    const int64_t ns  = valid ? static_cast<int64_t>(stamp->seconds) * 1000000000LL +
+    const auto   *stamp = static_cast<const eth_mac_time_t *>(info);
+    const bool    valid = stamp != nullptr && stamp->seconds != 0;
+    const int64_t ns    = valid ? static_cast<int64_t>(stamp->seconds) * 1000000000LL +
                                    static_cast<int64_t>(stamp->nanoseconds)
-                              : 0;
+                                : 0;
 
     if (length >= 14 && be16(buffer + 12) == 0x88F7) {
         ++s_stats.frames;
@@ -592,9 +592,7 @@ esp_err_t inputHandler(esp_eth_handle_t, uint8_t *buffer, uint32_t length, void 
                 noteDelayReq(buffer, length, ns);
             } else if (gMode == static_cast<uint8_t>(ptp::Mode::Slave)) {
                 switch (buffer[14]) {
-                case kMsgSync:
-                    onSync(buffer, ns, get16(buffer + 14 + 30));
-                    break;
+                case kMsgSync: onSync(buffer, ns, get16(buffer + 14 + 30)); break;
                 /* Both read a ten-octet stamp after the header, and the
                  * guard above only promises the header. */
                 case kMsgFollowUp:
@@ -607,8 +605,7 @@ esp_err_t inputHandler(esp_eth_handle_t, uint8_t *buffer, uint32_t length, void 
                         onDelayResp(buffer, ns, get16(buffer + 14 + 30));
                     }
                     break;
-                default:
-                    break;
+                default: break;
                 }
             }
         }
@@ -623,7 +620,7 @@ esp_err_t inputHandler(esp_eth_handle_t, uint8_t *buffer, uint32_t length, void 
     return esp_netif_receive(static_cast<esp_netif_t *>(priv), buffer, length, NULL);
 }
 
-} // namespace
+}  // namespace
 
 namespace ptp {
 
@@ -683,14 +680,14 @@ esp_err_t enable(bool restart)
     /* The crystal, at 40 MHz: 25 ns is the finest the counter can be stepped and
      * is also what its increment is set to. The 80 MHz PLL is the alternative
      * and buys 12.5 ns for a clock that has to be kept running. */
-    config.clk_src            = EMAC_PTP_CLK_SRC_XTAL;
-    config.clk_src_period_ns  = 25.0f;
+    config.clk_src           = EMAC_PTP_CLK_SRC_XTAL;
+    config.clk_src_period_ns = 25.0f;
     /* 40 and not the 25 ns the source ticks at: the driver derives the addend
      * from 2^32 * period / accuracy, and at 25/25 that is exactly 2^32, which
      * truncates to zero in a uint32. 40 ns keeps it well inside and still
      * resolves far finer than the microseconds this clock has to serve. */
     config.required_accuracy_ns = 40.0f;
-    config.roll_type          = ETH_PTP_DIGITAL_ROLLOVER;
+    config.roll_type            = ETH_PTP_DIGITAL_ROLLOVER;
 
     esp_err_t err = esp_eth_mac_ptp_enable(s_mac, &config);
     if (err != ESP_OK) {
@@ -712,7 +709,8 @@ esp_err_t enable(bool restart)
         }
     }
     uint32_t stampBit = EMAC_HAL_TDES0_TX_TS_ENABLE;
-    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS), &stampBit);
+    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS),
+                  &stampBit);
     if (restart) {
         (void)stepToRealtime();
     }
@@ -725,12 +723,12 @@ esp_err_t enable(bool restart)
     eth_mac_time_t start = {};
     start.seconds        = static_cast<uint32_t>(tv.tv_sec);
     start.nanoseconds    = static_cast<uint32_t>(tv.tv_usec) * 1000;
-    err = esp_eth_mac_set_ptp_time(s_mac, &start);
+    err                  = esp_eth_mac_set_ptp_time(s_mac, &start);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "phc set: %s", esp_err_to_name(err));
     }
 
-    s_enabled     = true;
+    s_enabled        = true;
     ptp::gHardwareOn = true;
     ESP_LOGI(TAG, "phc running, 25 ns steps, started from %u.%09u",
              static_cast<unsigned>(start.seconds), static_cast<unsigned>(start.nanoseconds));
@@ -793,8 +791,9 @@ void noteTxResult(esp_err_t err)
      * that does not move while frames are being queued is a stopped channel,
      * and one that moves is the ring full of descriptors nobody reclaimed. */
     vTaskDelay(pdMS_TO_TICKS(100));
-    ESP_LOGW(TAG, "transmit stalled (%u in a row): dma status 0x%08x opmode 0x%08x "
-                  "curtxdesc %08x -> %08x, restarting the MAC",
+    ESP_LOGW(TAG,
+             "transmit stalled (%u in a row): dma status 0x%08x opmode 0x%08x "
+             "curtxdesc %08x -> %08x, restarting the MAC",
              gTxFails, static_cast<unsigned>(dmaStatus), static_cast<unsigned>(opMode),
              static_cast<unsigned>(current), static_cast<unsigned>(EMAC_DMA.dmatxcurrdesc));
     (void)EthernetLink::instance().restart("tx stalled");
@@ -832,10 +831,12 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
         return ESP_ERR_TIMEOUT;
     }
     uint32_t stampBit = EMAC_HAL_TDES0_TX_TS_ENABLE;
-    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_SET_TDES0_CFG_BITS), &stampBit);
-    eth_mac_time_t stamp = {};
-    const esp_err_t err  = esp_eth_transmit_ctrl_vargs(s_eth, &stamp, 2, frame, len);
-    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS), &stampBit);
+    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_SET_TDES0_CFG_BITS),
+                  &stampBit);
+    eth_mac_time_t  stamp = {};
+    const esp_err_t err   = esp_eth_transmit_ctrl_vargs(s_eth, &stamp, 2, frame, len);
+    esp_eth_ioctl(s_eth, static_cast<esp_eth_io_cmd_t>(ETH_MAC_ESP_CMD_CLEAR_TDES0_CFG_BITS),
+                  &stampBit);
     xSemaphoreGive(s_txMux);
     if (err != ESP_OK) {
         noteTxResult(err);
@@ -856,8 +857,8 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
     }
     /* A stamp that is a second away from the counter was written by an older
      * frame and describes nothing; the caller falls back to software. */
-    const int64_t got  = static_cast<int64_t>(stamp.seconds) * 1000000000LL +
-                         static_cast<int64_t>(stamp.nanoseconds);
+    const int64_t got = static_cast<int64_t>(stamp.seconds) * 1000000000LL +
+                        static_cast<int64_t>(stamp.nanoseconds);
     const int64_t diff = got - nowNs();
     if (diff > 1000000000LL || diff < -1000000000LL) {
         ++s_stats.txMissing;
@@ -894,7 +895,7 @@ uint16_t fold(uint32_t sum)
 
 constexpr size_t kMaxUdpPayload = 64;
 
-} // namespace
+}  // namespace ptp
 
 namespace ptp {
 
@@ -950,9 +951,9 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
         const int      count        = esp_netif_get_all_ip6(s_netif, addresses);
         const uint8_t *src          = nullptr;
         for (int i = 0; i < count; ++i) {
-            const uint8_t *candidate = reinterpret_cast<const uint8_t *>(&addresses[i].addr);
-            const bool linklocal = candidate[0] == 0xfe && (candidate[1] & 0xc0) == 0x80;
-            const bool dstLinklocal = dstAddr[0] == 0xfe && (dstAddr[1] & 0xc0) == 0x80;
+            const uint8_t *candidate    = reinterpret_cast<const uint8_t *>(&addresses[i].addr);
+            const bool     linklocal    = candidate[0] == 0xfe && (candidate[1] & 0xc0) == 0x80;
+            const bool     dstLinklocal = dstAddr[0] == 0xfe && (dstAddr[1] & 0xc0) == 0x80;
             if (linklocal == dstLinklocal) {
                 src = candidate;
                 break;
@@ -962,8 +963,8 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
             fail(4);
             return false;
         }
-        frame[12] = 0x86;
-        frame[13] = 0xdd;
+        frame[12]   = 0x86;
+        frame[13]   = 0xdd;
         uint8_t *ip = frame + kEthLen;
         ip[0]       = 0x60;
         ip[4]       = static_cast<uint8_t>(udpLen >> 8);
@@ -1000,7 +1001,7 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
         const uint16_t folded = fold(sum);
         const uint16_t c      = folded == 0 ? 0xffff : folded;
         udp[6]                = static_cast<uint8_t>(c >> 8);
-        udp[7]           = static_cast<uint8_t>(c & 0xff);
+        udp[7]                = static_cast<uint8_t>(c & 0xff);
     }
 
     const size_t total = udpOff + udpLen;
@@ -1141,4 +1142,4 @@ const char *modeText(Mode value)
     }
 }
 
-} // namespace ptp
+}  // namespace ptp

@@ -65,7 +65,7 @@ const char *ClockSource::name(ClockOwner owner)
 
 void ClockSource::begin()
 {
-    m_sinceUs     = nowUs();
+    m_sinceUs      = nowUs();
     m_quietSinceUs = m_sinceUs;
 }
 
@@ -113,22 +113,17 @@ bool ClockSource::upstreamLocked() const
 bool ClockSource::gpsSteers()
 {
     switch (Settings::instance().timeSource()) {
-    case Settings::TimeSource::Gps:
-        return true;
-    case Settings::TimeSource::Auto:
-        break;
+    case Settings::TimeSource::Gps:  return true;
+    case Settings::TimeSource::Auto: break;
     default:
         /* off/dhcp/static: the client is the only owner, as it always was. */
         return false;
     }
 
     switch (owner()) {
-    case ClockOwner::Gps:
-        return true;
-    case ClockOwner::Upstream:
-        return false;
-    case ClockOwner::Handing:
-        break;
+    case ClockOwner::Gps:      return true;
+    case ClockOwner::Upstream: return false;
+    case ClockOwner::Handing:  break;
     }
 
     /* Handing: the receiver still owns the clock, right up to the moment the
@@ -167,8 +162,7 @@ void ClockSource::observe(const bool pulseGood)
         m_healthySinceUs = 0;
     }
 
-    const bool recovered =
-        m_healthySinceUs != 0 && at - m_healthySinceUs >= kRecoverAfterUs;
+    const bool recovered = m_healthySinceUs != 0 && at - m_healthySinceUs >= kRecoverAfterUs;
 
     switch (owner()) {
     case ClockOwner::Gps:
@@ -213,7 +207,7 @@ void ClockSource::setOwner(const ClockOwner owner)
         return;
     }
     m_owner.store(owner, std::memory_order_relaxed);
-    m_sinceUs = nowUs();
+    m_sinceUs  = nowUs();
     m_settleUs = 0;
 }
 
@@ -222,7 +216,7 @@ void ClockSource::engage()
     /* Called on the transition into Handing, and again from observe() while a
      * failed engage is being retried. A client already up is only re-polled,
      * not rebuilt. */
-    m_nextEngageUs        = nowUs() + kEngageRetryUs;
+    m_nextEngageUs         = nowUs() + kEngageRetryUs;
     const bool      before = NtpTime::instance().running();
     const esp_err_t err    = NtpTime::instance().startFallback();
     if (err != ESP_OK) {

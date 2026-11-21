@@ -36,8 +36,8 @@ void GpsTime::applyBias(bool on)
 void GpsTime::sendPubxPortConfig(uint32_t baud)
 {
     char      bodyText[40] = {};
-    const int body = std::snprintf(bodyText, sizeof(bodyText), "PUBX,41,1,0003,0001,%u,0",
-                                   static_cast<unsigned>(baud));
+    const int body         = std::snprintf(bodyText, sizeof(bodyText), "PUBX,41,1,0003,0001,%u,0",
+                                           static_cast<unsigned>(baud));
     if (body <= 0 || body >= static_cast<int>(sizeof(bodyText))) {
         return;
     }
@@ -74,17 +74,17 @@ void GpsTime::sendPubxPortConfig(uint32_t baud)
 int8_t GpsTime::saveCfgIo()
 {
     uint8_t cfg[12] = {};
-    text::putLe(cfg + 0, 0u);        /* clearMask: nothing */
+    text::putLe(cfg + 0, 0u);          /* clearMask: nothing */
     text::putLe(cfg + 4, 0x00000001u); /* saveMask: IO */
-    text::putLe(cfg + 8, 0u);        /* loadMask: nothing */
+    text::putLe(cfg + 8, 0u);          /* loadMask: nothing */
     return sendAndWait(0x06, 0x09, cfg, sizeof(cfg));
 }
 
 int8_t GpsTime::sendCfgPrt(uint32_t baud)
 {
     uint8_t cfg[20] = {};
-    cfg[0] = 1;                                          /* portID: UART1 */
-    text::putLe(cfg + 4, 0x000008D0u);                   /* 8 data bits, no parity, 1 stop */
+    cfg[0]          = 1;               /* portID: UART1 */
+    text::putLe(cfg + 4, 0x000008D0u); /* 8 data bits, no parity, 1 stop */
     text::putLe(cfg + 8, baud);
     /* The masks are BITFIELDS: bit 0 UBX, bit 1 NMEA, bit 2 RTCM, bit 5 RTCM3.
      * Outgoing has to keep bit 0 or the receiver stops sending UBX altogether
@@ -92,8 +92,8 @@ int8_t GpsTime::sendCfgPrt(uint32_t baud)
      * as a live-but-idle link and strand the scan, because a trickle keeps it
      * from ever advancing. Incoming keeps NMEA too, harmlessly, because a
      * module someone has been at with u-center may still be emitting it. */
-    text::putLe(cfg + 12, 0x0003u);                      /* in: UBX | NMEA */
-    text::putLe(cfg + 14, 0x0001u);                      /* out: UBX */
+    text::putLe(cfg + 12, 0x0003u); /* in: UBX | NMEA */
+    text::putLe(cfg + 14, 0x0001u); /* out: UBX */
     return sendAndWait(0x06, 0x00, cfg, sizeof(cfg));
 }
 
@@ -134,8 +134,8 @@ void GpsTime::restoreTimeMode()
      * from NVS and re-sent. A survey resumes with its own parameters; a locked
      * position goes back as it was. Without this, a power cut (or street works)
      * costs a day's survey and leaves nothing to say it ever existed. */
-    Settings   &settings = Settings::instance();
-    const std::string &mode = settings.gpsTimeMode();
+    Settings          &settings = Settings::instance();
+    const std::string &mode     = settings.gpsTimeMode();
 
     if (mode == "fixed") {
         long long     x   = 0;
@@ -224,15 +224,15 @@ void GpsTime::reassertFix()
      * The record is re-read rather than taken from RAM for the same reason: a
      * reset may be exactly when it was corrected by hand, and applying the
      * stale copy would quietly undo that. */
-    long long     x   = 0;
-    long long     y   = 0;
-    long long     z   = 0;
-    unsigned long acc = 0;
-    unsigned long val = 0;
+    long long          x   = 0;
+    long long          y   = 0;
+    long long          z   = 0;
+    unsigned long      acc = 0;
+    unsigned long      val = 0;
     const std::string &pos = Settings::instance().gpsFixedPos();
-    const bool stored = (text::getList(pos, ',', x, y, z, acc, val) ||
-                         text::getList(pos, ',', x, y, z, acc)) &&
-                        !(x == 0 && y == 0 && z == 0);
+    const bool         stored =
+        (text::getList(pos, ',', x, y, z, acc, val) || text::getList(pos, ',', x, y, z, acc)) &&
+        !(x == 0 && y == 0 && z == 0);
     if (!stored) {
         /* No hold to put back: a survey may be the thing that was wanted.
          * Restarting it loses its elapsed time, which is still better than a
@@ -286,7 +286,7 @@ void GpsTime::advanceBaud()
          * has been listened to a second time, so a walk-off from a rate that
          * was right all along reset a healthy receiver on the way back to it. */
         if (m_silentPasses >= 2 && nowUs - m_lastSweepUs > 60000000LL) {
-            m_lastSweepUs = nowUs;
+            m_lastSweepUs            = nowUs;
             constexpr uint8_t rst[4] = {0x00, 0x00, 0x00, 0x00}; /* hot, hardware */
             for (uint32_t baud : kBauds) {
                 (void)uart_set_baudrate(kUart, baud);
@@ -303,8 +303,10 @@ void GpsTime::advanceBaud()
             m_baudIndex = m_preferredIndex;
         }
         if (!m_noDataLogged) {
-            ESP_LOGW(TAG, "no UBX frames at any baud rate: check module TX -> GPIO%d "
-                          "(esp RX) and PPS -> GPIO%d", kRxPin, static_cast<int>(kPpsPin));
+            ESP_LOGW(TAG,
+                     "no UBX frames at any baud rate: check module TX -> GPIO%d "
+                     "(esp RX) and PPS -> GPIO%d",
+                     kRxPin, static_cast<int>(kPpsPin));
             m_noDataLogged = true;
         }
     } else {
@@ -315,7 +317,7 @@ void GpsTime::advanceBaud()
         }
     }
 
-    m_baud = kBauds[m_baudIndex];
+    m_baud              = kBauds[m_baudIndex];
     const esp_err_t err = uart_set_baudrate(kUart, m_baud);
     /* Half a frame read at the old rate must not be finished with bytes at the
      * new one. */
@@ -360,8 +362,9 @@ int8_t GpsTime::sendTp5()
     text::getList(Settings::instance().gpsUserDelayNs(), ',', userAsked);
     /* int32_t, not the long the clamp produces: putLe writes sizeof, and eight
      * bytes at 24 run over the flags at 28. */
-    const int32_t userNs = static_cast<int32_t>(
-        userAsked > 10000000L ? 10000000L : userAsked < -10000000L ? -10000000L : userAsked);
+    const int32_t userNs = static_cast<int32_t>(userAsked > 10000000L    ? 10000000L
+                                                : userAsked < -10000000L ? -10000000L
+                                                                         : userAsked);
     text::putLe(tp5 + 24, userNs);
     text::putLe(tp5 + 4, cableNs);
     /* freqPeriod and freqPeriodLock, in microseconds: isFreq (bit 3) is clear. */
@@ -424,7 +427,7 @@ void GpsTime::configureModule()
     static constexpr uint8_t kSilence[][2] = {
         {0xF0, 0x00}, /* GGA */ {0xF0, 0x01}, /* GLL */ {0xF0, 0x02}, /* GSA */
         {0xF0, 0x03}, /* GSV */ {0xF0, 0x04}, /* RMC */ {0xF0, 0x05}, /* VTG */
-        {0xF0, 0x08}, /* ZDA */
+        {0xF0, 0x08},                                                 /* ZDA */
     };
 
     /* UBX-CFG-TP5 (class 0x06, id 0x31) first, because it is the frame that
@@ -454,8 +457,8 @@ void GpsTime::configureModule()
      * and assert it before the pulse. */
     {
         constexpr uint8_t kRate[6] = {0xE8, 0x03, 0, 0, 0, 1}; /* 1000 ms, 1:1, UTC */
-        const int8_t rr = sendAndWait(0x06, 0x08, kRate, sizeof(kRate));
-        m_rateCfg = rr == 1 ? 1 : rr == 0 ? 2 : 0;
+        const int8_t      rr       = sendAndWait(0x06, 0x08, kRate, sizeof(kRate));
+        m_rateCfg                  = rr == 1 ? 1 : rr == 0 ? 2 : 0;
         if (rr == 1) {
             ESP_LOGI(TAG, "CFG-RATE accepted: 1 Hz measurement, UTC reference");
         } else {
@@ -483,10 +486,10 @@ void GpsTime::configureModule()
     {
         uint8_t nav5[36] = {};
         text::putLe(nav5 + 0, 0x0401u); /* mask: dynModel | utcStandard */
-        nav5[2]  = 2;                   /* dynModel: stationary */
-        nav5[30] = 3;                   /* utcStandard: UTC(USNO) from GPS */
+        nav5[2]         = 2;            /* dynModel: stationary */
+        nav5[30]        = 3;            /* utcStandard: UTC(USNO) from GPS */
         const int8_t nr = sendAndWait(0x06, 0x24, nav5, sizeof(nav5));
-        m_nav5Cfg = nr == 1 ? 1 : nr == 0 ? 2 : 0;
+        m_nav5Cfg       = nr == 1 ? 1 : nr == 0 ? 2 : 0;
         if (nr == 1) {
             ESP_LOGI(TAG, "CFG-NAV5 accepted: stationary platform, UTC from GPS");
         } else {
@@ -494,14 +497,13 @@ void GpsTime::configureModule()
                      nr == 0 ? "rejected" : "unanswered");
         }
     }
-    int8_t r = sendTp5();
+    int8_t r   = sendTp5();
     m_tp5Acked = r == 1;
     m_tp5Naked = r == 0;
     if (r == 1) {
         ESP_LOGI(TAG, "CFG-TP5 accepted: pulse is 1 Hz, UTC, rising");
     } else {
-        ESP_LOGW(TAG, "CFG-TP5 %s: the pulse is NOT asserted",
-                 r == 0 ? "rejected" : "unanswered");
+        ESP_LOGW(TAG, "CFG-TP5 %s: the pulse is NOT asserted", r == 0 ? "rejected" : "unanswered");
     }
 
     /* UBX-CFG-ANT (class 0x06, id 0x13). The bias tee on the RF input is not
@@ -521,9 +523,9 @@ void GpsTime::configureModule()
      * what made the supervisor look absent for an afternoon. Pins 20 and 27 are
      * the EXTINT pair the board wires to the switch, AADET first. */
     constexpr uint8_t kCfgAnt[4] = {0x0B, 0x00, 20, 27};
-    r = sendAndWait(0x06, 0x13, kCfgAnt, sizeof(kCfgAnt));
-    m_antCfgAcked = r == 1;
-    m_antCfgNaked = r == 0;
+    r                            = sendAndWait(0x06, 0x13, kCfgAnt, sizeof(kCfgAnt));
+    m_antCfgAcked                = r == 1;
+    m_antCfgNaked                = r == 0;
     if (r == 1) {
         ESP_LOGI(TAG, "CFG-ANT accepted: antenna bias on, short detection, power-down on short");
     } else {
@@ -552,8 +554,7 @@ void GpsTime::configureModule()
      * they are already the split u-blox ships for a five-constellation mask,
      * and inventing a different one is a guess against a working baseline. */
     {
-        struct GnssBlock
-        {
+        struct GnssBlock {
             uint8_t  id;
             uint8_t  res;
             uint8_t  max;
@@ -571,19 +572,20 @@ void GpsTime::configureModule()
             {5, 0, 3, 0x05010000},  /* QZSS     */
             {6, 8, 14, 0x01010000}, /* GLONASS  */
         };
-        constexpr int    kCount = static_cast<int>(sizeof(kBlocks) / sizeof(kBlocks[0]));
-        uint8_t          cfg[4 + 8 * kCount] = {0x00, 32, 32, kCount};
-        const uint32_t   mask = m_gnssMask;
+        constexpr int  kCount              = static_cast<int>(sizeof(kBlocks) / sizeof(kBlocks[0]));
+        uint8_t        cfg[4 + 8 * kCount] = {0x00, 32, 32, kCount};
+        const uint32_t mask                = m_gnssMask;
         for (int i = 0; i < kCount; ++i) {
-            const uint32_t flags = kBlocks[i].flags | (((mask >> kBlocks[i].id) & 1u) != 0 ? 1u : 0u);
-            uint8_t       *b     = cfg + 4 + 8 * i;
-            b[0]                 = kBlocks[i].id;
-            b[1]                 = kBlocks[i].res;
-            b[2]                 = kBlocks[i].max;
-            b[3]                 = 0;
+            const uint32_t flags =
+                kBlocks[i].flags | (((mask >> kBlocks[i].id) & 1u) != 0 ? 1u : 0u);
+            uint8_t *b = cfg + 4 + 8 * i;
+            b[0]       = kBlocks[i].id;
+            b[1]       = kBlocks[i].res;
+            b[2]       = kBlocks[i].max;
+            b[3]       = 0;
             text::putLe(b + 4, flags);
         }
-        r = sendAndWait(0x06, 0x3E, cfg, sizeof(cfg));
+        r           = sendAndWait(0x06, 0x3E, cfg, sizeof(cfg));
         m_gnssAcked = r == 1;
         m_gnssNaked = r == 0;
         if (r == 1) {
@@ -607,7 +609,7 @@ void GpsTime::configureModule()
      * sends nothing, which is why the answer is recorded in three states rather
      * than two: "accepted" and "on the wire" are not the same thing. */
     const int8_t tos = sendAndWait(0x06, 0x01, kTimTosEnable, sizeof(kTimTosEnable));
-    m_tosCfg = tos == 1 ? 1 : tos == 0 ? 2 : 0;
+    m_tosCfg         = tos == 1 ? 1 : tos == 0 ? 2 : 0;
     /* Rate zero, then poll it: see the poll in task(). The rate is still asked
      * for, because a module that honours it saves the poll. */
     r = sendAndWait(0x06, 0x01, kTimTpEnable, sizeof(kTimTpEnable));
@@ -629,7 +631,7 @@ void GpsTime::configureModule()
      * two antennas and leaves the wire to the messages the clock needs. */
     {
         constexpr uint8_t kNavSat[8] = {0x01, 0x35, 0, 2, 0, 0, 0, 0};
-        r = sendAndWait(0x06, 0x01, kNavSat, sizeof(kNavSat));
+        r                            = sendAndWait(0x06, 0x01, kNavSat, sizeof(kNavSat));
         if (r != 1) {
             ESP_LOGW(TAG, "NAV-SAT enable %s: no C/N0 in /healthz",
                      r == 0 ? "rejected" : "unanswered");
@@ -643,10 +645,10 @@ void GpsTime::configureModule()
      * jammer arrive. All four are diagnostics: none of them feeds the clock. */
     {
         struct Extra {
-            const char   *name;
-            uint8_t       cls;
-            uint8_t       id;
-            uint8_t       div;
+            const char *name;
+            uint8_t     cls;
+            uint8_t     id;
+            uint8_t     div;
         };
         const Extra kExtras[] = {
             {"NAV-DOP", 0x01, 0x04, 2},
@@ -680,7 +682,7 @@ void GpsTime::configureModule()
      * exists in the TIM dialect for exactly this product. */
     {
         constexpr uint8_t kTimSvin[8] = {0x0D, 0x04, 0, 10, 0, 0, 0, 0};
-        r = sendAndWait(0x06, 0x01, kTimSvin, sizeof(kTimSvin));
+        r                             = sendAndWait(0x06, 0x01, kTimSvin, sizeof(kTimSvin));
         if (r != 1) {
             ESP_LOGW(TAG, "TIM-SVIN enable %s: no survey progress",
                      r == 0 ? "rejected" : "unanswered");
@@ -763,13 +765,13 @@ void GpsTime::sendUbx(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
         return;
     }
 
-    size_t n     = 0;
-    frame[n++]   = 0xB5;
-    frame[n++]   = 0x62;
-    frame[n++]   = cls;
-    frame[n++]   = id;
-    frame[n++]   = static_cast<uint8_t>(len & 0xFF);
-    frame[n++]   = static_cast<uint8_t>(len >> 8);
+    size_t n   = 0;
+    frame[n++] = 0xB5;
+    frame[n++] = 0x62;
+    frame[n++] = cls;
+    frame[n++] = id;
+    frame[n++] = static_cast<uint8_t>(len & 0xFF);
+    frame[n++] = static_cast<uint8_t>(len >> 8);
     for (uint16_t i = 0; i < len; ++i) {
         frame[n++] = payload[i];
     }

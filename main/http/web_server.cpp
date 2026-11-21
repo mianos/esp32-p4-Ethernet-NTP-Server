@@ -67,17 +67,17 @@ WebContext s_web_context;
 const char *resetReasonText()
 {
     switch (esp_reset_reason()) {
-    case ESP_RST_POWERON:  return "power-on";
-    case ESP_RST_BROWNOUT: return "brown-out";
-    case ESP_RST_EXT:      return "external-pin";
-    case ESP_RST_SW:       return "software";
-    case ESP_RST_PANIC:    return "panic";
-    case ESP_RST_INT_WDT:  return "interrupt-watchdog";
-    case ESP_RST_TASK_WDT: return "task-watchdog";
-    case ESP_RST_WDT:      return "other-watchdog";
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_BROWNOUT:  return "brown-out";
+    case ESP_RST_EXT:       return "external-pin";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "interrupt-watchdog";
+    case ESP_RST_TASK_WDT:  return "task-watchdog";
+    case ESP_RST_WDT:       return "other-watchdog";
     case ESP_RST_DEEPSLEEP: return "deep-sleep";
-    case ESP_RST_SDIO:     return "sdio";
-    default:               return "unknown";
+    case ESP_RST_SDIO:      return "sdio";
+    default:                return "unknown";
     }
 }
 
@@ -96,8 +96,7 @@ NtpWebServer &NtpWebServer::instance()
     return server;
 }
 
-NtpWebServer::NtpWebServer()
-    : WebServer(&s_web_context)
+NtpWebServer::NtpWebServer() : WebServer(&s_web_context)
 {
 }
 
@@ -124,9 +123,11 @@ void NtpWebServer::register_routes()
     struct Route {
         const char    *uri;
         httpd_method_t method;
-        esp_err_t    (*handler)(httpd_req_t *req);
+        esp_err_t (*handler)(httpd_req_t *req);
     };
 
+    /* A table, kept in columns by hand: the formatter packs it. */
+    // clang-format off
     static constexpr Route routes[] = {
         {"/config",       HTTP_GET,  config_get_handler},
         {"/config",       HTTP_POST, config_post_handler},
@@ -147,6 +148,7 @@ void NtpWebServer::register_routes()
         {"/firmware",     HTTP_GET,  firmware_get_handler},
         {"/firmware",     HTTP_POST, firmware_post_handler},
     };
+    // clang-format on
 
     for (const Route &route : routes) {
         httpd_uri_t uri = {};
@@ -157,9 +159,8 @@ void NtpWebServer::register_routes()
 
         esp_err_t err = httpd_register_uri_handler(server, &uri);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "register %s %s: %s",
-                     route.method == HTTP_POST ? "POST" : "GET", route.uri,
-                     esp_err_to_name(err));
+            ESP_LOGE(TAG, "register %s %s: %s", route.method == HTTP_POST ? "POST" : "GET",
+                     route.uri, esp_err_to_name(err));
             return;
         }
     }
@@ -286,8 +287,7 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
             json.AddItem("gps_ant_latched", true);
         }
         if (gps.ppsSuppressUs > 0) {
-            json.AddItem("gps_pps_suppressed_s",
-                         static_cast<double>(gps.ppsSuppressUs / 1000000));
+            json.AddItem("gps_pps_suppressed_s", static_cast<double>(gps.ppsSuppressUs / 1000000));
         }
         /* What the last holdover actually cost, measured when the edge came
          * back: how long it was, and how far the servo's prediction was out.
@@ -394,8 +394,7 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("ntp_il_keyonly", static_cast<double>(server.interleavedKeyOnly()));
         json.AddItem("ntp_il_hit", static_cast<double>(server.interleavedHit()));
         json.AddItem("ntp_serve_bound_us", ServePath::instance().boundUs());
-        json.AddItem("ntp_interleaved_served",
-                     static_cast<double>(server.interleavedServed()));
+        json.AddItem("ntp_interleaved_served", static_cast<double>(server.interleavedServed()));
         json.AddItem("ntp_clients", static_cast<double>(counters.clients));
         if (counters.lastServedS >= 0) {
             json.AddItem("ntp_last_served_s", counters.lastServedS);
@@ -447,7 +446,7 @@ esp_err_t NtpWebServer::config_reset_post_handler(httpd_req_t *req)
 {
     const std::string caller = callerAddress(req);
 
-    Settings          &settings        = Settings::instance();
+    Settings         &settings        = Settings::instance();
     const std::string hostname_before = settings.hostname();
     /* Defaults do not include the boot count: it describes the device, not the
      * configuration, and a reset that zeroes it hides the reboot it precedes. */
@@ -505,10 +504,9 @@ esp_err_t NtpWebServer::sync_post_handler(httpd_req_t *req)
      * be running yet. off/dhcp/static are never the receiver's, so they keep the
      * 409 the client gives below. */
     const Settings::TimeSource configured = settings.timeSource();
-    const bool gpsServing =
-        configured == Settings::TimeSource::Gps ||
-        (configured == Settings::TimeSource::Auto &&
-         ClockSource::instance().owner() != ClockOwner::Upstream);
+    const bool                 gpsServing = configured == Settings::TimeSource::Gps ||
+                            (configured == Settings::TimeSource::Auto &&
+                             ClockSource::instance().owner() != ClockOwner::Upstream);
     if (gpsServing) {
         const GpsTime::Status gps = GpsTime::instance().status();
         if (!gps.locked) {
@@ -571,9 +569,9 @@ esp_err_t NtpWebServer::gps_pps_post_handler(httpd_req_t *req)
         return sendJsonError(req, 400, "suppress_s must be 0..3600, or 0 to end the test");
     }
 
-    const std::string caller  = callerAddress(req);
-    const uint32_t    applied = GpsTime::instance().suppressPps(static_cast<uint32_t>(seconds));
-    const GpsTime::Status gps = GpsTime::instance().status();
+    const std::string     caller  = callerAddress(req);
+    const uint32_t        applied = GpsTime::instance().suppressPps(static_cast<uint32_t>(seconds));
+    const GpsTime::Status gps     = GpsTime::instance().status();
 
     JsonWrapper resp;
     resp.AddItem("pps_suppressed_s", static_cast<double>(applied));
@@ -616,10 +614,10 @@ esp_err_t NtpWebServer::gps_samples_get_handler(httpd_req_t *req)
     }
 
     static GpsTime::Sample page[400];
-    uint32_t              first = 0;
-    uint32_t              last  = 0;
-    uint32_t              lost  = 0;
-    const size_t          got   = GpsTime::instance().drainSamples(since, page, max, first, last, lost);
+    uint32_t               first = 0;
+    uint32_t               last  = 0;
+    uint32_t               lost  = 0;
+    const size_t got = GpsTime::instance().drainSamples(since, page, max, first, last, lost);
 
     /* Built by hand rather than through JsonWrapper: an array of arrays with
      * nine fixed fields is a fraction of the bytes of 120 named objects, and
@@ -628,8 +626,8 @@ esp_err_t NtpWebServer::gps_samples_get_handler(httpd_req_t *req)
      * be read against the offset rather than only beside it. */
     std::string body;
     body.reserve(got * 82 + 128);
-    body += std::format("{{\"firstSeq\":{},\"lastSeq\":{},\"lost\":{},\"samples\":[", first,
-                        last, lost);
+    body += std::format("{{\"firstSeq\":{},\"lastSeq\":{},\"lost\":{},\"samples\":[", first, last,
+                        lost);
     for (size_t i = 0; i < got; ++i) {
         const GpsTime::Sample &s = page[i];
         if (i != 0) {
@@ -667,8 +665,9 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
     if (!gps.moduleId.empty()) {
         doc.AddItem("module", gps.moduleId);
     }
-    doc.AddItem("ant_cfg", gps.antCfgRejected ? "rejected" : gps.antCfgAcked ? "accepted"
-                                                                             : "silent");
+    doc.AddItem("ant_cfg", gps.antCfgRejected ? "rejected"
+                           : gps.antCfgAcked  ? "accepted"
+                                              : "silent");
     doc.AddItem("tp5_ok", !gps.tp5Rejected);
     doc.AddItem("timtp", gps.timTpRejected ? "rejected" : gps.timTpAcked ? "accepted" : "silent");
 
@@ -712,8 +711,7 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
         /* Usually absent. Present only while the pulse position is unobserved,
          * so a large dispersion can be told from a bad clock. */
         if (gps.pulseUnobservedNs > 0) {
-            doc.AddItem("pulse_unobserved_us",
-                        static_cast<double>(gps.pulseUnobservedNs) / 1000.0);
+            doc.AddItem("pulse_unobserved_us", static_cast<double>(gps.pulseUnobservedNs) / 1000.0);
         }
     }
     /* The pulse's own quality. The jitter is OURS -- the spread of our own
@@ -932,26 +930,101 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
 /* What /gps/info keeps: every key something reads, plus the five the standing
  * watch on this box is kept in. Everything else is /gps/bench. */
 static constexpr const char *kPolled[] = {
-    "module", "tp5_ok", "timtp", "offset_ns", "pps_ptp_ns", "phc_mono_delta_ns", "rate_ppm", "rate_n", "bridge_active",
-    "bridge_clients", "gnss", "gnss_cfg", "time_mode", "svin_dur_s", "svin_acc_mm",
-    "svin_var_mm2", "svin_obs", "svin_target_s", "svin_limit_mm", "svin_valid",
-    "dispersion_us", "lock_window_s", "tp_jitter_ns", "root_delay_ns", "servo_steps",
-    "servo_clamps", "edge_spikes", "tie_max_ns", "tie_rms_ns", "pvt_nano_ns", "pulse_offset_ns",
-    "pulse_on_second", "hold_wanted", "hold_assert_in_s", "hold_ready", "last_edge_age_ms", "gdop", "pdop", "hdop",
-    "vdop", "dop_age_s", "clk_bias_ns", "clk_drift_ns_s", "t_acc_ns", "f_acc_ps_s",
-    "nav_status_flags", "nav_status_flags2", "ttff_ms", "baud", "recent_frames",
-    "io_rx_bytes", "io_tx_bytes", "io_parity", "io_framing", "io_overrun", "rbuf_pending",
-    "rbuf_peak", "tbuf_pending", "tbuf_peak", "tbuf_errors", "msg_ubx", "msg_skipped",
-    "msgpp_hex", "io_hex", "rf_cfg", "rf_bands", "rf_jam_worst", "rf_agc_min", "ant",
-    "ant_power", "ant_bias", "ant_short", "ant_delay_ns", "noise_dbm", "agc", "jam_ind",
-    "jam", "cn0_max", "cn0_mean", "cn0_used", "leap_pending", "leap_in_s", "last_holdover_s",
+    "module",
+    "tp5_ok",
+    "timtp",
+    "offset_ns",
+    "pps_ptp_ns",
+    "phc_mono_delta_ns",
+    "rate_ppm",
+    "rate_n",
+    "bridge_active",
+    "bridge_clients",
+    "gnss",
+    "gnss_cfg",
+    "time_mode",
+    "svin_dur_s",
+    "svin_acc_mm",
+    "svin_var_mm2",
+    "svin_obs",
+    "svin_target_s",
+    "svin_limit_mm",
+    "svin_valid",
+    "dispersion_us",
+    "lock_window_s",
+    "tp_jitter_ns",
+    "root_delay_ns",
+    "servo_steps",
+    "servo_clamps",
+    "edge_spikes",
+    "tie_max_ns",
+    "tie_rms_ns",
+    "pvt_nano_ns",
+    "pulse_offset_ns",
+    "pulse_on_second",
+    "hold_wanted",
+    "hold_assert_in_s",
+    "hold_ready",
+    "last_edge_age_ms",
+    "gdop",
+    "pdop",
+    "hdop",
+    "vdop",
+    "dop_age_s",
+    "clk_bias_ns",
+    "clk_drift_ns_s",
+    "t_acc_ns",
+    "f_acc_ps_s",
+    "nav_status_flags",
+    "nav_status_flags2",
+    "ttff_ms",
+    "baud",
+    "recent_frames",
+    "io_rx_bytes",
+    "io_tx_bytes",
+    "io_parity",
+    "io_framing",
+    "io_overrun",
+    "rbuf_pending",
+    "rbuf_peak",
+    "tbuf_pending",
+    "tbuf_peak",
+    "tbuf_errors",
+    "msg_ubx",
+    "msg_skipped",
+    "msgpp_hex",
+    "io_hex",
+    "rf_cfg",
+    "rf_bands",
+    "rf_jam_worst",
+    "rf_agc_min",
+    "ant",
+    "ant_power",
+    "ant_bias",
+    "ant_short",
+    "ant_delay_ns",
+    "noise_dbm",
+    "agc",
+    "jam_ind",
+    "jam",
+    "cn0_max",
+    "cn0_mean",
+    "cn0_used",
+    "leap_pending",
+    "leap_in_s",
+    "last_holdover_s",
     "last_holdover_error_us",
     /* Kept although nothing parses them yet: the trust test and the pairing
      * margin are what the operator watches after a pulse fault. */
-    "edge_rejects", "last_edge_trusted", "pair_age_us", "pair_age_max_us", "pair_age_s",
+    "edge_rejects",
+    "last_edge_trusted",
+    "pair_age_us",
+    "pair_age_max_us",
+    "pair_age_s",
     /* Whether the receiver still owns the clock, which every offset in the
      * document is measured against. */
-    "time_owner", "gps_fallback",
+    "time_owner",
+    "gps_fallback",
 };
 
 /* Drop every key the polled endpoint has no use for. The names are collected
@@ -1049,14 +1122,14 @@ esp_err_t NtpWebServer::gps_sats_get_handler(httpd_req_t *req)
 
     /* The rows live here, on the httpd task's 12 kB stack, rather than inside
      * the Status that every /healthz also copies. */
-    GpsTime::Sat sats[GpsTime::kMaxSats];
+    GpsTime::Sat  sats[GpsTime::kMaxSats];
     const uint8_t have = GpsTime::instance().copySats(sats, GpsTime::kMaxSats);
 
     cJSON *list = cJSON_AddArrayToObject(root, "sats");
     if (list != nullptr) {
         for (uint8_t i = 0; i < have; ++i) {
-            const GpsTime::Sat &s = sats[i];
-            cJSON *row = cJSON_CreateObject();
+            const GpsTime::Sat &s   = sats[i];
+            cJSON              *row = cJSON_CreateObject();
             if (row == nullptr) {
                 break;
             }
@@ -1095,19 +1168,18 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
     /* Two independent jobs on one endpoint: the bias switch, and the lead's
      * delay. Either may be present. */
     std::string bias;
-    const bool  haveBias = doc.GetField("bias", bias);
-    double      delayNs  = 0;
-    const bool  haveDelay = doc.GetField("delay_ns", delayNs);
-    double      pulseMs  = 0;
-    const bool  havePulse = doc.GetField("pulse_ms", pulseMs);
-    double      userNs   = 0;
-    const bool  haveUser = doc.GetField("user_ns", userNs);
-    double      periodUs = 0;
+    const bool  haveBias   = doc.GetField("bias", bias);
+    double      delayNs    = 0;
+    const bool  haveDelay  = doc.GetField("delay_ns", delayNs);
+    double      pulseMs    = 0;
+    const bool  havePulse  = doc.GetField("pulse_ms", pulseMs);
+    double      userNs     = 0;
+    const bool  haveUser   = doc.GetField("user_ns", userNs);
+    double      periodUs   = 0;
     const bool  havePeriod = doc.GetField("period_us", periodUs);
 
     if (!haveBias && !haveDelay && !havePulse && !haveUser && !havePeriod) {
-        return sendJsonError(req, 400,
-                             "give \"bias\" (on|off), \"delay_ns\" and/or \"pulse_ms\"");
+        return sendJsonError(req, 400, "give \"bias\" (on|off), \"delay_ns\" and/or \"pulse_ms\"");
     }
     if (haveBias && bias != "on" && bias != "off") {
         return sendJsonError(req, 400, "bias must be \"on\" or \"off\"");
@@ -1143,8 +1215,7 @@ esp_err_t NtpWebServer::gps_ant_post_handler(httpd_req_t *req)
         /* setX() only changes the object; save() is what reaches NVS, and
          * without it the value is back to zero at the next boot and the pulse
          * reverts with it. */
-        Settings::instance().setAntDelayNs(
-            std::format("{}", static_cast<unsigned>(delayNs)));
+        Settings::instance().setAntDelayNs(std::format("{}", static_cast<unsigned>(delayNs)));
         Settings::instance().save();
         GpsTime::instance().requestAntDelay();
         ESP_LOGW(TAG, "POST /gps/ant from %s: cable delay %u ns", callerAddress(req).c_str(),
@@ -1215,7 +1286,8 @@ esp_err_t NtpWebServer::gps_gnss_post_handler(httpd_req_t *req)
     } else {
         double raw = 0;
         if (!doc.GetField("mask", raw) || raw < 1 || raw > 127) {
-            return sendJsonError(req, 400, "need {\"set\":\"max\"|\"beidou\"} or {\"mask\":1..127}");
+            return sendJsonError(req, 400,
+                                 "need {\"set\":\"max\"|\"beidou\"} or {\"mask\":1..127}");
         }
         mask = static_cast<uint8_t>(raw);
     }
@@ -1277,9 +1349,9 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
      * without clearing the almanac, which is the cheap way back from a state it
      * will not leave on its own. */
     /* The body is optional, so an empty POST still means the cheap thing. */
-    bool cold = false;
-    bool hard = false;
-    bool power = false;
+    bool cold     = false;
+    bool hard     = false;
+    bool power    = false;
     bool defaults = false;
     /* A body that is there has to be readable. Falling through on one that was
      * too long, cut short or not JSON queued a hot start and answered 200 to a
@@ -1305,9 +1377,10 @@ esp_err_t NtpWebServer::gps_reset_post_handler(httpd_req_t *req)
 
     JsonWrapper resp;
     resp.AddItem("reset", defaults ? "configuration cleared to defaults"
-                                 : power ? "power-cycle reset queued"
-                                 : hard ? "hardware reset queued"
-                                        : cold ? "cold start queued" : "hot start queued");
+                          : power  ? "power-cycle reset queued"
+                          : hard   ? "hardware reset queued"
+                          : cold   ? "cold start queued"
+                                   : "hot start queued");
     resp.AddItem("note", cold ? "the almanac is discarded; expect a slow reacquisition"
                               : "the almanac is kept; send {\"cold\":true} to discard it");
     return sendJson(req, resp, 200);
@@ -1457,7 +1530,7 @@ bool NtpWebServer::readJsonBodyTimed(httpd_req_t *req, JsonWrapper &out)
         return sendJsonError(req, 413, "request body too large") == ESP_OK;
     }
 
-    std::string body(static_cast<size_t>(req->content_len), '\0');
+    std::string   body(static_cast<size_t>(req->content_len), '\0');
     const int64_t started = esp_timer_get_time();
     int64_t       last    = started;
     size_t        got     = 0;
@@ -1468,8 +1541,7 @@ bool NtpWebServer::readJsonBodyTimed(httpd_req_t *req, JsonWrapper &out)
             if (nowUs - last > kBodyIdleUs || nowUs - started > kBodyTotalUs) {
                 /* The rest of the body is still in the socket; say 408 and let
                  * the server close rather than draining bytes nobody wants. */
-                ESP_LOGW(TAG, "body stalled at %zu/%zu bytes, giving up",
-                         got, body.size());
+                ESP_LOGW(TAG, "body stalled at %zu/%zu bytes, giving up", got, body.size());
                 return sendJsonError(req, 408, "request body stalled") == ESP_OK;
             }
             continue;
@@ -1477,14 +1549,14 @@ bool NtpWebServer::readJsonBodyTimed(httpd_req_t *req, JsonWrapper &out)
         if (r <= 0) {
             return sendJsonError(req, 400, "request body truncated") == ESP_OK;
         }
-        got  += static_cast<size_t>(r);
-        last  = esp_timer_get_time();
+        got += static_cast<size_t>(r);
+        last = esp_timer_get_time();
     }
 
     /* Objectness is tested on a throwaway parse because JsonWrapper has no
      * predicate for it, and a bare array would otherwise reach handlers that
      * only ever GetField(). */
-    const cJSON *parsed = cJSON_Parse(body.c_str());
+    const cJSON *parsed   = cJSON_Parse(body.c_str());
     const bool   isObject = parsed != nullptr && cJSON_IsObject(parsed);
     cJSON_Delete(const_cast<cJSON *>(parsed));
     if (!isObject) {
@@ -1581,7 +1653,7 @@ esp_err_t NtpWebServer::firmware_post_handler(httpd_req_t *req)
             }
             return sendJsonError(req, 500, esp_err_to_name(err));
         }
-        written   += got;
+        written += got;
         remaining -= got;
     }
 
@@ -1610,5 +1682,3 @@ esp_err_t NtpWebServer::firmware_post_handler(httpd_req_t *req)
     esp_restart();
     return ESP_OK;
 }
-
-

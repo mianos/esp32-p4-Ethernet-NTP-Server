@@ -113,10 +113,10 @@ private:
 #endif
     void statusLoop();
 
-    esp_eth_handle_t m_eth   = nullptr;
+    esp_eth_handle_t m_eth = nullptr;
     /* Owned by the driver once installed; kept for the 1588 calls. */
-    esp_eth_mac_t   *m_mac   = nullptr;
-    esp_netif_t     *m_netif = nullptr;
+    esp_eth_mac_t *m_mac   = nullptr;
+    esp_netif_t   *m_netif = nullptr;
     /* Written by the event handlers, read by the status task. */
     std::atomic<bool> m_haveIp{false};
     /* Only ever touched from the event task, so a plain bool is enough. */
@@ -124,14 +124,14 @@ private:
     /* Restart bookkeeping: the in-flight guard is checked from a task, so it
      * is atomic; the rest is only touched by whoever holds the guard. */
     std::atomic<bool> m_restarting{false};
-    uint32_t          m_restarts     = 0;
-    uint32_t          m_autoRestarts = 0; /* by the link watchdog since the last address */
+    uint32_t          m_restarts      = 0;
+    uint32_t          m_autoRestarts  = 0; /* by the link watchdog since the last address */
     int64_t           m_lastRestartUs = 0;
     /* When the current run of "no lease" began, and whether the attempt cap has
      * already been reported (it would otherwise repeat every poll). */
-    int64_t           m_linkDownSinceUs = 0;
-    bool              m_restartCapLogged = false;
-    bool m_ntpStarted = false;
+    int64_t m_linkDownSinceUs  = 0;
+    bool    m_restartCapLogged = false;
+    bool    m_ntpStarted       = false;
     /* Set while the active address came from the settings rather than a lease:
      * it picks the log wording and keeps the two paths honest. */
     bool m_staticAddr = false;

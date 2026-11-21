@@ -61,9 +61,9 @@ bool buildIpInfo(const Settings &settings, esp_netif_ip_info_t &info)
     if (!net_addr::parseCidr(settings.ipAddress(), addr, prefix)) {
         return false;
     }
-    info.ip      = addr;
-    info.netmask = net_addr::maskFromPrefix(prefix);
-    info.gw      = {};
+    info.ip               = addr;
+    info.netmask          = net_addr::maskFromPrefix(prefix);
+    info.gw               = {};
     const std::string &gw = settings.ipGateway();
     if (!gw.empty() && !net_addr::parseQuad(gw, info.gw)) {
         ESP_LOGW(TAG, "gateway '%s' does not parse -- left unset", gw.c_str());
@@ -131,18 +131,18 @@ constexpr uint32_t kMdioAddresses = 32;
 /* What a float-bus address reads back: no PHY there. */
 constexpr uint32_t kPhyIdAbsent = 0xffff;
 
-constexpr uint32_t    kStatusPollMs    = 5000;
+constexpr uint32_t kStatusPollMs = 5000;
 
 /* A minute down before the MAC is assumed wedged rather than the cable being
  * out: a switch reboot, a patch lead being moved and a DHCP server restart all
  * finish inside that. The down-window restarts after every attempt, so the
  * attempts space themselves by a minute too, and five of them is where a reboot
  * becomes the honest answer. */
-constexpr int64_t     kLinkDownRestartUs = 60000000;
-constexpr uint32_t    kMaxRestarts       = 5;
+constexpr int64_t  kLinkDownRestartUs = 60000000;
+constexpr uint32_t kMaxRestarts       = 5;
 /* Millisecond-scale pause after stopping, so the PHY sees a real break in the
  * link rather than a single sample of it. */
-constexpr uint32_t    kRestartSettleMs   = 250;
+constexpr uint32_t kRestartSettleMs = 250;
 /* The driver polls the link over MDIO by itself every 2 s, and IDF's SMI path
  * has no mutex: two readers can return each other's data, or ESP_ERR_INVALID_STATE.
  * So the registers are read once every six ticks (30 s) while the "waiting"
@@ -226,7 +226,7 @@ bool imagePendingVerify()
 
 /* How many holdoffs an image may spend unreachable before it is given up on:
  * five of them is ten minutes. */
-constexpr int kConfirmTries = 5;
+constexpr int kConfirmTries  = 5;
 int           s_confirmTries = 0;
 
 void confirmTimerBody(void *)
@@ -248,8 +248,8 @@ void confirmTimerBody(void *)
             esp_ota_mark_app_invalid_rollback_and_reboot();
             return;
         }
-        ESP_LOGW(TAG, "OTA image not confirmed: no link or address yet (%d of %d)",
-                 s_confirmTries, kConfirmTries);
+        ESP_LOGW(TAG, "OTA image not confirmed: no link or address yet (%d of %d)", s_confirmTries,
+                 kConfirmTries);
         esp_timer_start_once(s_confirmTimer, kConfirmHoldoffUs);
         return;
     }
@@ -273,8 +273,8 @@ void confirmRunningImage()
     }
 
     esp_timer_create_args_t args = {};
-    args.callback = confirmTimerBody;
-    args.name     = "ota_confirm";
+    args.callback                = confirmTimerBody;
+    args.name                    = "ota_confirm";
     if (esp_timer_create(&args, &s_confirmTimer) != ESP_OK) {
         /* No timer: fall back to confirming now rather than risk a good image
          * being rolled back for want of a timer. */
@@ -382,7 +382,7 @@ esp_err_t EthernetLink::begin()
      * solicitation -- SLAAC cannot work and neither can anything else. The HAL
      * has a wrapper for PM (emac_ll_pass_all_multicast_enable) but no ioctl
      * reaches it, so the register is written here. */
-    bool promiscuous = true; /* the ioctl takes void *, not const */
+    bool            promiscuous    = true; /* the ioctl takes void *, not const */
     const esp_err_t promiscuousErr = esp_eth_ioctl(m_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous);
     if (promiscuousErr != ESP_OK) {
         ESP_LOGW(TAG, "promiscuous mode: %s", esp_err_to_name(promiscuousErr));
@@ -399,8 +399,8 @@ esp_err_t EthernetLink::installDriver()
 {
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
-    phy_config.phy_addr       = kEthPins.phyAddr;
-    phy_config.reset_gpio_num = kEthPins.phyReset;
+    phy_config.phy_addr         = kEthPins.phyAddr;
+    phy_config.reset_gpio_num   = kEthPins.phyReset;
 
     /* ETH_ESP32_EMAC_DEFAULT_CONFIG() is written with C99 designated
      * initialisers in an order C++ rejects, so its defaults are set by hand
@@ -415,9 +415,9 @@ esp_err_t EthernetLink::installDriver()
 
     emac_config.clock_config_out_in.rmii.clock_mode = EMAC_CLK_EXT_IN;
     emac_config.clock_config_out_in.rmii.clock_gpio = -1; /* no clock out */
-    emac_config.dma_burst_len = ETH_DMA_BURST_LEN_32;
-    emac_config.intr_priority = 0;
-    emac_config.mdc_freq_hz   = 0; /* driver default */
+    emac_config.dma_burst_len                       = ETH_DMA_BURST_LEN_32;
+    emac_config.intr_priority                       = 0;
+    emac_config.mdc_freq_hz                         = 0; /* driver default */
 
     MacHandle mac(esp_eth_mac_new_esp32(&emac_config, &mac_config));
     if (!mac) {
@@ -432,7 +432,7 @@ esp_err_t EthernetLink::installDriver()
     }
 
     esp_eth_config_t eth_config = ETH_DEFAULT_CONFIG(mac.get(), phy.get());
-    const esp_err_t err = esp_eth_driver_install(&eth_config, &m_eth);
+    const esp_err_t  err        = esp_eth_driver_install(&eth_config, &m_eth);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_eth_driver_install failed: %s", esp_err_to_name(err));
         return err;
@@ -451,7 +451,7 @@ esp_err_t EthernetLink::attachNetif()
 {
     /* Default Ethernet netif: DHCP client on, ICMP echo on (lwIP default). */
     const esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
-    m_netif = esp_netif_new(&netif_config);
+    m_netif                               = esp_netif_new(&netif_config);
     if (m_netif == nullptr) {
         ESP_LOGE(TAG, "esp_netif_new failed");
         return ESP_FAIL;
@@ -488,7 +488,7 @@ esp_err_t EthernetLink::applySettings(bool atBoot)
         return ESP_ERR_INVALID_STATE;
     }
 
-    const Settings     &settings = Settings::instance();
+    const Settings     &settings   = Settings::instance();
     const bool          wantStatic = settings.ipMode() == "static";
     esp_netif_ip_info_t info{};
     const bool          usable = wantStatic && buildIpInfo(settings, info);
@@ -502,7 +502,8 @@ esp_err_t EthernetLink::applySettings(bool atBoot)
         esp_netif_dhcpc_stop(m_netif);
         esp_err_t err = esp_netif_set_ip_info(m_netif, &info);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "esp_netif_set_ip_info: %s -- falling back to DHCP", esp_err_to_name(err));
+            ESP_LOGE(TAG, "esp_netif_set_ip_info: %s -- falling back to DHCP",
+                     esp_err_to_name(err));
             esp_netif_dhcpc_start(m_netif);
             m_staticAddr = false;
             return err;
@@ -577,7 +578,7 @@ esp_err_t EthernetLink::startStatusTask()
  * ---------------------------------------------------------------------- */
 std::optional<uint32_t> EthernetLink::readPhyReg(uint32_t reg)
 {
-    uint32_t value = 0;
+    uint32_t                  value = 0;
     esp_eth_phy_reg_rw_data_t request{};
     request.reg_addr    = reg;
     request.reg_value_p = &value;
@@ -596,8 +597,9 @@ void EthernetLink::scanPhy()
         if (!id1 || !id2 || *id1 == 0 || *id1 == kPhyIdAbsent) {
             continue;
         }
-        ESP_LOGI(TAG, "MDIO addr %" PRIu32 ": PHY ID 0x%04" PRIx32 "%04" PRIx32
-                 " (IP101 = 0x0243xxxx)", addr, *id1, *id2);
+        ESP_LOGI(TAG,
+                 "MDIO addr %" PRIu32 ": PHY ID 0x%04" PRIx32 "%04" PRIx32 " (IP101 = 0x0243xxxx)",
+                 addr, *id1, *id2);
     }
 
     /* Leave the driver pointed at the PHY it was configured with. */
@@ -614,9 +616,8 @@ void EthernetLink::logPhyStatus()
                       "reads MDIO too, so a busy bus looks the same)");
         return;
     }
-    ESP_LOGI(TAG, "phy: bmsr=0x%04" PRIx32 " link=%d autoneg_done=%d bmcr=0x%04" PRIx32,
-             *bmsr, static_cast<int>((*bmsr >> 2) & 1u),
-             static_cast<int>((*bmsr >> 5) & 1u), *bmcr);
+    ESP_LOGI(TAG, "phy: bmsr=0x%04" PRIx32 " link=%d autoneg_done=%d bmcr=0x%04" PRIx32, *bmsr,
+             static_cast<int>((*bmsr >> 2) & 1u), static_cast<int>((*bmsr >> 5) & 1u), *bmcr);
 }
 
 /* -------------------------------------------------------------------------
@@ -657,14 +658,9 @@ void EthernetLink::onEthEvent(int32_t event_id)
         net_state::setLinkUp(false);
         ESP_LOGW(TAG, "link down");
         break;
-    case ETHERNET_EVENT_START:
-        ESP_LOGI(TAG, "Ethernet started");
-        break;
-    case ETHERNET_EVENT_STOP:
-        ESP_LOGI(TAG, "Ethernet stopped");
-        break;
-    default:
-        break;
+    case ETHERNET_EVENT_START: ESP_LOGI(TAG, "Ethernet started"); break;
+    case ETHERNET_EVENT_STOP:  ESP_LOGI(TAG, "Ethernet stopped"); break;
+    default:                   break;
     }
 }
 
@@ -687,8 +683,8 @@ void EthernetLink::onAddressUp(const esp_netif_ip_info_t &ip_info)
 {
     m_haveIp.store(true, std::memory_order_relaxed);
     ESP_LOGI(TAG, "%s: ip " IPSTR "  mask " IPSTR "  gw " IPSTR,
-             m_staticAddr ? "static address" : "DHCP lease",
-             IP2STR(&ip_info.ip), IP2STR(&ip_info.netmask), IP2STR(&ip_info.gw));
+             m_staticAddr ? "static address" : "DHCP lease", IP2STR(&ip_info.ip),
+             IP2STR(&ip_info.netmask), IP2STR(&ip_info.gw));
     ESP_LOGI(TAG, "ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP");
 
     /* The lease is where the option-42 NTP server (if any) becomes known, so
@@ -813,4 +809,3 @@ void EthernetLink::statusLoop()
         m_linkDownSinceUs = esp_timer_get_time();
     }
 }
-

@@ -43,7 +43,7 @@ void GpsTime::bridgeTask()
         int yes = 1;
         setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-        sockaddr_in addr = {};
+        sockaddr_in addr     = {};
         addr.sin_family      = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_ANY);
         addr.sin_port        = htons(kBridgePort);
@@ -55,8 +55,8 @@ void GpsTime::bridgeTask()
         }
         ESP_LOGI(TAG, "u-center bridge on tcp/%d", kBridgePort);
 
-        int clients[kMaxClients] = {-1, -1, -1, -1};
-        bool quieted = false;
+        int  clients[kMaxClients] = {-1, -1, -1, -1};
+        bool quieted              = false;
         /* u-center opens a TCP port by polling MON-COMMS, and this receiver
          * ignores it. A synthetic reply goes out if the module stays silent --
          * 400 ms, because the module's silence is a property of the message and
@@ -128,16 +128,16 @@ void GpsTime::bridgeTask()
                 }
             }
         } clientSniffer(&baudWanted, &baudAcked, &baudAtUs, &commsClient, &commsDeadline,
-                       &m_bridgeDroppedCrc);
+                        &m_bridgeDroppedCrc);
 
         /* ...and in the receiver's: the answer to that request, and a MON-COMMS
          * reply it bothered to send itself. */
         struct ModuleSniffer : ubx::Listener {
-            uint32_t       *wanted;
-            bool           *acked;
-            int64_t        *atUs;
-            int            *commsClient;
-            int             fd = -1;
+            uint32_t *wanted;
+            bool     *acked;
+            int64_t  *atUs;
+            int      *commsClient;
+            int       fd = -1;
 
             ModuleSniffer(uint32_t *w, bool *a, int64_t *at, int *cp)
                 : wanted(w), acked(a), atUs(at), commsClient(cp)
@@ -148,8 +148,8 @@ void GpsTime::bridgeTask()
 
             void onFrame(const ubx::Frame &f) override
             {
-                if (f.cls == 0x05 && (f.id == 0x00 || f.id == 0x01) && *wanted != 0 &&
-                    f.len >= 2 && f.u8(0) == 0x06 && f.u8(1) == 0x00) {
+                if (f.cls == 0x05 && (f.id == 0x00 || f.id == 0x01) && *wanted != 0 && f.len >= 2 &&
+                    f.u8(0) == 0x06 && f.u8(1) == 0x00) {
                     /* 0x01 is ACK-ACK and 0x00 the NAK. They were the other
                      * way round here, so an accepted rate change was dropped
                      * and a refused one followed. */
@@ -180,9 +180,9 @@ void GpsTime::bridgeTask()
             text::put(m_bridgeEnd, "{}", why);
             ESP_LOGW(TAG, "client gone: %s", why);
             close(clients[i]);
-            clients[i] = -1;
+            clients[i]      = -1;
             m_bridgeClients = m_bridgeClients - 1;
-            bool any = false;
+            bool any        = false;
             for (int j = 0; j < kMaxClients; ++j) {
                 any = any || clients[j] >= 0;
             }
@@ -270,8 +270,8 @@ void GpsTime::bridgeTask()
                 if (clients[i] < 0 || !FD_ISSET(clients[i], &set)) {
                     continue;
                 }
-                uint8_t       in[256];
-                const int     n = recv(clients[i], in, sizeof(in), 0);
+                uint8_t   in[256];
+                const int n = recv(clients[i], in, sizeof(in), 0);
                 if (n <= 0 && !(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
                     text::Buf<48> why;
                     text::put(why, "recv {} errno {}", n, errno);
@@ -298,7 +298,7 @@ void GpsTime::bridgeTask()
                 uart_write_bytes(kUart, in, n);
             }
 
-            uint8_t   out[256];
+            uint8_t out[256];
             /* Only while a client holds the port. With nobody attached the GPS
              * task is the reader, and a second one here took whatever sat in
              * the ring between its reads -- 7280 bytes with no session ever
@@ -320,7 +320,8 @@ void GpsTime::bridgeTask()
                 const uint32_t want = baudWanted;
                 baudWanted          = 0;
                 if (baudAcked) {
-                    ESP_LOGW(TAG, "client asked for %u baud: following", static_cast<unsigned>(want));
+                    ESP_LOGW(TAG, "client asked for %u baud: following",
+                             static_cast<unsigned>(want));
                 } else {
                     ESP_LOGW(TAG, "client asked for %u baud: no ACK, following anyway",
                              static_cast<unsigned>(want));
@@ -347,12 +348,12 @@ void GpsTime::bridgeTask()
                  * and nothing in the list. The counters stay honest zeros: the
                  * module does not report them here and inventing figures would
                  * be worse than a blank. */
-                constexpr int kLen = 8 + 34;
+                constexpr int kLen        = 8 + 34;
                 uint8_t       reply[kLen] = {0xB5, 0x62, 0x0A, 0x36, 34, 0x00};
                 reply[6 + 4]              = 1; /* nPorts */
                 reply[6 + 8]              = 1; /* portId, little endian */
-                uint8_t a = 0;
-                uint8_t b = 0;
+                uint8_t a                 = 0;
+                uint8_t b                 = 0;
                 for (int i = 2; i < kLen - 2; ++i) {
                     a = static_cast<uint8_t>(a + reply[i]);
                     b = static_cast<uint8_t>(b + a);
@@ -372,8 +373,8 @@ void GpsTime::bridgeTask()
                     if (clients[i] < 0) {
                         continue;
                     }
-                    int sent   = 0;
-                    int64_t by = esp_timer_get_time() + 500000;
+                    int     sent = 0;
+                    int64_t by   = esp_timer_get_time() + 500000;
                     while (sent < got && esp_timer_get_time() < by) {
                         const int w = send(clients[i], out + sent, got - sent, 0);
                         if (w > 0) {

@@ -43,8 +43,7 @@ bool haveLease()
 {
     esp_netif_t        *netif = net_state::netif();
     esp_netif_ip_info_t info;
-    return netif != nullptr && esp_netif_get_ip_info(netif, &info) == ESP_OK &&
-           info.ip.addr != 0;
+    return netif != nullptr && esp_netif_get_ip_info(netif, &info) == ESP_OK && info.ip.addr != 0;
 }
 
 /* lwIP's SNTP client resolves its server with dns_gethostbyname(), i.e. A
@@ -96,7 +95,7 @@ public:
             xSemaphoreGive(m_sem);
         }
     }
-    MutexLock(const MutexLock &) = delete;
+    MutexLock(const MutexLock &)            = delete;
     MutexLock &operator=(const MutexLock &) = delete;
 
 private:
@@ -120,8 +119,8 @@ esp_err_t NtpTime::begin()
 {
     /* NETIF_SNTP_TIME_SYNC carries the stepped time, so /healthz and the logs can
      * say when the clock was last set instead of guessing from its value. */
-    esp_err_t err = esp_event_handler_register(NETIF_SNTP_EVENT, ESP_EVENT_ANY_ID,
-                                               &NtpTime::onSyncEvent, this);
+    esp_err_t err =
+        esp_event_handler_register(NETIF_SNTP_EVENT, ESP_EVENT_ANY_ID, &NtpTime::onSyncEvent, this);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cannot listen for time sync events: %s", esp_err_to_name(err));
         return err;
@@ -137,8 +136,9 @@ Settings::TimeSource NtpTime::fallbackSource(std::string &server) const
     if (!server.empty() && isSelfAddress(server)) {
         /* Worth catching: an offset measured against ourselves is always zero,
          * so the clock would look disciplined and free-run for ever. */
-        ESP_LOGW(TAG, "ntpServer '%s' is this device; a zero offset against itself says "
-                      "nothing, so the fallback uses the lease's server instead",
+        ESP_LOGW(TAG,
+                 "ntpServer '%s' is this device; a zero offset against itself says "
+                 "nothing, so the fallback uses the lease's server instead",
                  server.c_str());
         server.clear();
     }
@@ -172,8 +172,7 @@ esp_err_t NtpTime::applySettings()
     Settings::TimeSource wanted   = settings.timeSource();
     std::string          server;
 
-    if (text != "off" && text != "dhcp" && text != "static" && text != "gps" &&
-        text != "auto") {
+    if (text != "off" && text != "dhcp" && text != "static" && text != "gps" && text != "auto") {
         ESP_LOGW(TAG, "unknown timeSource '%s', treating it as off", text.c_str());
     }
     armDhcpServer();
@@ -183,9 +182,8 @@ esp_err_t NtpTime::applySettings()
      * here keeps a single answer to "who owns the clock" instead of a second
      * opinion that could disagree with the servo. */
     if (wanted == Settings::TimeSource::Auto) {
-        wanted = ClockSource::instance().owner() == ClockOwner::Gps
-                     ? Settings::TimeSource::Gps
-                     : fallbackSource(server);
+        wanted = ClockSource::instance().owner() == ClockOwner::Gps ? Settings::TimeSource::Gps
+                                                                    : fallbackSource(server);
     } else if (wanted == Settings::TimeSource::Static) {
         server = settings.ntpServer();
     }
@@ -245,8 +243,8 @@ esp_err_t NtpTime::startFallback()
                           "nothing to poll until it renews (set ntpServer to name one)");
         }
     }
-    ESP_LOGW(TAG, "starting the fallback upstream client (%s %s)",
-             Settings::timeSourceName(source), server.c_str());
+    ESP_LOGW(TAG, "starting the fallback upstream client (%s %s)", Settings::timeSourceName(source),
+             server.c_str());
     return start(source, server);
 }
 
@@ -284,18 +282,19 @@ esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
     setServer(server);
     if (source == Settings::TimeSource::Static) {
         if (looksLikeIpv6(server)) {
-            ESP_LOGW(TAG, "ntpServer '%s' is an IPv6 address; lwIP's SNTP client "
-                          "resolves A records only, so it cannot sync from it -- "
-                          "use an IPv4 address or a host name",
+            ESP_LOGW(TAG,
+                     "ntpServer '%s' is an IPv6 address; lwIP's SNTP client "
+                     "resolves A records only, so it cannot sync from it -- "
+                     "use an IPv4 address or a host name",
                      server.c_str());
         }
     }
 
     esp_sntp_config_t config = {};
-    config.smooth_sync      = kSmoothSync;
-    config.server_from_dhcp = (source == Settings::TimeSource::Dhcp);
-    config.wait_for_sync    = true; /* gives syncNow() a semaphore to wait on */
-    config.start            = true;
+    config.smooth_sync       = kSmoothSync;
+    config.server_from_dhcp  = (source == Settings::TimeSource::Dhcp);
+    config.wait_for_sync     = true; /* gives syncNow() a semaphore to wait on */
+    config.start             = true;
     if (source == Settings::TimeSource::Static) {
         /* lwIP keeps this pointer (sntp_setservername() does not copy), so it is
          * the buffer that is handed over, not a std::string another task could
@@ -305,7 +304,7 @@ esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
         const std::string_view name = server;
         const std::size_t      n    = std::min(name.size(), sizeof(m_lwipServer) - 1);
         name.copy(m_lwipServer, n);
-        m_lwipServer[n] = '\0';
+        m_lwipServer[n]       = '\0';
         config.num_of_servers = 1;
         config.servers[0]     = m_lwipServer;
     }

@@ -9,8 +9,8 @@
 namespace {
 
 /* Protocol constants, RFC 9327 sections 2, 3 and 4. */
-constexpr size_t  kHeaderLen = 12;
-constexpr size_t  kMaxData   = kControlChunk;
+constexpr size_t kHeaderLen = 12;
+constexpr size_t kMaxData   = kControlChunk;
 
 constexpr uint8_t kBitResponse = 0x80;
 constexpr uint8_t kBitMore     = 0x20;
@@ -81,8 +81,7 @@ public:
          * list is written entire and cut into fragments afterwards. Clamped to
          * a fragment it stopped at 468 octets and the rest of the list was
          * dropped without the client being told. */
-        : m_out(out), m_cap(cap >= 3 ? cap - 3 : 0),
-          m_filter(filter), m_filterLen(filterLen)
+        : m_out(out), m_cap(cap >= 3 ? cap - 3 : 0), m_filter(filter), m_filterLen(filterLen)
     {
         m_len = kHeaderLen;
     }
@@ -100,8 +99,8 @@ public:
         if (n <= 0) {
             return;
         }
-        const size_t used  = static_cast<size_t>(n) < sizeof(line) ? static_cast<size_t>(n)
-                                                                   : sizeof(line) - 1;
+        const size_t used =
+            static_cast<size_t>(n) < sizeof(line) ? static_cast<size_t>(n) : sizeof(line) - 1;
         const size_t nameLen = std::strlen(name);
         if (m_len + nameLen + 1 + used + 1 > m_cap) {
             return;
@@ -114,10 +113,7 @@ public:
         m_out[m_len++] = ',';
     }
 
-    void integer(const char *name, long long value)
-    {
-        pair(name, "%lld", value);
-    }
+    void integer(const char *name, long long value) { pair(name, "%lld", value); }
 
     /* A counter, in both the plain and the `_r` "with units" form ntpq asks
      * for when it renders sysstats. */
@@ -169,20 +165,19 @@ void stamp(Writer &w, const char *name, time_t when)
  * sysstats` asks for a raw `_r` form of each counter as well, and this device
  * serves the plain one. */
 constexpr const char *kSystemNames[] = {
-    "version",   "processor", "system",     "peermode",     "peeradr",   "stratum",
-    "refid",     "leap",      "precision",  "rootdelay",    "rootdisp",  "rootdist",
-    "reftime",   "sys_jitter", "clk_jitter", "clk_wander",  "authdelay", "ss_uptime",
-    "ss_numctlreq", "ss_received", "ss_processed", "ss_kodsent", "ss_limited",
-    "ss_badformat", "ss_badauth", "ss_declined", "ss_restricted", "ss_reset",
-    "ss_thisver",  "ss_oldver",  "ss_ver1",     "ss_ver1client", "ss_ver1zero",
-    "ss_ver1symm",
+    "version",      "processor",     "system",        "peermode",    "peeradr",    "stratum",
+    "refid",        "leap",          "precision",     "rootdelay",   "rootdisp",   "rootdist",
+    "reftime",      "sys_jitter",    "clk_jitter",    "clk_wander",  "authdelay",  "ss_uptime",
+    "ss_numctlreq", "ss_received",   "ss_processed",  "ss_kodsent",  "ss_limited", "ss_badformat",
+    "ss_badauth",   "ss_declined",   "ss_restricted", "ss_reset",    "ss_thisver", "ss_oldver",
+    "ss_ver1",      "ss_ver1client", "ss_ver1zero",   "ss_ver1symm",
 };
 
 constexpr const char *kPeerNames[] = {
-    "srcadr",     "srchost",  "dstadr",     "hmode",     "hpoll",    "ppoll",
-    "reach",      "unreach",  "stratum",    "refid",     "leap",     "precision",
-    "delay",      "offset",   "dispersion", "jitter",    "filtdelay", "filtoffset",
-    "filtdisp",   "rootdelay", "rootdisp",  "flash",     "reftime",  "rec",
+    "srcadr",   "srchost",   "dstadr",     "hmode",  "hpoll",     "ppoll",
+    "reach",    "unreach",   "stratum",    "refid",  "leap",      "precision",
+    "delay",    "offset",    "dispersion", "jitter", "filtdelay", "filtoffset",
+    "filtdisp", "rootdelay", "rootdisp",   "flash",  "reftime",   "rec",
 };
 
 bool knownName(const char *name, size_t len, const char *const *list, size_t count)
@@ -366,11 +361,10 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
     }
 
     if (error == 0 && op == kOpReadVar && fieldLen != 0) {
-        const bool ok = assoc == 0
-                            ? allKnown(field, fieldLen, kSystemNames,
-                                       sizeof(kSystemNames) / sizeof(kSystemNames[0]))
-                            : allKnown(field, fieldLen, kPeerNames,
-                                       sizeof(kPeerNames) / sizeof(kPeerNames[0]));
+        const bool ok = assoc == 0 ? allKnown(field, fieldLen, kSystemNames,
+                                              sizeof(kSystemNames) / sizeof(kSystemNames[0]))
+                                   : allKnown(field, fieldLen, kPeerNames,
+                                              sizeof(kPeerNames) / sizeof(kPeerNames[0]));
         if (!ok) {
             error = kErrUnknownVar;
         }
@@ -382,13 +376,11 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
      * doing the disciplining). ntpq takes the selection character it prints
      * from the peer word, so swapping them marks the source as a falsetick. */
     const uint8_t peerFlags =
-        facts.locked ? static_cast<uint8_t>(kPstConfig | kPstReach | kSelSysPeer)
-                     : kPstConfig;
+        facts.locked ? static_cast<uint8_t>(kPstConfig | kPstReach | kSelSysPeer) : kPstConfig;
     const uint16_t peerStatus = static_cast<uint16_t>(static_cast<uint16_t>(peerFlags) << 8);
-    const uint16_t sysStatus =
-        static_cast<uint16_t>(((facts.locked ? facts.leap : 3u) << 14) |
-                              ((facts.upstream ? kSrcNtp : kSrcPps) << 8) |
-                              (facts.locked ? 0u : kEvNoSysPeer));
+    const uint16_t sysStatus  = static_cast<uint16_t>(((facts.locked ? facts.leap : 3u) << 14) |
+                                                      ((facts.upstream ? kSrcNtp : kSrcPps) << 8) |
+                                                      (facts.locked ? 0u : kEvNoSysPeer));
 
     uint16_t status = 0;
     if (error == 0) {
@@ -397,8 +389,7 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
         switch (op) {
         case kOpReadStat: {
             /* One association id and its status word, big-endian. */
-            const uint8_t row[4] = {0,
-                                    static_cast<uint8_t>(kAssocId),
+            const uint8_t row[4] = {0, static_cast<uint8_t>(kAssocId),
                                     static_cast<uint8_t>(peerStatus >> 8),
                                     static_cast<uint8_t>(peerStatus & 0xFF)};
             w.raw(row, sizeof(row));
@@ -412,8 +403,7 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
             }
             break;
         case kOpReadClock:
-        default:
-            break;
+        default:           break;
         }
     } else {
         /* Error status word: the code in the high byte. */
@@ -423,19 +413,19 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
     /* Header. The version, sequence and association are echoed so the client
      * can match this to its request, and LI is zero as RFC 9327 section 2
      * requires of a control message. */
-    out[0] = static_cast<uint8_t>((version << 3) | 6);
-    out[1] = static_cast<uint8_t>(kBitResponse | (error != 0 ? kBitError : 0) | op);
-    out[2] = static_cast<uint8_t>(sequence >> 8);
-    out[3] = static_cast<uint8_t>(sequence & 0xFF);
-    out[4] = static_cast<uint8_t>(status >> 8);
-    out[5] = static_cast<uint8_t>(status & 0xFF);
-    out[6] = static_cast<uint8_t>(assoc >> 8);
-    out[7] = static_cast<uint8_t>(assoc & 0xFF);
-    out[8] = static_cast<uint8_t>(offset >> 8);
-    out[9] = static_cast<uint8_t>(offset & 0xFF);
+    out[0]             = static_cast<uint8_t>((version << 3) | 6);
+    out[1]             = static_cast<uint8_t>(kBitResponse | (error != 0 ? kBitError : 0) | op);
+    out[2]             = static_cast<uint8_t>(sequence >> 8);
+    out[3]             = static_cast<uint8_t>(sequence & 0xFF);
+    out[4]             = static_cast<uint8_t>(status >> 8);
+    out[5]             = static_cast<uint8_t>(status & 0xFF);
+    out[6]             = static_cast<uint8_t>(assoc >> 8);
+    out[7]             = static_cast<uint8_t>(assoc & 0xFF);
+    out[8]             = static_cast<uint8_t>(offset >> 8);
+    out[9]             = static_cast<uint8_t>(offset & 0xFF);
     const size_t count = w.dataLen();
-    out[10] = static_cast<uint8_t>(count >> 8);
-    out[11] = static_cast<uint8_t>(count & 0xFF);
+    out[10]            = static_cast<uint8_t>(count >> 8);
+    out[11]            = static_cast<uint8_t>(count & 0xFF);
 
     total = static_cast<uint16_t>(count);
 

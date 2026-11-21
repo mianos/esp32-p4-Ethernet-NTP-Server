@@ -23,23 +23,22 @@ constexpr const char *kNvsKey       = "config";
  * position should be provisioned rather than surveyed: it is the one input that
  * lets the receiver stop solving for itself, which is what the interface
  * description asks for before any timing claim. */
-constexpr const char *kKeys[] = {"hostname",  "tz",           "timeSource", "ntpServer",
-                                 "serveNtp",  "gpsFixedPos",  "logHost",    "logPort",
-                                 "ipMode",    "ipAddress",    "ipGateway",  "ipDns",
-                                 "gpsTimeMode", "gpsSurvey", "antDelayNs", "gpsUserDelayNs", "gpsBaud",
-                                 "ptpMode", "ptpDomain", "ptpPriority1"};
+constexpr const char *kKeys[] = {"hostname",    "tz",          "timeSource", "ntpServer",
+                                 "serveNtp",    "gpsFixedPos", "logHost",    "logPort",
+                                 "ipMode",      "ipAddress",   "ipGateway",  "ipDns",
+                                 "gpsTimeMode", "gpsSurvey",   "antDelayNs", "gpsUserDelayNs",
+                                 "gpsBaud",     "ptpMode",     "ptpDomain",  "ptpPriority1"};
 
 }  // namespace
 
 Settings &Settings::instance()
 {
     static NvsStorageManager nvs{kNvsNamespace};
-    static Settings         settings{nvs};
+    static Settings          settings{nvs};
     return settings;
 }
 
-Settings::Settings(NvsStorageManager &nvs)
-    : SettingsBase(nvs, kNvsKey)
+Settings::Settings(NvsStorageManager &nvs) : SettingsBase(nvs, kNvsKey)
 {
     field("hostname", m_hostname);
     field("tz", m_tz);
@@ -74,14 +73,13 @@ Settings::Settings(NvsStorageManager &nvs)
     onChange("timeSource", [this] {
         m_timeSourceEnum.store(parseTimeSource(m_timeSource), std::memory_order_relaxed);
     });
-    onChange("serveNtp", [this] {
-        m_serveNtpOn.store(m_serveNtp == "on", std::memory_order_relaxed);
-    });
+    onChange("serveNtp",
+             [this] { m_serveNtpOn.store(m_serveNtp == "on", std::memory_order_relaxed); });
 }
 
 void Settings::begin()
 {
-    load();           // stored blob over the defaults (SettingsBase)
+    load();  // stored blob over the defaults (SettingsBase)
     /* Counted before anything else can fail, and saved at once: the interesting
      * boot is the one that does not reach the end. */
     m_boots = std::to_string(std::strtoul(m_boots.c_str(), nullptr, 10) + 1);

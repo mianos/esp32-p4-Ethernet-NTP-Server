@@ -96,13 +96,13 @@ esp_ip4_addr_t maskFromPrefix(uint8_t prefix)
 {
     esp_ip4_addr_t mask{};
     const uint32_t bits = prefix == 0 ? 0 : 0xffffffffu << (32 - prefix);
-    mask.addr = htonl(bits);
+    mask.addr           = htonl(bits);
     return mask;
 }
 
 std::string text(const esp_ip4_addr_t &addr)
 {
-    const uint32_t host = ntohl(addr.addr);
+    const uint32_t host    = ntohl(addr.addr);
     char           buf[16] = {};
     std::snprintf(buf, sizeof(buf), "%u.%u.%u.%u", static_cast<unsigned>((host >> 24) & 0xff),
                   static_cast<unsigned>((host >> 16) & 0xff),

@@ -38,13 +38,13 @@ namespace gps_detail {
 
 /* UART1, not UART0: the console owns UART0 on this board (sdkconfig.defaults),
  * and handing the module the same port as the log would be a bad trade. */
-constexpr uart_port_t kUart   = UART_NUM_1;
+constexpr uart_port_t kUart = UART_NUM_1;
 
-constexpr int         kTxPin  = 15; /* esp TX -> module RX */
+constexpr int kTxPin = 15; /* esp TX -> module RX */
 
-constexpr int         kRxPin  = 16; /* esp RX <- module TX */
+constexpr int kRxPin = 16; /* esp RX <- module TX */
 
-constexpr gpio_num_t  kPpsPin = GPIO_NUM_14;
+constexpr gpio_num_t kPpsPin = GPIO_NUM_14;
 
 /* Order matters, and it is the order the scan walks. 38400 leads because it is
  * what this module is now saved at: the line ran at 43% of 9600 with the
@@ -90,9 +90,9 @@ constexpr int64_t kFirstRateUs = 15000000;
  * at boot, when the receiver may still be booting; five minutes is often enough
  * for a module that was mid-restart and short enough that a boot which failed it
  * does not spend long moving. */
-constexpr int64_t kHoldRetryUs     = 5000000;
+constexpr int64_t kHoldRetryUs = 5000000;
 
-constexpr int64_t kHoldRetryMaxUs  = 300000000;
+constexpr int64_t kHoldRetryMaxUs = 300000000;
 
 /* How long after adopting a hold the receiver is given before being asked for
  * it. TMODE2 restarts the pulse generator; at four seconds in it is still
@@ -170,7 +170,7 @@ constexpr int32_t kMaxCatchTicks = 16000;
 
 /* The MCPWM group this uses, and the PWM timer inside it that only ever counts:
  * the capture timer offers nothing readable. */
-constexpr int kCapGroup    = 0;
+constexpr int kCapGroup = 0;
 
 constexpr int kCapNowTimer = 0;
 
@@ -188,9 +188,9 @@ constexpr int64_t kIsrLatencyNs = 2000;
  * 10 ms root delay in an answer to a client: a receiver that knows its pulse
  * worse than 5 us is not doing this job, and a spread wider than 20 us is a load
  * spike rather than jitter. */
-constexpr int64_t kMaxQErrNs     = 5000;
+constexpr int64_t kMaxQErrNs = 5000;
 
-constexpr int64_t kMaxJitterNs   = 20000;
+constexpr int64_t kMaxJitterNs = 20000;
 
 /* How fast that promise decays in a holdover: 1 ppm, i.e. 1000 ns of age per
  * second. A small XTAL across a room's temperature swing moves by about this
@@ -242,7 +242,7 @@ constexpr uint32_t kRejectStreakReacquire = 45;
  * the worst jitter this reference will ever publish. */
 constexpr int64_t kLockOffsetNs = 100000;
 
-constexpr double  kLockTieMaxNs = 20000.0;
+constexpr double kLockTieMaxNs = 20000.0;
 
 /* Consecutive edges a lock gate has to hold before it demotes. One bad second
  * is noise on a pulse that is otherwise clean, and demoting for it costs a
@@ -288,9 +288,9 @@ constexpr int64_t kEdgeSpikeNs = 1000000; /* 1 ms */
  * loop that only showed as the box re-DHCPing every ten seconds. */
 /* 8192: status() is a large by-value Status and the same fast_float call the
  * responder hit, and this task builds Status in its own log helpers. */
-constexpr int          kTaskStack    = 8192;
+constexpr int kTaskStack = 8192;
 
-constexpr UBaseType_t  kTaskPriority = 4; /* below the responder: it answers packets */
+constexpr UBaseType_t kTaskPriority = 4; /* below the responder: it answers packets */
 
 /* NTP refid for this reference, spelled the way RFC 5905 spells it: four ASCII
  * bytes, the last a NUL that the responder's text formatter trims. */
@@ -322,7 +322,7 @@ inline int64_t daysFromCivil(int year, unsigned month, unsigned day)
  * receiver that has just been powered up reports zeros or a 1980 default, and
  * stepping the clock to either is worse than waiting for the fix. */
 inline bool civilToEpoch(uint16_t year, uint8_t month, uint8_t day, uint8_t hour, uint8_t minute,
-                  uint8_t second, time_t &out)
+                         uint8_t second, time_t &out)
 {
     if (year < 2000 || year > 2100 || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 ||
         minute > 59 || second > 60) {
@@ -338,7 +338,7 @@ inline bool civilToEpoch(uint16_t year, uint8_t month, uint8_t day, uint8_t hour
  * mm without pulling in floats. */
 inline uint32_t isqrt(uint32_t v)
 {
-    uint32_t r = 0;
+    uint32_t r   = 0;
     uint32_t bit = 1u << 30;
     while (bit > v) {
         bit >>= 2;

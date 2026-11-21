@@ -59,10 +59,7 @@ public:
     static constexpr bool kEnabled = true;
 
     /* The correction in nanoseconds, 0 until there is a measurement. */
-    int64_t lagNs() const
-    {
-        return enabled() ? m_lagNs.load(std::memory_order_relaxed) : 0;
-    }
+    int64_t lagNs() const { return enabled() ? m_lagNs.load(std::memory_order_relaxed) : 0; }
 
     /* The spread of the window the centre came from, in nanoseconds: the median
      * absolute deviation, so one stalled probe does not widen it. Zero until
@@ -104,13 +101,12 @@ public:
     TxLag() = default;
 
 private:
-
     static void taskEntry(void *arg);
     void        task();
     /* One probe, in nanoseconds; -1 when it did not come back. */
-    int64_t     probe();
+    int64_t probe();
     /* Recompute the centre and the spread from the ring. */
-    void        absorb(int64_t lag);
+    void absorb(int64_t lag);
 
     std::atomic<int64_t>  m_lagNs{0};
     std::atomic<int64_t>  m_scatterNs{0};
@@ -119,14 +115,14 @@ private:
     TaskHandle_t          m_task = nullptr;
 
     /* Only the probe task touches the ring. */
-    static constexpr uint32_t kRing = 15;
+    static constexpr uint32_t kRing         = 15;
     int64_t                   m_ring[kRing] = {};
-    uint32_t                  m_ringPos    = 0;
-    uint32_t                  m_ringFill   = 0;
-    uint32_t                  m_tick       = 0;
+    uint32_t                  m_ringPos     = 0;
+    uint32_t                  m_ringFill    = 0;
+    uint32_t                  m_tick        = 0;
 
     /* Replies, written by the responder and drained by the probe task. */
-    static constexpr uint32_t kReplyRing = 32;
+    static constexpr uint32_t kReplyRing          = 32;
     int64_t                   m_reply[kReplyRing] = {};
     std::atomic<uint32_t>     m_replyPos{0};
     std::atomic<uint32_t>     m_replyFlooded{0};

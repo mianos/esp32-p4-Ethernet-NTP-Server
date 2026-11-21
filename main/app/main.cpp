@@ -71,7 +71,8 @@ void initNvs()
 
 extern "C" void app_main()
 {
-    ESP_LOGI(TAG, "esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, NTP from GPS/PPS or upstream");
+    ESP_LOGI(TAG,
+             "esp32p4-ntp: RMII + IP101, DHCP client, HTTP /healthz, NTP from GPS/PPS or upstream");
 
     initNvs();
     Settings::instance().begin();

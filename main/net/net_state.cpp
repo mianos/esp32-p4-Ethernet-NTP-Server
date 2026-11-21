@@ -10,7 +10,7 @@
 namespace net_state {
 namespace {
 
-esp_netif_t       *s_netif = nullptr;
+esp_netif_t      *s_netif = nullptr;
 std::atomic<bool> s_link_up{false};
 
 #if CONFIG_LWIP_IPV6
@@ -80,7 +80,7 @@ std::string ipv6Global()
         return {};
     }
     esp_ip6_addr_t addrs[CONFIG_LWIP_IPV6_NUM_ADDRESSES] = {};
-    const int      count = esp_netif_get_all_ip6(s_netif, addrs);
+    const int      count                                 = esp_netif_get_all_ip6(s_netif, addrs);
     for (int i = 0; i < count; ++i) {
         if (esp_netif_ip6_get_addr_type(&addrs[i]) != ESP_IP6_ADDR_IS_LINK_LOCAL) {
             return text6(addrs[i]);

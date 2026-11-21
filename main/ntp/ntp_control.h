@@ -35,11 +35,11 @@ struct ControlFacts {
     /* Which reference is serving, and what the reply would claim about it. */
     bool        upstream = false; /* the upstream, not the receiver */
     std::string peer;             /* the upstream's address; empty for the receiver */
-    uint8_t     leap     = 0;
-    uint8_t     stratum  = 16;
-    uint32_t    refId    = 0;
-    bool        locked   = false;
-    time_t      lastSync = 0;
+    uint8_t     leap         = 0;
+    uint8_t     stratum      = 16;
+    uint32_t    refId        = 0;
+    bool        locked       = false;
+    time_t      lastSync     = 0;
     int64_t     rootDelayNs  = 0;
     int64_t     dispersionNs = 0;
     int64_t     jitterNs     = 0;
@@ -66,5 +66,5 @@ struct ControlFacts {
  * hold the whole data field plus a header. */
 constexpr size_t kControlChunk      = 468; /* 4-aligned: fragments must be */
 constexpr size_t kControlReplyBytes = 12 + 1280 + 3;
-size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t len,
-                         const ControlFacts &facts, uint16_t offset, uint16_t &total);
+size_t           buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t len,
+                                   const ControlFacts &facts, uint16_t offset, uint16_t &total);

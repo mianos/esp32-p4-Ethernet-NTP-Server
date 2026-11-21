@@ -118,17 +118,17 @@ void GpsTime::anchor(time_t second)
      * edges went by -- and testing against that refuses every edge after the
      * first and never recovers. */
     const int64_t edgeGapUs = m_lastEdgeMonoSet ? ppsMonoUs - m_lastEdgeMonoUs : 0;
-    const bool regular = !m_lastEdgeMonoSet || (edgeGapUs >= kEdgeRegularMinUs &&
-                                                edgeGapUs <= kEdgeRegularMaxUs);
+    const bool    regular =
+        !m_lastEdgeMonoSet || (edgeGapUs >= kEdgeRegularMinUs && edgeGapUs <= kEdgeRegularMaxUs);
     /* Continuity is tested against the seconds that actually elapsed rather than
      * against a flat one, or a returning edge after an outage would always fail
      * it and the anchor would never come back. Half a second of rounding, and
      * nothing beyond what the pulse allowed: a date that jumps further than the
      * edges did is the pairing being wrong. */
     const int64_t expectedS = m_lastEdgeMonoSet ? (edgeGapUs + 500000) / 1000000 : 1;
-    const bool advance = m_lastEdgeSecondSet &&
-                         static_cast<int64_t>(second) ==
-                             static_cast<int64_t>(m_lastEdgeSecond) + expectedS;
+    const bool    advance =
+        m_lastEdgeSecondSet &&
+        static_cast<int64_t>(second) == static_cast<int64_t>(m_lastEdgeSecond) + expectedS;
     /* An edge that ends a holdover is outside a second's spacing by definition,
      * and has to be usable: it is the one the holdover error is measured
      * against. From kRateGapNs up, the fit is dropped by the gap path in
@@ -173,8 +173,9 @@ void GpsTime::anchor(time_t second)
          * worth less than the minute it takes to build a new one. */
         if (streak == kRejectStreakReacquire) {
             resetRateWindow();
-            ESP_LOGW(TAG, "servo: %u edges in a row refused (spacing or second continuity) "
-                          "- refitting the rate",
+            ESP_LOGW(TAG,
+                     "servo: %u edges in a row refused (spacing or second continuity) "
+                     "- refitting the rate",
                      static_cast<unsigned>(streak));
         }
         return;
@@ -186,9 +187,9 @@ void GpsTime::anchor(time_t second)
     /* The same anchor in the counter a reply's arrival is stamped by, so the
      * served time and the stamp need no conversion. Zero when the PHC is not
      * running, and now() then falls back to the monotonic clock. */
-    m_anchorPhcNs  = ppsPtpNs;
-    m_anchorValid  = true;
-    m_lastFix      = second;
+    m_anchorPhcNs = ppsPtpNs;
+    m_anchorValid = true;
+    m_lastFix     = second;
     portEXIT_CRITICAL(&m_mux);
 
     if (gapUs >= kLockWindowUs) {
@@ -200,8 +201,9 @@ void GpsTime::anchor(time_t second)
         m_lastHoldoverUs    = gapUs;
         m_lastHoldoverErrNs = errorNs;
         portEXIT_CRITICAL(&m_mux);
-        ESP_LOGW(TAG, "PPS back after %.1f s: the servo was %+lld us out across the gap "
-                      "(%+.3f ppm residual)",
+        ESP_LOGW(TAG,
+                 "PPS back after %.1f s: the servo was %+lld us out across the gap "
+                 "(%+.3f ppm residual)",
                  static_cast<double>(gapUs) / 1e6, static_cast<long long>(errorNs / 1000),
                  static_cast<double>(errorNs) / static_cast<double>(gapUs) * 1e3);
     }
@@ -283,8 +285,8 @@ int64_t GpsTime::unobservedNs() const
 int64_t GpsTime::dispersionNs(int64_t ageUs, int64_t unobservedNs) const
 {
     const int64_t ageS = ageUs > 0 ? ageUs / 1000000 : 0;
-    return sampleErrorNs() + ServePath::instance().boundNs() + m_jitterNs +
-           ageS * kWanderNsPerS + unobservedNs;
+    return sampleErrorNs() + ServePath::instance().boundNs() + m_jitterNs + ageS * kWanderNsPerS +
+           unobservedNs;
 }
 
 void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
@@ -300,10 +302,10 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
         }
         for (uint32_t i = 0; i < missing; ++i) {
             portENTER_CRITICAL(&m_mux);
-            Sample &slot = m_samples[m_sampleSeq % kSampleRing];
-            slot.seq     = m_sampleSeq;
-            slot.epoch   = epoch - missing + i;
-            slot.kind    = 1;
+            Sample &slot  = m_samples[m_sampleSeq % kSampleRing];
+            slot.seq      = m_sampleSeq;
+            slot.epoch    = epoch - missing + i;
+            slot.kind     = 1;
             slot.offsetNs = 0;
             slot.ratePpb  = m_ratePpb;
             /* The row has no measurement, but the seconds it covers were still
@@ -312,13 +314,12 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
              * second. Leaving it zero said "no uncertainty here" about seconds
              * that had nothing but the crystal behind them. */
             const int64_t ageUs = static_cast<int64_t>(epoch) - slot.epoch;
-            slot.dispersionNs =
-                static_cast<uint32_t>(clamp(dispersionNs(ageUs * 1000000, unobservedNs()), 0,
-                                            UINT32_MAX));
-            slot.jitterNs     = 0;
-            slot.flags        = 0;
-            slot.sats         = 0;
-            slot.fix          = 0;
+            slot.dispersionNs   = static_cast<uint32_t>(
+                clamp(dispersionNs(ageUs * 1000000, unobservedNs()), 0, UINT32_MAX));
+            slot.jitterNs = 0;
+            slot.flags    = 0;
+            slot.sats     = 0;
+            slot.fix      = 0;
             ++m_sampleSeq;
             if (m_sampleSeq - m_sampleOldest > kSampleRing) {
                 m_sampleOldest = m_sampleSeq - kSampleRing;
@@ -328,22 +329,22 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
     }
 
     portENTER_CRITICAL(&m_mux);
-    Sample &slot      = m_samples[m_sampleSeq % kSampleRing];
-    slot.seq          = m_sampleSeq;
-    slot.epoch        = epoch;
-    slot.kind         = 0;
-    slot.offsetNs     = static_cast<int32_t>(clamp(offsetNs, INT32_MIN, INT32_MAX));
-    slot.ratePpb      = m_ratePpb;
+    Sample &slot  = m_samples[m_sampleSeq % kSampleRing];
+    slot.seq      = m_sampleSeq;
+    slot.epoch    = epoch;
+    slot.kind     = 0;
+    slot.offsetNs = static_cast<int32_t>(clamp(offsetNs, INT32_MIN, INT32_MAX));
+    slot.ratePpb  = m_ratePpb;
     /* The bound this reference states about the packet it would have built for
      * this second, from the same terms status() uses. Recorded at the instant
      * of the sample, so the age term is zero and the wander arrives later, in
      * the rows a holdover generates. */
-    slot.dispersionNs = static_cast<uint32_t>(clamp(dispersionNs(0, unobservedNs()), 0,
-                                                    UINT32_MAX));
-    slot.jitterNs     = static_cast<uint16_t>(clamp(m_jitterNs, 0, UINT16_MAX));
-    slot.flags        = m_timTpFlags;
-    slot.sats         = m_satCount;
-    slot.fix          = m_fixType;
+    slot.dispersionNs =
+        static_cast<uint32_t>(clamp(dispersionNs(0, unobservedNs()), 0, UINT32_MAX));
+    slot.jitterNs = static_cast<uint16_t>(clamp(m_jitterNs, 0, UINT16_MAX));
+    slot.flags    = m_timTpFlags;
+    slot.sats     = m_satCount;
+    slot.fix      = m_fixType;
     ++m_sampleSeq;
     if (m_sampleSeq - m_sampleOldest > kSampleRing) {
         m_sampleOldest = m_sampleSeq - kSampleRing;
@@ -408,8 +409,8 @@ void GpsTime::pushRateSample(int64_t monoNs, int64_t utcNs)
         return;
     }
 
-    if (m_lastRateOffsetSet &&
-        (offsetNs - m_lastRateOffsetNs > kRateResetNs || m_lastRateOffsetNs - offsetNs > kRateResetNs)) {
+    if (m_lastRateOffsetSet && (offsetNs - m_lastRateOffsetNs > kRateResetNs ||
+                                m_lastRateOffsetNs - offsetNs > kRateResetNs)) {
         /* The module moved the clock under us, or a pairing landed a second out.
          * A slope fitted across that step is about nothing, so the window starts
          * again -- and a second out is worth saying out loud, because it is the
@@ -476,9 +477,9 @@ void GpsTime::fitRate()
     /* Both axes are nanoseconds now, so a perfect counter gives a slope of
      * exactly 1 and the rate error is how far from 1 it sits, in parts per
      * billion. */
-    const double  slope = sxy / sxx;
-    int64_t       ppb   = static_cast<int64_t>(std::llround((1.0 - slope) * 1e9));
-    bool          clamped = false;
+    const double slope   = sxy / sxx;
+    int64_t      ppb     = static_cast<int64_t>(std::llround((1.0 - slope) * 1e9));
+    bool         clamped = false;
     if (ppb > kRateLimitPpb) {
         ppb     = kRateLimitPpb;
         clamped = true;
@@ -505,12 +506,11 @@ void GpsTime::fitRate()
     double tieMax = 0.0;
     for (int i = 0; i < m_rateCount; ++i) {
         const double dx = static_cast<double>(m_rate[i].monoNs - base.monoNs) - meanX;
-        const double dy = static_cast<double>(m_rate[i].utcNs - base.utcNs) - meanY -
-                          slope * dx;
+        const double dy = static_cast<double>(m_rate[i].utcNs - base.utcNs) - meanY - slope * dx;
         sse += dy * dy;
         tieMax = std::fabs(dy) > tieMax ? std::fabs(dy) : tieMax;
     }
-    m_fitUs = esp_timer_get_time() - t0;
+    m_fitUs                 = esp_timer_get_time() - t0;
     const double residualNs = std::sqrt(sse / m_rateCount);
     {
         const int64_t jitterNs = residualNs > static_cast<double>(kMaxJitterNs)
@@ -551,9 +551,9 @@ void GpsTime::steer()
     struct timespec sys = {};
     clock_gettime(CLOCK_REALTIME, &sys);
 
-    const int64_t offsetNs = (static_cast<int64_t>(gps.tv_sec) - static_cast<int64_t>(sys.tv_sec)) *
-                                 1000000000 +
-                             (gps.tv_nsec - sys.tv_nsec);
+    const int64_t offsetNs =
+        (static_cast<int64_t>(gps.tv_sec) - static_cast<int64_t>(sys.tv_sec)) * 1000000000 +
+        (gps.tv_nsec - sys.tv_nsec);
     {
         portENTER_CRITICAL(&m_mux);
         m_offsetUs = offsetNs / 1000;
@@ -587,8 +587,9 @@ void GpsTime::steer()
             return;
         }
         if (!m_stepped) {
-            ESP_LOGI(TAG, "clock set from the GPS (%s): CLOCK_REALTIME now agrees with what "
-                          "the responder serves",
+            ESP_LOGI(TAG,
+                     "clock set from the GPS (%s): CLOCK_REALTIME now agrees with what "
+                     "the responder serves",
                      isoTimestamp(gps.tv_sec).c_str());
         } else {
             ESP_LOGW(TAG, "clock stepped %+lld ms: further than a slew can fix quickly",

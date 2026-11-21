@@ -31,7 +31,7 @@ esp_err_t attach(esp_eth_handle_t eth, esp_eth_mac_t *mac, esp_netif_t *netif);
 /* Start or restart the PHC, from CLOCK_REALTIME. Idempotent unless `restart`,
  * which a MAC stop/start needs because it clears the block. */
 esp_err_t enable(bool restart = false);
-bool enabled();
+bool      enabled();
 
 /* Move the counter onto CLOCK_REALTIME. A boot sets it while the clock is still
  * 1970, so the counter is stepped with the clock -- PTP counts epoch seconds
@@ -66,7 +66,7 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs);
  * the MAC it came from -- the reply goes back to that MAC, so no ARP or NDP
  * lookup stands between the stamp and the wire. */
 struct Rx {
-    int64_t ns = 0;
+    int64_t ns     = 0;
     uint8_t mac[6] = {};
 };
 
@@ -87,19 +87,19 @@ enum class Mode : uint8_t { Off = 0, Master = 1, Slave = 2 };
 /* Start or stop answering PTP. Domain 0..127, priority1 0..255. Master only for
  * now; the slave side shares the same frames and the same counter. */
 esp_err_t start(Mode mode, uint8_t domain, uint8_t priority1);
-void stop();
+void      stop();
 /* Domain and priority1 for a task that is already running: both are read per
  * message, so a change reaches the next Announce without a restart. */
-void setIdentity(uint8_t domain, uint8_t priority1);
-Mode mode();
+void        setIdentity(uint8_t domain, uint8_t priority1);
+Mode        mode();
 const char *modeText(Mode value);
 
 struct Stats {
-    uint32_t frames;   /* 0x88F7 frames seen */
+    uint32_t frames; /* 0x88F7 frames seen */
     uint32_t syncSent;
     uint32_t announceSent;
     uint32_t delayResp;
-    int64_t  lastPeerNs; /* when the last neighbour frame arrived */
+    int64_t  lastPeerNs;    /* when the last neighbour frame arrived */
     int64_t  slaveOffsetNs; /* last measured offset against a master */
     uint8_t  lastPeer[16];
     uint8_t  lastPeerLen;
@@ -113,4 +113,4 @@ struct Stats {
 };
 Stats stats();
 
-} // namespace ptp
+}  // namespace ptp

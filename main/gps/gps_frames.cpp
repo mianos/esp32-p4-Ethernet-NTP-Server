@@ -59,7 +59,7 @@ void GpsTime::onFrame(const ubx::Frame &frame)
 {
     const uint8_t cls = frame.cls;
     const uint8_t id  = frame.id;
-    m_lastFrameUs = esp_timer_get_time();
+    m_lastFrameUs     = esp_timer_get_time();
     ++m_secFrames;
     m_recentFrames[m_recentAt++ % 16] = static_cast<uint16_t>((cls << 8) | id);
     if (!m_frameSeen) {
@@ -170,7 +170,7 @@ void GpsTime::onMonIo(const ubx::Frame &f)
     }
     const std::size_t at  = kBlock * kPort;
     const int64_t     now = esp_timer_get_time();
-    text::Buf<241> hex = {};
+    text::Buf<241>    hex = {};
     hexPreview(f, hex);
     portENTER_CRITICAL(&m_mux);
     std::memcpy(m_ioHex.data(), hex.data(), sizeof(m_ioHex));
@@ -232,7 +232,7 @@ void GpsTime::onMonMsgpp(const ubx::Frame &f)
         return;
     }
     constexpr std::size_t kPort1 = 16; /* msg2 */
-    text::Buf<241> hex = {};
+    text::Buf<241>        hex    = {};
     hexPreview(f, hex);
     portENTER_CRITICAL(&m_mux);
     m_msgUbx     = f.u2(kPort1);
@@ -256,11 +256,11 @@ void GpsTime::onNavDop(const ubx::Frame &f)
     };
     const int64_t nowUs = esp_timer_get_time();
     portENTER_CRITICAL(&m_mux);
-    m_gDop        = dop(4);
-    m_pDop        = dop(6);
-    m_vDop        = dop(10);
-    m_hDop        = dop(12);
-    m_dopAtUs     = nowUs;
+    m_gDop    = dop(4);
+    m_pDop    = dop(6);
+    m_vDop    = dop(10);
+    m_hDop    = dop(12);
+    m_dopAtUs = nowUs;
     portEXIT_CRITICAL(&m_mux);
 }
 
@@ -317,9 +317,9 @@ void GpsTime::onMonRf(const ubx::Frame &f)
         const uint8_t     jam  = f.u8(base + 12);
         const uint8_t     ant  = f.u8(base + 2);
         const uint16_t    agc  = f.u2(base + 10);
-        worstJam = jam > worstJam ? jam : worstJam;
-        worstAnt = ant > worstAnt ? ant : worstAnt;
-        minAgc   = agc < minAgc ? agc : minAgc;
+        worstJam               = jam > worstJam ? jam : worstJam;
+        worstAnt               = ant > worstAnt ? ant : worstAnt;
+        minAgc                 = agc < minAgc ? agc : minAgc;
     }
 
     const int64_t nowUs = esp_timer_get_time();
@@ -389,16 +389,16 @@ void GpsTime::onMonHw(const ubx::Frame &f)
     const uint32_t pinDir = f.u4(8);
     const uint32_t pinVal = f.u4(12);
 
-    uint8_t before = 0;
+    uint8_t before      = 0;
     uint8_t beforePower = 0;
-    uint8_t beforeJam = 0;
+    uint8_t beforeJam   = 0;
 
     portENTER_CRITICAL(&m_mux);
-    before      = m_antStatus;
-    beforePower = m_antPower;
-    beforeJam   = m_jamState;
-    m_antStatus = status;
-    m_antPower  = power;
+    before       = m_antStatus;
+    beforePower  = m_antPower;
+    beforeJam    = m_jamState;
+    m_antStatus  = status;
+    m_antPower   = power;
     m_noisePerMs = noise;
     m_agcCnt     = agc;
     m_jamInd     = jam;
@@ -429,12 +429,8 @@ void GpsTime::onMonHw(const ubx::Frame &f)
         case 4:
             ESP_LOGW(TAG, "antenna OPEN: nothing drawing bias, check the lead and the connector");
             break;
-        case 2:
-            ESP_LOGI(TAG, "antenna status OK");
-            break;
-        default:
-            ESP_LOGI(TAG, "antenna status %u (no supervisor reading)", status);
-            break;
+        case 2:  ESP_LOGI(TAG, "antenna status OK"); break;
+        default: ESP_LOGI(TAG, "antenna status %u (no supervisor reading)", status); break;
         }
     }
     if (power != beforePower) {
@@ -469,8 +465,8 @@ void GpsTime::onNavSat(const ubx::Frame &f)
     const uint8_t fits = static_cast<uint8_t>((f.len - 8) / 12);
     const uint8_t walk = num < fits ? num : fits;
 
-    uint16_t sum = 0;
-    uint8_t  max = 0;
+    uint16_t sum  = 0;
+    uint8_t  max  = 0;
     uint8_t  used = 0;
     uint8_t  kept = 0;
 
@@ -494,7 +490,7 @@ void GpsTime::onNavSat(const ubx::Frame &f)
 
         if (kept < kMaxSats) {
             portENTER_CRITICAL(&m_mux);
-            Sat &s = m_sats[kept++];
+            Sat &s  = m_sats[kept++];
             s.gnss  = f.u8(sv + 0);
             s.sv    = f.u8(sv + 1);
             s.cno   = cno;
@@ -506,8 +502,8 @@ void GpsTime::onNavSat(const ubx::Frame &f)
              * solution, and folding that away would hide half of what a
              * reflector does. */
             const int16_t pr = static_cast<int16_t>(f.u2(sv + 6));
-            s.prRes         = (pr == INT16_MIN) ? 0 : pr;
-            s.prResValid    = pr != INT16_MIN;
+            s.prRes          = (pr == INT16_MIN) ? 0 : pr;
+            s.prResValid     = pr != INT16_MIN;
             portEXIT_CRITICAL(&m_mux);
         }
         if ((fl & (1u << 3)) == 0 || cno == 0) {
@@ -573,8 +569,9 @@ void GpsTime::onNavSvin(const ubx::Frame &f)
      * chance to look at the accuracy first. */
     static bool wasActive = false;
     if (wasActive && !m_svinActive && m_tmode == 1) {
-        ESP_LOGW(TAG, "survey-in finished after %u s at %u mm: "
-                      "POST /gps/survey {\"action\":\"fix\"} to lock it",
+        ESP_LOGW(TAG,
+                 "survey-in finished after %u s at %u mm: "
+                 "POST /gps/survey {\"action\":\"fix\"} to lock it",
                  static_cast<unsigned>(dur), static_cast<unsigned>(isqrt(var)));
     }
     wasActive = m_svinActive;
@@ -589,12 +586,11 @@ void GpsTime::onNavPvt(const ubx::Frame &f)
     /* validDate | validTime. u-blox only sets both once the receiver has an
      * almanac and a position estimate, which is exactly the point at which its
      * UTC can be believed -- before that the fields hold a 1980 default. */
-    const bool    haveTime = (valid & 0x03) == 0x03 &&
-                          civilToEpoch(f.u2(4), f.u8(6), f.u8(7), f.u8(8), f.u8(9), f.u8(10),
-                                       stamp);
-    const int32_t nano   = f.i4(16); /* offset into the second, ~0 at 1 Hz */
-    const uint8_t fix    = f.u8(20);
-    const uint8_t sats   = f.u8(23);
+    const bool haveTime = (valid & 0x03) == 0x03 && civilToEpoch(f.u2(4), f.u8(6), f.u8(7), f.u8(8),
+                                                                 f.u8(9), f.u8(10), stamp);
+    const int32_t nano  = f.i4(16); /* offset into the second, ~0 at 1 Hz */
+    const uint8_t fix   = f.u8(20);
+    const uint8_t sats  = f.u8(23);
 
     portENTER_CRITICAL(&m_mux);
     m_timeValid  = haveTime;
@@ -629,8 +625,8 @@ void GpsTime::onCfgTp5(const ubx::Frame &f)
     if (f.len < 32) {
         return;
     }
-    const int16_t cable = static_cast<int16_t>(f.u2(4));
-    const int32_t user  = f.i4(24);
+    const int16_t  cable = static_cast<int16_t>(f.u2(4));
+    const int32_t  user  = f.i4(24);
     const uint32_t flags = f.u4(28);
     if (cable == m_tp5CableNs && user == m_tp5UserNs && flags == m_tp5Flags) {
         return;
@@ -649,9 +645,9 @@ void GpsTime::onTimTos(const ubx::Frame &f)
     /* 56 bytes: flags (X4) at 4, utcOffset (i4, ns) at 16, utcUncertainty (u4,
      * ns) at 20. The flag order is the graphic's, so cohPulse and lockedPulse
      * are the last two: bits 12 and 13. */
-    const uint32_t flags    = f.u4(4);
-    const int32_t  utcOff   = f.i4(16);
-    const uint32_t utcUnc   = f.u4(20);
+    const uint32_t flags  = f.u4(4);
+    const int32_t  utcOff = f.i4(16);
+    const uint32_t utcUnc = f.u4(20);
 
     portENTER_CRITICAL(&m_mux);
     m_tosFlags     = flags;
@@ -661,8 +657,9 @@ void GpsTime::onTimTos(const ubx::Frame &f)
 
     if (!m_tosLogged) {
         m_tosLogged = true;
-        ESP_LOGW(TAG, "TIM-TOS flowing: pulse %s, generation %s, %.3f us off the UTC second "
-                      "(+/- %.3f us)",
+        ESP_LOGW(TAG,
+                 "TIM-TOS flowing: pulse %s, generation %s, %.3f us off the UTC second "
+                 "(+/- %.3f us)",
                  (flags & (1u << 13)) != 0 ? "locked" : "NOT locked",
                  (flags & (1u << 12)) != 0 ? "coherent" : "not coherent",
                  static_cast<double>(utcOff) / 1e3, static_cast<double>(utcUnc) / 1e3);
@@ -676,10 +673,10 @@ void GpsTime::onNavTimels(const ubx::Frame &f)
      *   10 srcOfLsChange (u1) 11 lsChange (i1)
      *   12 timeToLsEvent (i4) 16 dateOfLsGpsWn (u2) 18 dateOfLsGpsDn (u2)
      *   23 valid (u1): bit 0 says currLs is known, bit 1 says the event time is */
-    const int8_t  current = static_cast<int8_t>(f.u8(9));
-    const int8_t  change  = static_cast<int8_t>(f.u8(11));
-    const int32_t inS     = f.i4(12);
-    const uint8_t valid   = f.u8(23);
+    const int8_t  current     = static_cast<int8_t>(f.u8(9));
+    const int8_t  change      = static_cast<int8_t>(f.u8(11));
+    const int32_t inS         = f.i4(12);
+    const uint8_t valid       = f.u8(23);
     const bool    haveOffset  = (valid & 0x01) != 0;
     const bool    haveEventAt = (valid & 0x02) != 0;
 
@@ -703,8 +700,10 @@ void GpsTime::onNavTimels(const ubx::Frame &f)
         if (m_leapChange == 0) {
             ESP_LOGI(TAG, "leap: GPS-UTC offset %+d s, nothing announced", m_leapSeconds);
         } else {
-            ESP_LOGW(TAG, "leap: GPS-UTC offset %+d s, and %+d s in %ld s (leap indicator 1 for that minute)",
-                     m_leapSeconds, m_leapChange, static_cast<long>(m_leapInS));
+            ESP_LOGW(
+                TAG,
+                "leap: GPS-UTC offset %+d s, and %+d s in %ld s (leap indicator 1 for that minute)",
+                m_leapSeconds, m_leapChange, static_cast<long>(m_leapInS));
         }
     }
 }
@@ -739,9 +738,9 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
      * again (see kIsrLatencyNs); what this adds is the spread, which does not
      * cancel and is what a client needs in order to know how good the number it
      * is handed actually is. */
-    const uint32_t towSubMs  = f.u4(4);
-    const int32_t  qErrPs    = f.i4(8);
-    const uint8_t  flags     = f.u8(14);
+    const uint32_t towSubMs = f.u4(4);
+    const int32_t  qErrPs   = f.i4(8);
+    const uint8_t  flags    = f.u8(14);
 
     const bool gnssBase    = (flags & 0x01) == 0;
     const bool qErrInvalid = (flags & 0x10) != 0;
@@ -768,8 +767,8 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     /* Signed. The correction in anchor() is "captured - qErr", and with the
      * magnitude stored here it moved every edge the same way: right for one
      * half of the sawtooth and doubling it for the other. */
-    const int32_t qErrNs = static_cast<int32_t>(
-        std::clamp<int64_t>(qErrPs / 1000, -kMaxQErrNs, kMaxQErrNs));
+    const int32_t qErrNs =
+        static_cast<int32_t>(std::clamp<int64_t>(qErrPs / 1000, -kMaxQErrNs, kMaxQErrNs));
 
     /* The position itself, not just whether it is inside the window: this is
      * the receiver stating where its own pulse sits against the second it
@@ -791,8 +790,10 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     if (!m_timTpLogged) {
         m_timTpLogged = true;
         if (qErrInvalid) {
-            ESP_LOGW(TAG, "NAV-TIM-TP flowing but qErr is flagged invalid: root delay stays "
-                          "the named %lld us", static_cast<long long>(kIsrLatencyNs / 1000));
+            ESP_LOGW(TAG,
+                     "NAV-TIM-TP flowing but qErr is flagged invalid: root delay stays "
+                     "the named %lld us",
+                     static_cast<long long>(kIsrLatencyNs / 1000));
         } else {
             ESP_LOGI(TAG, "NAV-TIM-TP flowing: the receiver states %.3f us of pulse quantisation",
                      static_cast<double>(qErrNs) / 1000.0);
@@ -803,9 +804,10 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
          * every anchor with it, so it is worth saying, and worth saying again
          * only if it goes away. */
         if (m_pulseOnSecondSeen) {
-            ESP_LOGW(TAG, "timepulse is %.3f ms off the UTC second (%s base): every anchor is "
-                          "shifted with it", static_cast<double>(offsetNs) / 1e6,
-                     gnssBase ? "GNSS" : "UTC");
+            ESP_LOGW(TAG,
+                     "timepulse is %.3f ms off the UTC second (%s base): every anchor is "
+                     "shifted with it",
+                     static_cast<double>(offsetNs) / 1e6, gnssBase ? "GNSS" : "UTC");
         }
     } else if (!m_pulseOnSecondSeen) {
         ESP_LOGI(TAG, "timepulse back on the UTC second");

@@ -157,7 +157,8 @@ void printAddressing()
                 settings->ipAddress().empty() ? "(unset)" : settings->ipAddress().c_str());
     std::printf("gateway : %s\n",
                 settings->ipGateway().empty() ? "(unset)" : settings->ipGateway().c_str());
-    std::printf("dns     : %s\n", settings->ipDns().empty() ? "(unset)" : settings->ipDns().c_str());
+    std::printf("dns     : %s\n",
+                settings->ipDns().empty() ? "(unset)" : settings->ipDns().c_str());
     std::printf("link    : %s\n", net_state::linkUp() ? "up" : "down");
 }
 
@@ -191,10 +192,9 @@ bool applyOne(const char *key, const std::string &value)
     s_ctx.settings->applyJson(doc);
 
     /* The only field applyJson is allowed to shorten. */
-    const std::string wanted = std::strcmp(key, "hostname") == 0
-                                   ? value.substr(0, Settings::kMaxHostnameLen)
-                                   : value;
-    std::string   now;
+    const std::string wanted =
+        std::strcmp(key, "hostname") == 0 ? value.substr(0, Settings::kMaxHostnameLen) : value;
+    std::string now;
     s_ctx.settings->toJson().GetField(key, now);
     if (now != wanted) {
         std::printf("'%s' = '%s' unknown or rejected -- nothing changed\n", key, value.c_str());
@@ -203,8 +203,8 @@ bool applyOne(const char *key, const std::string &value)
 
     s_ctx.settings->save();
     s_ctx.settings->log();
-    config_apply::afterChange(host, std::strcmp(key, "logHost") == 0 ||
-                                        std::strcmp(key, "logPort") == 0);
+    config_apply::afterChange(host,
+                              std::strcmp(key, "logHost") == 0 || std::strcmp(key, "logPort") == 0);
     return true;
 }
 
@@ -392,7 +392,8 @@ int cmdTimesource(void *, int argc, char **argv)
         return 0;
     }
     const std::string value = argv[1];
-    if (value != "off" && value != "dhcp" && value != "static" && value != "gps" && value != "auto") {
+    if (value != "off" && value != "dhcp" && value != "static" && value != "gps" &&
+        value != "auto") {
         std::printf("usage: timesource <off|dhcp|static|gps|auto>\n");
         return 1;
     }
@@ -549,8 +550,8 @@ int cmdGps(void *, int argc, char **argv)
             std::printf("usage: gps gnss <hex mask>\n");
             return 1;
         }
-        char         *end = nullptr;
-        const long    mask = std::strtol(argv[2], &end, 16);
+        char      *end  = nullptr;
+        const long mask = std::strtol(argv[2], &end, 16);
         /* The same seven constellation bits HTTP takes, and nothing after
          * the number. */
         if (end == argv[2] || *end != '\0' || mask <= 0 || mask > 0x7F) {
@@ -568,16 +569,17 @@ int cmdGps(void *, int argc, char **argv)
         }
         /* The same hour HTTP allows, and digits only: "-1" through strtoul is
          * 136 years of ignored edges, and a typo read as 0 ends a running test. */
-        char               *end     = nullptr;
-        const unsigned long parsed  = std::strtoul(argv[2], &end, 10);
+        char               *end    = nullptr;
+        const unsigned long parsed = std::strtoul(argv[2], &end, 10);
         if (argv[2][0] < '0' || argv[2][0] > '9' || *end != '\0' || parsed > 3600) {
             std::printf("gps suppress: 0..3600 seconds\n");
             return 1;
         }
         const uint32_t seconds = static_cast<uint32_t>(parsed);
         gps.suppressPps(seconds);
-        std::printf("edges %s\n", seconds == 0 ? "counted again" : "ignored: this is a holdover "
-                                                                    "and the reply says so");
+        std::printf("edges %s\n", seconds == 0 ? "counted again"
+                                               : "ignored: this is a holdover "
+                                                 "and the reply says so");
         return 0;
     }
     if (std::strcmp(argv[1], "defaults") == 0) {
@@ -613,10 +615,10 @@ esp_err_t console::start()
     s_ctx.link     = &EthernetLink::instance();
 
     esp_console_repl_config_t repl = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
-    repl.prompt             = "ntp>";
-    repl.max_cmdline_length = 512;
+    repl.prompt                    = "ntp>";
+    repl.max_cmdline_length        = 512;
     /* The default 4096 is thin for stdio plus argtable. */
-    repl.task_stack_size    = 6144;
+    repl.task_stack_size = 6144;
 
     esp_console_register_help_command();
     register_system_common();
@@ -625,8 +627,8 @@ esp_err_t console::start()
     add("net", "Show or set addressing", "[dhcp | static <cidr> <gateway> [dns]]", cmdNet);
     add("config", "Show (pretty, or raw), set or reset the stored config",
         "[raw | reset | set <key> <value>]", cmdConfig);
-    add("console", "Debug console on (prompt, log silenced) or off (log stream)",
-        "[on | off]", cmdConsole);
+    add("console", "Debug console on (prompt, log silenced) or off (log stream)", "[on | off]",
+        cmdConsole);
     add("hostname", "Show or set the DHCP hostname", "[name]", cmdHostname);
     add("serve", "Serve NTP on udp/123", "<on|off>", cmdServe);
     add("ptp", "PTP state, or off / master / slave", "[off|master|slave]", cmdPtp);
@@ -637,7 +639,8 @@ esp_err_t console::start()
     add("eth", "Link state, or restart the MAC", "[restart]", cmdEth);
     add("gps", "Receiver state, survey, reset, antenna, mask, holdover test",
         "[survey <stop|fix> | reset [soft|hard|power|cold] | ant <on|off> | gnss <hex> | "
-        "suppress <s> | defaults]", cmdGps);
+        "suppress <s> | defaults]",
+        cmdGps);
 
     /* Whichever transport the console is configured for. It is UART0 on this
      * board -- the USB-C port is a CH343 bridge wired to it, the same cable
@@ -647,14 +650,14 @@ esp_err_t console::start()
     esp_err_t           err    = ESP_FAIL;
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
     const esp_console_dev_uart_config_t hw = ESP_CONSOLE_DEV_UART_CONFIG_DEFAULT();
-    err = esp_console_new_repl_uart(&hw, &repl, &handle);
+    err                                    = esp_console_new_repl_uart(&hw, &repl, &handle);
 #elif defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG)
     const esp_console_dev_usb_serial_jtag_config_t hw =
         ESP_CONSOLE_DEV_USB_SERIAL_JTAG_CONFIG_DEFAULT();
     err = esp_console_new_repl_usb_serial_jtag(&hw, &repl, &handle);
 #elif defined(CONFIG_ESP_CONSOLE_USB_CDC)
     const esp_console_dev_usb_cdc_config_t hw = ESP_CONSOLE_DEV_CDC_CONFIG_DEFAULT();
-    err = esp_console_new_repl_usb_cdc(&hw, &repl, &handle);
+    err                                       = esp_console_new_repl_usb_cdc(&hw, &repl, &handle);
 #endif
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "repl: %s", esp_err_to_name(err));

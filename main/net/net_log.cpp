@@ -52,8 +52,8 @@ int hook(const char *fmt, va_list args)
     va_end(copy);
 
     if (n > 0 && m_ring != nullptr) {
-        const size_t len = static_cast<size_t>(n) < sizeof(line) ? static_cast<size_t>(n)
-                                                                 : sizeof(line) - 1;
+        const size_t len =
+            static_cast<size_t>(n) < sizeof(line) ? static_cast<size_t>(n) : sizeof(line) - 1;
         xStreamBufferSend(m_ring, line, len, 0); /* never waits */
     }
     return m_console != nullptr ? m_console(fmt, args) : n;

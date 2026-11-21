@@ -66,10 +66,7 @@ public:
     /* Counters for /healthz. Read from the HTTP task while the responder task
      * writes them, hence the atomics. */
     uint32_t requests() const { return m_requests.load(std::memory_order_relaxed); }
-    uint32_t interleavedServed() const
-    {
-        return m_interleaved.load(std::memory_order_relaxed);
-    }
+    uint32_t interleavedServed() const { return m_interleaved.load(std::memory_order_relaxed); }
     /* How often a request could have been an interleaved one (a non-zero origin
      * and a receive that differs from its transmit), and how often the origin
      * matched a saved receive timestamp. A basic client that echoes the
@@ -98,12 +95,12 @@ public:
      * busy minute from a busy week -- hence the minute rate and the two
      * rejection counters, all of which move on their own. */
     struct Counters {
-        uint32_t answered    = 0; /* cumulative */
-        uint32_t kod         = 0; /* cumulative KoD replies */
-        uint32_t dropped     = 0; /* cumulative: malformed, or rate-limited */
-        double   perMinute   = 0; /* answered per minute, last window */
+        uint32_t answered    = 0;  /* cumulative */
+        uint32_t kod         = 0;  /* cumulative KoD replies */
+        uint32_t dropped     = 0;  /* cumulative: malformed, or rate-limited */
+        double   perMinute   = 0;  /* answered per minute, last window */
         double   lastServedS = -1; /* since the last answered request */
-        uint8_t  clients     = 0; /* distinct sources in the recent window */
+        uint8_t  clients     = 0;  /* distinct sources in the recent window */
     };
     Counters counters() const;
 
@@ -131,7 +128,7 @@ private:
 
     /* The device side of a mode-6 reply: which reference is serving, what it
      * claims, and the counters. */
-    void fillControlFacts(ControlFacts &facts, const TimeReference &ref) const;
+    void        fillControlFacts(ControlFacts &facts, const TimeReference &ref) const;
     static void taskEntry(void *arg);
 
     /* Per-client, per-minute extremes of (our receive stamp - the client's
@@ -146,38 +143,38 @@ private:
         int64_t  maxNs  = 0;
         int64_t  lastUs = 0;
     };
-    static constexpr int kServeSlots = 6;
+    static constexpr int kServeSlots          = 6;
     ServePathSlot        m_serve[kServeSlots] = {};
     /* Why samples are being dropped, while the instrument settles: family,
      * empty origin, out-of-range delta. Index 0 counts the ones kept. */
-    uint32_t             m_serveWhy[4] = {};
-    int64_t              m_serveReportUs      = 0;
-    void                 recordServePath(const sockaddr_storage &from,
-                                         const struct timespec &received, const uint8_t *origin);
-    void                 reportServePath(int64_t nowUs);
+    uint32_t m_serveWhy[4]   = {};
+    int64_t  m_serveReportUs = 0;
+    void     recordServePath(const sockaddr_storage &from, const struct timespec &received,
+                             const uint8_t *origin);
+    void     reportServePath(int64_t nowUs);
 
-    std::unique_ptr<TimeRef>   m_ref;
-    std::atomic<bool>          m_running{false};
-    std::atomic<uint32_t>      m_requests{0};
-    std::atomic<uint32_t>      m_answered{0};
-    std::atomic<uint32_t>      m_kod{0};
-    std::atomic<uint32_t>      m_dropped{0};
-    std::atomic<uint32_t>      m_control{0};
-    std::atomic<uint32_t>      m_interleaved{0};
-    std::atomic<uint32_t>      m_ilTry{0};
-    std::atomic<uint32_t>      m_txCorrected{0};
-    std::atomic<uint32_t>      m_ilHit{0};
-    std::atomic<uint32_t>      m_ilSaved{0};
-    std::atomic<uint32_t>      m_ilKeyOnly{0};
-    TxLag                      m_txLag;
-    std::atomic<uint32_t>      m_ratePerMin{0};
-    std::atomic<int64_t>       m_lastServedUs{-1};
-    std::atomic<uint8_t>       m_clients{0};
+    std::unique_ptr<TimeRef> m_ref;
+    std::atomic<bool>        m_running{false};
+    std::atomic<uint32_t>    m_requests{0};
+    std::atomic<uint32_t>    m_answered{0};
+    std::atomic<uint32_t>    m_kod{0};
+    std::atomic<uint32_t>    m_dropped{0};
+    std::atomic<uint32_t>    m_control{0};
+    std::atomic<uint32_t>    m_interleaved{0};
+    std::atomic<uint32_t>    m_ilTry{0};
+    std::atomic<uint32_t>    m_txCorrected{0};
+    std::atomic<uint32_t>    m_ilHit{0};
+    std::atomic<uint32_t>    m_ilSaved{0};
+    std::atomic<uint32_t>    m_ilKeyOnly{0};
+    TxLag                    m_txLag;
+    std::atomic<uint32_t>    m_ratePerMin{0};
+    std::atomic<int64_t>     m_lastServedUs{-1};
+    std::atomic<uint8_t>     m_clients{0};
     /* Recent source hashes, so "how many clients" is a fact rather than a guess
      * from the packet count. Fixed storage: the responder task owns it. */
-    static constexpr uint8_t kRecentSources = 16;
-    uint32_t                   m_recent[kRecentSources] = {};
-    uint8_t                    m_recentAt = 0;
-    TaskHandle_t               m_task = nullptr;
-    int                        m_sock = -1;
+    static constexpr uint8_t kRecentSources           = 16;
+    uint32_t                 m_recent[kRecentSources] = {};
+    uint8_t                  m_recentAt               = 0;
+    TaskHandle_t             m_task                   = nullptr;
+    int                      m_sock                   = -1;
 };

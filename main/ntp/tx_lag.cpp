@@ -45,8 +45,8 @@ constexpr int64_t kMaxNs = 5000000;
  * back is handled inside the same call and inflates the figure. */
 constexpr uint16_t kProbePort = 0; /* 0 = let lwIP pick */
 
-constexpr int kTaskStack  = 4096;
-constexpr int kTaskPrio   = 4; /* below the responder and the status logger */
+constexpr int kTaskStack = 4096;
+constexpr int kTaskPrio  = 4; /* below the responder and the status logger */
 
 }  // namespace
 
@@ -133,7 +133,7 @@ void TxLag::absorb(int64_t lag)
 
 void TxLag::recordReply(int64_t ns)
 {
-    const uint32_t pos = m_replyPos.fetch_add(1, std::memory_order_relaxed);
+    const uint32_t pos        = m_replyPos.fetch_add(1, std::memory_order_relaxed);
     m_reply[pos % kReplyRing] = ns;
     if (pos >= kReplyRing) {
         m_replyFlooded.fetch_add(1, std::memory_order_relaxed);
@@ -144,8 +144,8 @@ void TxLag::reportReplies()
 {
     /* Drained by the same task that probes, once a minute. A slot that arrives
      * while this runs is simply counted next time. */
-    const uint32_t filled = std::min<uint32_t>(m_replyPos.exchange(0, std::memory_order_relaxed),
-                                               kReplyRing);
+    const uint32_t filled =
+        std::min<uint32_t>(m_replyPos.exchange(0, std::memory_order_relaxed), kReplyRing);
     if (filled < 4) {
         return;
     }
@@ -227,8 +227,8 @@ int64_t TxLag::probe()
         return -1;
     }
 
-    uint8_t  payload[kProbeBytes] = {};
-    int64_t result = -1;
+    uint8_t payload[kProbeBytes] = {};
+    int64_t result               = -1;
 
     /* The quantity that matters is how long *after the stamp* the datagram is
      * still inside the stack, because that is how early the stamp is. sendto()

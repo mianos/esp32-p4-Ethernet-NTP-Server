@@ -33,14 +33,14 @@ namespace {
 
 /* ---- Shape of the conversation ---------------------------------------- */
 
-constexpr int          kPort             = 123;
-constexpr size_t       kPacketBytes      = 48;   /* NTPv4 header, no MAC */
+constexpr int    kPort        = 123;
+constexpr size_t kPacketBytes = 48; /* NTPv4 header, no MAC */
 /* Raw-frame replies, with the hardware transmit stamp. */
 /* Raw-frame replies with the hardware transmit stamp. Off is the old
  * software-only path, kept because it is the fallback when a stamp is missing. */
-constexpr bool         kRawSend          = true;
-constexpr uint32_t     kReceiveTimeoutMs = 1000; /* how often the task looks up */
-constexpr uint32_t     kReportEveryMs    = 60000;
+constexpr bool     kRawSend          = true;
+constexpr uint32_t kReceiveTimeoutMs = 1000; /* how often the task looks up */
+constexpr uint32_t kReportEveryMs    = 60000;
 /* 12288, not 4096: every request copies a GpsTime::Status by value (the
  * reference's error budget and lock state come out of it) and status() parses
  * the antenna delay with from_chars<double>, whose fast_float path alone is
@@ -49,29 +49,29 @@ constexpr uint32_t     kReportEveryMs    = 60000;
  * The control path then added a 483-octet request buffer and a reply buffer of
  * up to 1295 (a long variable list in one piece), which is where the rest of
  * the headroom went. */
-constexpr int          kTaskStack        = 12288;
+constexpr int kTaskStack = 12288;
 /* Above the status logger and just under lwIP (18): a woken responder should
  * preempt now rather than at the next scheduling point. It runs for
  * microseconds per packet, so nothing is starved by it. */
-constexpr UBaseType_t  kTaskPriority     = 17;
+constexpr UBaseType_t kTaskPriority = 17;
 
-constexpr size_t       kStampBytes    = 8;
-constexpr size_t       kOriginOffset  = 24;
-constexpr size_t       kReceiveOffset = 32;
-constexpr size_t       kTransmitOffset = 40;
+constexpr size_t kStampBytes     = 8;
+constexpr size_t kOriginOffset   = 24;
+constexpr size_t kReceiveOffset  = 32;
+constexpr size_t kTransmitOffset = 40;
 
 /* ---- Protocol constants ----------------------------------------------- */
 
 /* Seconds between 1900-01-01 and 1970-01-01. */
 constexpr uint32_t kNtpUnixDelta = 2208988800u;
 
-constexpr uint8_t kModeClient   = 3; /* the only data mode this device answers */
-constexpr uint8_t kModeServer   = 4;
-constexpr uint8_t kModeControl  = 6; /* ntpq: read-only, see ntp_control.cpp */
+constexpr uint8_t kModeClient  = 3; /* the only data mode this device answers */
+constexpr uint8_t kModeServer  = 4;
+constexpr uint8_t kModeControl = 6; /* ntpq: read-only, see ntp_control.cpp */
 
 constexpr uint8_t kStratumUnlocked = 16; /* "unsynchronised": ignore this server */
 constexpr uint8_t kLeapNoWarning   = 0;
-constexpr uint8_t kLeapAlarm      = 3; /* "clock not synchronised" */
+constexpr uint8_t kLeapAlarm       = 3; /* "clock not synchronised" */
 
 /* 2^-20 s, roughly one microsecond: the granularity this clock can actually
  * distinguish, as opposed to a made-up number of digits. */
@@ -155,8 +155,8 @@ int64_t stampToNs(const uint8_t *stamp)
  * 68 years apart and no 48-byte reply can fix it. */
 void writeTimestamp(uint8_t *out, const struct timespec &ts)
 {
-    const uint32_t seconds =
-        static_cast<uint32_t>(static_cast<int64_t>(ts.tv_sec) + static_cast<int64_t>(kNtpUnixDelta));
+    const uint32_t seconds = static_cast<uint32_t>(static_cast<int64_t>(ts.tv_sec) +
+                                                   static_cast<int64_t>(kNtpUnixDelta));
     const uint32_t fraction =
         static_cast<uint32_t>((static_cast<uint64_t>(ts.tv_nsec) << 32) / 1000000000ull);
     store32(out, seconds);
@@ -166,7 +166,7 @@ void writeTimestamp(uint8_t *out, const struct timespec &ts)
 void writeTimestamp(uint8_t *out, time_t when)
 {
     struct timespec ts = {};
-    ts.tv_sec = when;
+    ts.tv_sec          = when;
     writeTimestamp(out, ts);
 }
 
@@ -205,7 +205,7 @@ RootUncertainty rootUncertainty(const TimeReference &ref, time_t now)
      * reference this is 54 ms of claimed uncertainty, which is what a client
      * needs in order to demote this server instead of trusting a clock nobody
      * is correcting. */
-    const double lanS = static_cast<double>(kRootDelay) / 65536.0;
+    const double    lanS = static_cast<double>(kRootDelay) / 65536.0;
     RootUncertainty figures{lanS, lanS};
     if (ref.lastSync != 0 && now > ref.lastSync) {
         figures.dispersionS += static_cast<double>(now - ref.lastSync) * kDispersionPpm * 1e-6;
@@ -272,9 +272,9 @@ std::string sourceText(const sockaddr_storage &src)
  * Timestamps are kept as the eight wire octets. Nothing here needs to interpret
  * them, and echoing the exact bytes is what makes the client's match work.
  */
-constexpr size_t   kPairSlots      = 24;
-constexpr uint32_t kPairMaxAgeMs   = 120000; /* a client polling slower than this starts again */
-constexpr size_t   kPairBytes      = 8;
+constexpr size_t   kPairSlots    = 24;
+constexpr uint32_t kPairMaxAgeMs = 120000; /* a client polling slower than this starts again */
+constexpr size_t   kPairBytes    = 8;
 
 struct SavedPair {
     uint8_t  key[kAddressKeySize] = {};
@@ -492,12 +492,12 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
                 const struct timespec &received, const struct timespec &transmitted,
                 const uint8_t *savedTransmit = nullptr)
 {
-    const uint8_t  stratum = kod ? 0 : ref.stratum;
+    const uint8_t stratum = kod ? 0 : ref.stratum;
     /* The reference's own leap indicator while it is locked, "not
      * synchronised" when it is not, and no warning attached to a KoD: a client
      * told to slow down has not been told anything about leap seconds. */
-    const uint8_t  leap    = kod ? kLeapNoWarning : (ref.locked ? ref.leap : kLeapAlarm);
-    const uint32_t refId   = kod ? kRefIdRate : ref.refId;
+    const uint8_t  leap  = kod ? kLeapNoWarning : (ref.locked ? ref.leap : kLeapAlarm);
+    const uint32_t refId = kod ? kRefIdRate : ref.refId;
 
     const RootUncertainty uncertainty = rootUncertainty(ref, received.tv_sec);
     const uint32_t        delay       = toFixed(uncertainty.delayS);
@@ -638,14 +638,11 @@ private:
 bool servingUpstream()
 {
     switch (Settings::instance().timeSource()) {
-    case Settings::TimeSource::Gps:
-        return false;
-    case Settings::TimeSource::Auto:
-        return ClockSource::instance().owner() == ClockOwner::Upstream;
+    case Settings::TimeSource::Gps:    return false;
+    case Settings::TimeSource::Auto:   return ClockSource::instance().owner() == ClockOwner::Upstream;
     case Settings::TimeSource::Dhcp:
     case Settings::TimeSource::Static:
-    case Settings::TimeSource::Off:
-        return true;
+    case Settings::TimeSource::Off:    return true;
     }
     return true;
 }
@@ -750,9 +747,9 @@ esp_err_t NtpServer::begin()
     addr.sin6_port    = htons(kPort);
     addr.sin6_addr    = in6addr_any;
 #else
-    sockaddr_in addr  = {};
-    addr.sin_family   = AF_INET;
-    addr.sin_port     = htons(kPort);
+    sockaddr_in addr     = {};
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(kPort);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 #endif
 
@@ -835,10 +832,10 @@ TimeReference NtpServer::reference() const
 NtpServer::Counters NtpServer::counters() const
 {
     Counters c;
-    c.answered  = m_answered.load(std::memory_order_relaxed);
-    c.kod       = m_kod.load(std::memory_order_relaxed);
-    c.dropped   = m_dropped.load(std::memory_order_relaxed);
-    c.perMinute = static_cast<double>(m_ratePerMin.load(std::memory_order_relaxed));
+    c.answered               = m_answered.load(std::memory_order_relaxed);
+    c.kod                    = m_kod.load(std::memory_order_relaxed);
+    c.dropped                = m_dropped.load(std::memory_order_relaxed);
+    c.perMinute              = static_cast<double>(m_ratePerMin.load(std::memory_order_relaxed));
     const int64_t lastServed = m_lastServedUs.load(std::memory_order_relaxed);
     if (lastServed >= 0) {
         c.lastServedS = static_cast<double>(esp_timer_get_time() - lastServed) / 1e6;
@@ -874,12 +871,12 @@ void NtpServer::fillControlFacts(ControlFacts &facts, const TimeReference &ref) 
     /* The same two figures the reply carries, so a client reading either gets
      * one answer rather than two. */
     const RootUncertainty uncertainty = rootUncertainty(ref, std::time(nullptr));
-    facts.rootDelayNs  = static_cast<int64_t>(uncertainty.delayS * 1e9);
-    facts.dispersionNs = static_cast<int64_t>(uncertainty.dispersionS * 1e9);
+    facts.rootDelayNs                 = static_cast<int64_t>(uncertainty.delayS * 1e9);
+    facts.dispersionNs                = static_cast<int64_t>(uncertainty.dispersionS * 1e9);
 
     const GpsTime::Status gps = GpsTime::instance().status();
-    facts.jitterNs = gps.jitterNs;
-    facts.offsetNs = gps.offsetNs;
+    facts.jitterNs            = gps.jitterNs;
+    facts.offsetNs            = gps.offsetNs;
 
     facts.answered        = m_answered.load(std::memory_order_relaxed);
     facts.kod             = m_kod.load(std::memory_order_relaxed);
@@ -903,7 +900,7 @@ void NtpServer::recordServePath(const sockaddr_storage &from, const struct times
     if (from.ss_family == AF_INET) {
         addr = reinterpret_cast<const sockaddr_in *>(&from)->sin_addr.s_addr;
     } else if (from.ss_family == AF_INET6) {
-        b                = reinterpret_cast<const sockaddr_in6 *>(&from)->sin6_addr.s6_addr;
+        b                 = reinterpret_cast<const sockaddr_in6 *>(&from)->sin6_addr.s6_addr;
         const bool mapped = b[10] == 0xFF && b[11] == 0xFF;
         for (int i = 0; i < 10 && mapped; ++i) {
             if (b[i] != 0) {
@@ -990,11 +987,10 @@ void NtpServer::reportServePath(int64_t nowUs)
         if (s.count == 0) {
             continue;
         }
-        const uint8_t *ip    = reinterpret_cast<const uint8_t *>(&s.addr);
+        const uint8_t *ip     = reinterpret_cast<const uint8_t *>(&s.addr);
         const int64_t  halfNs = (s.maxNs - s.minNs) / 2;
-        ESP_LOGI(TAG, "servepath %u.%u.%u.%u n %u half %.1f us centre %.1f us", ip[0], ip[1],
-                 ip[2], ip[3], static_cast<unsigned>(s.count),
-                 static_cast<double>(halfNs) / 1000.0,
+        ESP_LOGI(TAG, "servepath %u.%u.%u.%u n %u half %.1f us centre %.1f us", ip[0], ip[1], ip[2],
+                 ip[3], static_cast<unsigned>(s.count), static_cast<double>(halfNs) / 1000.0,
                  static_cast<double>(s.minNs + s.maxNs) / 2000.0);
         halves[clients++] = halfNs;
         samples += s.count;
@@ -1028,16 +1024,16 @@ void NtpServer::serveLoop()
     Interleaved pairs;
     uint32_t    answered = 0, kodSent = 0, dropped = 0;      /* cumulative */
     uint32_t    winAnswered = 0, winKod = 0, winDropped = 0; /* since report */
-    uint32_t    reportAt    = pdTICKS_TO_MS(xTaskGetTickCount()) + kReportEveryMs;
-    bool        firstSeen   = false;
+    uint32_t    reportAt  = pdTICKS_TO_MS(xTaskGetTickCount()) + kReportEveryMs;
+    bool        firstSeen = false;
 
     /* Distinct sources, over the last kRecentSources answered requests. The
      * address only: a client's port changes with every query, so including it
      * would count one poller as many. This answers "is anything else using
      * this", which is otherwise invisible. */
     const auto recordSource = [this](const sockaddr_storage &addr) {
-        uint32_t    h = 2166136261u; /* FNV-1a */
-        const auto  mix = [&h](const uint8_t *p, std::size_t n) {
+        uint32_t   h   = 2166136261u; /* FNV-1a */
+        const auto mix = [&h](const uint8_t *p, std::size_t n) {
             for (std::size_t i = 0; i < n; ++i) {
                 h ^= p[i];
                 h *= 16777619u;
@@ -1080,17 +1076,17 @@ void NtpServer::serveLoop()
          * variable names. Truncating one of those makes its last name partial,
          * and a partial name is an unknown variable. */
         uint8_t   packet[12 + kControlChunk + 3] = {};
-        const int len = recvfrom(sock, packet, sizeof(packet), 0,
-                                 reinterpret_cast<sockaddr *>(&from), &fromLen);
+        const int len                            = recvfrom(sock, packet, sizeof(packet), 0,
+                                                            reinterpret_cast<sockaddr *>(&from), &fromLen);
 
         /* The arrival stamp the MAC took, if it took one. This is the receive
          * timestamp: the frame was stamped before the driver task was woken, so
          * neither the scheduler nor the stack is in it. Without one -- the PHC
          * off, or an entry aged out -- this falls back to a read after the
          * syscall, which is the old behaviour and carries both. */
-        uint8_t  peer[16]  = {};
-        size_t   peerLen   = 0;
-        uint16_t peerPort  = 0;
+        uint8_t  peer[16] = {};
+        size_t   peerLen  = 0;
+        uint16_t peerPort = 0;
         if (from.ss_family == AF_INET) {
             std::memcpy(peer, &reinterpret_cast<const sockaddr_in *>(&from)->sin_addr, 4);
             peerLen  = 4;
@@ -1100,8 +1096,8 @@ void NtpServer::serveLoop()
              * address (::ffff:a.b.c.d) on an AF_INET6 sockaddr. The ring holds
              * the address the frame actually carried, so the mapped form has to
              * be unwrapped or the lookup compares four bytes with sixteen. */
-            const auto    *v6 = reinterpret_cast<const sockaddr_in6 *>(&from);
-            const uint8_t *a  = reinterpret_cast<const uint8_t *>(&v6->sin6_addr);
+            const auto    *v6     = reinterpret_cast<const sockaddr_in6 *>(&from);
+            const uint8_t *a      = reinterpret_cast<const uint8_t *>(&v6->sin6_addr);
             bool           mapped = true;
             for (int i = 0; i < 10; ++i) {
                 if (a[i] != 0) {
@@ -1118,9 +1114,9 @@ void NtpServer::serveLoop()
             }
             peerPort = ntohs(v6->sin6_port);
         }
-        ptp::Rx       hwRx;
-        const bool    hardware = len >= 0 && peerLen != 0 &&
-                                 ptp::takeRx(peer, peerLen, peerPort, &hwRx);
+        ptp::Rx    hwRx;
+        const bool hardware =
+            len >= 0 && peerLen != 0 && ptp::takeRx(peer, peerLen, peerPort, &hwRx);
 
         static bool toldStamp = false;
         if (len >= 0 && !toldStamp) {
@@ -1142,8 +1138,8 @@ void NtpServer::serveLoop()
         if (hardware) {
             struct timespec servedNow = {};
             m_ref->now(servedNow);
-            toServed = static_cast<int64_t>(servedNow.tv_sec) * 1000000000LL +
-                       servedNow.tv_nsec - ptp::nowNs();
+            toServed = static_cast<int64_t>(servedNow.tv_sec) * 1000000000LL + servedNow.tv_nsec -
+                       ptp::nowNs();
             const int64_t t2 = hwRx.ns + toServed;
             received.tv_sec  = static_cast<time_t>(t2 / 1000000000);
             received.tv_nsec = static_cast<long>(t2 % 1000000000);
@@ -1186,15 +1182,15 @@ void NtpServer::serveLoop()
                     buildControlReply(control, sizeof(control), packet, static_cast<size_t>(len),
                                       facts, offset, total);
                 if (controlLen == 0 ||
-                    sendto(sock, control, controlLen, 0,
-                           reinterpret_cast<const sockaddr *>(&from), fromLen) < 0) {
+                    sendto(sock, control, controlLen, 0, reinterpret_cast<const sockaddr *>(&from),
+                           fromLen) < 0) {
                     if (controlLen != 0) {
                         ESP_LOGW(TAG, "sendto (control): errno %d", errno);
                     }
                     break;
                 }
-                offset = static_cast<uint16_t>(
-                    offset + std::min<size_t>(kControlChunk, total - offset));
+                offset =
+                    static_cast<uint16_t>(offset + std::min<size_t>(kControlChunk, total - offset));
                 if (offset >= total) {
                     break;
                 }
@@ -1229,7 +1225,7 @@ void NtpServer::serveLoop()
                     /* Take both stamps around the reply build, which is as
                      * close to the wire as a software timestamp gets. */
                     const TimeReference ref         = m_ref->reference();
-                    struct timespec    transmitted = {};
+                    struct timespec     transmitted = {};
                     m_ref->now(transmitted);
                     /* Whatever the transmit path costs, the stamp is early by
                      * it. Correcting for it is the mirror of the receive lag
@@ -1302,13 +1298,13 @@ void NtpServer::serveLoop()
                      * written before the send, so it stays the software stamp
                      * plus the estimator; a 1588 one-step unit would fix that
                      * and this one cannot. */
-                    int64_t       measuredTx = 0;
+                    int64_t       measuredTx                 = 0;
                     uint8_t       measuredStamp[kStampBytes] = {};
                     const int64_t replySent                  = esp_timer_get_time();
                     int           replyRc                    = -1;
-                    if (kRawSend && hardware && ptp::sendUdp(peer, peerLen, peerPort, hwRx.mac, reply,
-                                                 sizeof(reply),
-                                                 mayInterleave ? &measuredTx : nullptr)) {
+                    if (kRawSend && hardware &&
+                        ptp::sendUdp(peer, peerLen, peerPort, hwRx.mac, reply, sizeof(reply),
+                                     mayInterleave ? &measuredTx : nullptr)) {
                         replyRc = static_cast<int>(sizeof(reply));
                     } else {
                         replyRc = sendto(sock, reply, sizeof(reply), 0,
@@ -1324,14 +1320,14 @@ void NtpServer::serveLoop()
                     } else {
                         /* Saved for the client's *next* request. */
                         if (measuredTx != 0) {
-                            const int64_t servedTx = measuredTx + toServed;
+                            const int64_t   servedTx = measuredTx + toServed;
                             struct timespec measured = {};
-                            measured.tv_sec  = static_cast<time_t>(servedTx / 1000000000);
-                            measured.tv_nsec = static_cast<long>(servedTx % 1000000000);
+                            measured.tv_sec          = static_cast<time_t>(servedTx / 1000000000);
+                            measured.tv_nsec         = static_cast<long>(servedTx % 1000000000);
                             writeTimestamp(measuredStamp, measured);
                         }
-                        pairs.save(from, receiveStamp,
-                                   measuredTx != 0 ? measuredStamp : liveStamp, nowMs);
+                        pairs.save(from, receiveStamp, measuredTx != 0 ? measuredStamp : liveStamp,
+                                   nowMs);
                         TxLag::instance().recordReply(replyCost);
                         ++answered;
                         ++winAnswered;
@@ -1360,13 +1356,13 @@ void NtpServer::serveLoop()
                 /* One line a minute at most: the serial console is the only
                  * local debug there is, and a LAN polling at minpoll would
                  * otherwise bury everything else in the log. */
-                ESP_LOGI(TAG, "answered %u, KoD %u, dropped %u in the last %u s",
-                         winAnswered, winKod, winDropped, kReportEveryMs / 1000);
+                ESP_LOGI(TAG, "answered %u, KoD %u, dropped %u in the last %u s", winAnswered,
+                         winKod, winDropped, kReportEveryMs / 1000);
             }
             m_ilSaved.store(pairs.m_saved, std::memory_order_relaxed);
             m_ilKeyOnly.store(pairs.m_taken, std::memory_order_relaxed);
             winAnswered = winKod = winDropped = 0;
-            reportAt = nowMs + kReportEveryMs;
+            reportAt                          = nowMs + kReportEveryMs;
         }
     }
 

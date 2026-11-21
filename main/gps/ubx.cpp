@@ -13,9 +13,9 @@ namespace ubx {
 
 void Decoder::reset()
 {
-    m_state    = State::Idle;
-    m_got      = 0;
-    m_frame    = Frame{};
+    m_state = State::Idle;
+    m_got   = 0;
+    m_frame = Frame{};
 }
 
 void Decoder::feed(std::span<const uint8_t> bytes)
@@ -94,8 +94,8 @@ void Decoder::feed(uint8_t byte)
 
     case State::Payload:
         m_payload[m_got++] = byte;
-        m_ckA = static_cast<uint8_t>(m_ckA + byte);
-        m_ckB = static_cast<uint8_t>(m_ckB + m_ckA);
+        m_ckA              = static_cast<uint8_t>(m_ckA + byte);
+        m_ckB              = static_cast<uint8_t>(m_ckB + m_ckA);
         if (m_got >= m_frame.len) {
             m_state = State::CkA;
         }

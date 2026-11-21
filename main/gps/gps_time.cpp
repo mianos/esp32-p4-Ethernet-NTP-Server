@@ -129,10 +129,10 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
  * old comment describes -- neither systimer's raw count nor the CPU cycle
  * counter shares esp_timer's phase, but this does, because "now" is esp_timer.
  */
-bool IRAM_ATTR GpsTime::ppsCapIsr(mcpwm_cap_channel_handle_t, const mcpwm_capture_event_data_t *edge,
-                                  void *arg)
+bool IRAM_ATTR GpsTime::ppsCapIsr(mcpwm_cap_channel_handle_t,
+                                  const mcpwm_capture_event_data_t *edge, void *arg)
 {
-    auto *self = static_cast<GpsTime *>(arg);
+    auto         *self = static_cast<GpsTime *>(arg);
     const int64_t atUs = esp_timer_get_time();
 
     /* The software catch below runs this handler again a tick or two later.
@@ -198,7 +198,7 @@ esp_err_t GpsTime::beginCapture()
     mcpwm_capture_timer_config_t timerConfig = {};
     timerConfig.group_id                     = 0;
     timerConfig.clk_src                      = MCPWM_CAPTURE_CLK_SRC_DEFAULT;
-    esp_err_t err = mcpwm_new_capture_timer(&timerConfig, &m_capTimer);
+    esp_err_t err                            = mcpwm_new_capture_timer(&timerConfig, &m_capTimer);
     if (err != ESP_OK) {
         return err;
     }
@@ -240,9 +240,9 @@ esp_err_t GpsTime::beginCapture()
      * and costs one register read, so it is the "now" end -- after a check that
      * the two really do count at one rate. */
     mcpwm_ll_timer_set_count_mode(MCPWM_LL_GET_HW(kCapGroup), kCapNowTimer,
-                                 MCPWM_TIMER_COUNT_MODE_UP);
+                                  MCPWM_TIMER_COUNT_MODE_UP);
     mcpwm_ll_timer_set_start_stop_command(MCPWM_LL_GET_HW(kCapGroup), kCapNowTimer,
-                                         MCPWM_TIMER_START_NO_STOP);
+                                          MCPWM_TIMER_START_NO_STOP);
 
     /* In Hz, not nanoseconds, and not the same on every part. */
     err = mcpwm_capture_timer_get_resolution(m_capTimer, &m_capHz);
@@ -250,8 +250,9 @@ esp_err_t GpsTime::beginCapture()
         ESP_LOGW(TAG, "capture resolution unknown: the stamp falls back to the interrupt time");
         m_capHz = 0;
     } else {
-        ESP_LOGI(TAG, "PPS edge: MCPWM capture at %lu Hz (%.1f ns a tick, latched at the edge, "
-                      "no ISR latency)",
+        ESP_LOGI(TAG,
+                 "PPS edge: MCPWM capture at %lu Hz (%.1f ns a tick, latched at the edge, "
+                 "no ISR latency)",
                  static_cast<unsigned long>(m_capHz), 1e9 / static_cast<double>(m_capHz));
     }
 
@@ -259,7 +260,7 @@ esp_err_t GpsTime::beginCapture()
      * jittery path, so jitter washes out and only a real clock difference shows.
      * The sub-microsecond part is dropped if they disagree. */
     uint32_t capFirst = 0, capLast = 0, nowFirst = 0, nowLast = 0;
-    bool     sampled  = false;
+    bool     sampled = false;
     if (mcpwm_capture_channel_trigger_soft_catch(m_capChannel) == ESP_OK &&
         mcpwm_capture_get_latched_value(m_capChannel, &capFirst) == ESP_OK) {
         nowFirst = mcpwm_ll_timer_get_count_value(MCPWM_LL_GET_HW(kCapGroup), kCapNowTimer);
@@ -304,14 +305,14 @@ esp_err_t GpsTime::begin()
     }
     m_baudIndex = m_preferredIndex;
 
-    uart_config_t config         = {};
-    config.baud_rate             = static_cast<int>(kBauds[m_preferredIndex]);
-    config.data_bits             = UART_DATA_8_BITS;
-    config.parity                = UART_PARITY_DISABLE;
-    config.stop_bits             = UART_STOP_BITS_1;
-    config.flow_ctrl             = UART_HW_FLOWCTRL_DISABLE;
-    config.rx_flow_ctrl_thresh   = 0;
-    config.source_clk            = UART_SCLK_DEFAULT;
+    uart_config_t config       = {};
+    config.baud_rate           = static_cast<int>(kBauds[m_preferredIndex]);
+    config.data_bits           = UART_DATA_8_BITS;
+    config.parity              = UART_PARITY_DISABLE;
+    config.stop_bits           = UART_STOP_BITS_1;
+    config.flow_ctrl           = UART_HW_FLOWCTRL_DISABLE;
+    config.rx_flow_ctrl_thresh = 0;
+    config.source_clk          = UART_SCLK_DEFAULT;
 
     /* A transmitter buffer is needed even though nothing is sent after boot: the
      * configuration messages go out through it. */
@@ -333,9 +334,9 @@ esp_err_t GpsTime::begin()
     pps.pull_up_en    = GPIO_PULLUP_DISABLE;
     /* Pulled down so an unconnected pin reads 0 rather than picking up noise;
      * the module drives the line push-pull, so the resistor never fights it. */
-    pps.pull_down_en  = GPIO_PULLDOWN_ENABLE;
-    pps.intr_type     = GPIO_INTR_POSEDGE;
-    err               = gpio_config(&pps);
+    pps.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    pps.intr_type    = GPIO_INTR_POSEDGE;
+    err              = gpio_config(&pps);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "GPIO%d: %s -- no PPS", static_cast<int>(kPpsPin), esp_err_to_name(err));
         return err;
@@ -355,7 +356,8 @@ esp_err_t GpsTime::begin()
         return err;
     }
 
-    if (xTaskCreate(&GpsTime::taskEntry, "gps", kTaskStack, this, kTaskPriority, nullptr) != pdPASS) {
+    if (xTaskCreate(&GpsTime::taskEntry, "gps", kTaskStack, this, kTaskPriority, nullptr) !=
+        pdPASS) {
         ESP_LOGE(TAG, "cannot start the GPS task");
         return ESP_ERR_NO_MEM;
     }
@@ -375,8 +377,8 @@ esp_err_t GpsTime::begin()
         gpio_set_direction(static_cast<gpio_num_t>(kAntDrivePin), GPIO_MODE_OUTPUT);
         gpio_set_direction(static_cast<gpio_num_t>(kAntSensePin), GPIO_MODE_INPUT);
         gpio_set_level(static_cast<gpio_num_t>(kAntDrivePin), 1); /* off until the module is up */
-        ESP_LOGI(TAG, "antenna bias on GPIO%d (active low), short sense on GPIO%d",
-                 kAntDrivePin, kAntSensePin);
+        ESP_LOGI(TAG, "antenna bias on GPIO%d (active low), short sense on GPIO%d", kAntDrivePin,
+                 kAntSensePin);
     }
 
     if (xTaskCreate(&GpsTime::bridgeTaskEntry, "gpsbridge", 4096, this, 3, nullptr) != pdPASS) {
@@ -538,8 +540,9 @@ void GpsTime::task()
                     }
                     esp_rom_delay_us(500);
                 }
-                ESP_LOGW(TAG, "GPIO%d idle probe at %u baud: %d transitions in 200 ms "
-                              "(level %d)",
+                ESP_LOGW(TAG,
+                         "GPIO%d idle probe at %u baud: %d transitions in 200 ms "
+                         "(level %d)",
                          kRxPin, static_cast<unsigned>(m_baud), edges, last);
             }
         }
@@ -553,13 +556,13 @@ void GpsTime::task()
                  * a rate the receiver knows. Then hold the old rate: if frames
                  * stop, this is written back as soon as anything is heard
                  * again, on whatever rate that turns out to be. */
-                m_baudPrev            = m_baud;
+                m_baudPrev = m_baud;
                 /* Four silence windows, not two. This module can take most of
                  * ten seconds to answer at a new rate -- measured: it accepted
                  * 115200, sent frames at 8.7 s, and had already been reverted at
                  * 8.0 s, so the change looked like a failure and undid itself. */
-                m_baudRevertAtUs      = esp_timer_get_time() + 4 * kFrameSilenceUs;
-                m_baudRevertPending   = true;
+                m_baudRevertAtUs    = esp_timer_get_time() + 4 * kFrameSilenceUs;
+                m_baudRevertPending = true;
                 uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
                 /* Acknowledged, not fire-and-forget: saving while the port
                  * change is still in flight captures the OLD rate, and the save
@@ -579,8 +582,9 @@ void GpsTime::task()
                     esp_rom_delay_us(200000);
                     const int8_t saved = saveCfgIo();
                     ESP_LOGW(TAG, "port set to %u and %s", static_cast<unsigned>(want),
-                             saved == 1 ? "saved"
-                                        : saved == 0 ? "save REJECTED" : "save unanswered");
+                             saved == 1   ? "saved"
+                             : saved == 0 ? "save REJECTED"
+                                          : "save unanswered");
                 }
                 uart_wait_tx_done(kUart, pdMS_TO_TICKS(100));
             }
@@ -600,8 +604,10 @@ void GpsTime::task()
                 }
             }
             if (module) {
-                ESP_LOGW(TAG, "receiver and host set to %u baud; reverting to %u if frames do not "
-                              "resume", static_cast<unsigned>(want), static_cast<unsigned>(m_baudPrev));
+                ESP_LOGW(TAG,
+                         "receiver and host set to %u baud; reverting to %u if frames do not "
+                         "resume",
+                         static_cast<unsigned>(want), static_cast<unsigned>(m_baudPrev));
             } else {
                 ESP_LOGW(TAG, "host side set to %u baud alone: the scan will find the receiver",
                          static_cast<unsigned>(want));
@@ -620,8 +626,8 @@ void GpsTime::task()
         if (m_baudRevertPending && nowUs >= m_baudRevertAtUs) {
             m_baudRevertPending = false;
             m_baudRevertTo      = m_baudPrev;
-            ESP_LOGW(TAG, "no frames at %u baud: reverting to %u",
-                     static_cast<unsigned>(m_baud), static_cast<unsigned>(m_baudPrev));
+            ESP_LOGW(TAG, "no frames at %u baud: reverting to %u", static_cast<unsigned>(m_baud),
+                     static_cast<unsigned>(m_baudPrev));
         }
         if (m_baudRevertTo != 0 && m_frameSeen) {
             const uint32_t back = m_baudRevertTo;
@@ -638,17 +644,17 @@ void GpsTime::task()
             }
             uart_wait_tx_done(kUart, pdMS_TO_TICKS(100));
             uart_set_baudrate(kUart, back);
-            m_baud                = back;
-            m_baudRevertPending   = false;
+            m_baud              = back;
+            m_baudRevertPending = false;
             ESP_LOGW(TAG, "reverted to %u baud", static_cast<unsigned>(back));
         }
         /* A bias change or a restart asked for over HTTP. Serviced here rather
          * than in the handler so exactly one thread owns the UART and the
          * parser. */
         if (m_biasReq >= 0) {
-            const bool on      = m_biasReq == 1;
-            const bool wasOn   = m_antBiasOn;
-            m_biasReq          = -1;
+            const bool on    = m_biasReq == 1;
+            const bool wasOn = m_antBiasOn;
+            m_biasReq        = -1;
             /* Supply control bit on or off; short/open detection and
              * power-down-on-short stay set either way. */
             const uint8_t cfg[4] = {static_cast<uint8_t>(on ? 0x0F : 0x0E), 0, 0, 0};
@@ -656,12 +662,14 @@ void GpsTime::task()
             /* The pin is what actually does it; the CFG-ANT frame is kept
              * because it costs nothing and would start working on a module that
              * has a supervisor. */
-            m_antLatched = false;
+            m_antLatched   = false;
             m_shortSamples = 0;
             applyBias(on);
             gpio_set_level(static_cast<gpio_num_t>(kAntDrivePin), on ? 0 : 1);
             ESP_LOGW(TAG, "antenna bias %s on request (module said %s)", on ? "ON" : "OFF",
-                     br == 1 ? "accepted" : br == 0 ? "refused" : "nothing");
+                     br == 1   ? "accepted"
+                     : br == 0 ? "refused"
+                               : "nothing");
             sendUbx(0x0A, 0x09, nullptr, 0); /* re-read the supervisor at once */
 
             /* Powering the preamp back up is not enough to get the sky back. The
@@ -715,15 +723,14 @@ void GpsTime::task()
              * box served 10 ms out until it was stopped. The held position is
              * the right thing to re-lock from in that case, and only when there
              * is neither is there nothing to lock. */
-            const bool haveMean =
-                !(m_svinMean[0] == 0 && m_svinMean[1] == 0 && m_svinMean[2] == 0);
+            const bool haveMean = !(m_svinMean[0] == 0 && m_svinMean[1] == 0 && m_svinMean[2] == 0);
             if (cmd == 3 && !haveMean && !m_fixedValid) {
                 ESP_LOGW(TAG, "nothing to lock: no survey mean and no held position, "
                               "position left moving");
                 m_svinCmd = 0;
             } else if (cmd == 1) {
-                tm[0]    = 1; /* survey-in */
-                minDur   = m_svinDurS;
+                tm[0]  = 1; /* survey-in */
+                minDur = m_svinDurS;
                 /* Millimetres, not millimetres squared. Both accuracy fields
                  * in this message are plain mm with no scaling (spec R27 p.267);
                  * everything the receiver says about its survey is a variance in
@@ -741,7 +748,7 @@ void GpsTime::task()
                  * variance of 1.4e7 sent raw told the receiver its position was
                  * good to 14 000 km and put the stated pulse accuracy near 47 ms
                  * -- which is the size of the errors that then went unnoticed. */
-                tm[0]    = 2; /* fixed */
+                tm[0] = 2; /* fixed */
                 /* Re-locking what is already held keeps its accuracy and its
                  * provenance; only a mean from this survey can supersede it. */
                 fixedAcc = haveMean ? isqrt(m_svinAcc) : m_fixedAcc;
@@ -773,15 +780,14 @@ void GpsTime::task()
                         m_holdValidated = m_svinValid;
                         portEXIT_CRITICAL(&m_mux);
                     }
-                    Settings::instance().setGpsFixedPos(
-                        std::format("{},{},{},{},{}", haveMean ? m_svinMean[0] : m_fixedMean[0],
-                                    haveMean ? m_svinMean[1] : m_fixedMean[1],
-                                    haveMean ? m_svinMean[2] : m_fixedMean[2],
-                                    /* mm, like the wire: this stored the
+                    Settings::instance().setGpsFixedPos(std::format(
+                        "{},{},{},{},{}", haveMean ? m_svinMean[0] : m_fixedMean[0],
+                        haveMean ? m_svinMean[1] : m_fixedMean[1],
+                        haveMean ? m_svinMean[2] : m_fixedMean[2],
+                        /* mm, like the wire: this stored the
                                      * variance, and the boot re-sent it as an
                                      * accuracy of kilometres. */
-                                    haveMean ? isqrt(m_svinAcc) : m_fixedAcc,
-                                    m_holdValidated ? 1 : 0));
+                        haveMean ? isqrt(m_svinAcc) : m_fixedAcc, m_holdValidated ? 1 : 0));
                 }
                 saveTimeMode();
                 m_svinAtUs = 0;
@@ -793,8 +799,9 @@ void GpsTime::task()
                      * be met and the survey will run the duration out. Say so
                      * at the start rather than 24 hours later. */
                     if (m_svinAcc != 0 && isqrt(m_svinAcc) > accLimit) {
-                        ESP_LOGW(TAG, "  the limit is tighter than this site scatters (%u mm "
-                                      "now): expect it to run the full duration",
+                        ESP_LOGW(TAG,
+                                 "  the limit is tighter than this site scatters (%u mm "
+                                 "now): expect it to run the full duration",
                                  static_cast<unsigned>(isqrt(m_svinAcc)));
                     }
                 } else if (cmd == 3) {
@@ -807,8 +814,9 @@ void GpsTime::task()
                      * said so at the time. Say it, and keep saying it in
                      * /gps/info through hold_validated. */
                     if (!m_holdValidated) {
-                        ESP_LOGW(TAG, "  the survey had NOT met its own limit (%u mm needed, "
-                                      "%u mm measured): locked unvalidated",
+                        ESP_LOGW(TAG,
+                                 "  the survey had NOT met its own limit (%u mm needed, "
+                                 "%u mm measured): locked unvalidated",
                                  static_cast<unsigned>(m_svinAccMm),
                                  static_cast<unsigned>(isqrt(m_svinAcc)));
                     }
@@ -831,14 +839,14 @@ void GpsTime::task()
          * moved the pulse for a second or two and left the served time where it
          * was. With the window cleared, the step is geometry again. */
         if (m_tp5Cmd) {
-            m_tp5Cmd = false;
+            m_tp5Cmd       = false;
             const int8_t r = sendTp5();
             m_tp5Acked     = r == 1;
             m_tp5Naked     = r == 0;
             if (r == 1) {
-                m_rateCount    = 0;
-                m_rateNext     = 0;
-                m_rateLogged   = false;
+                m_rateCount         = 0;
+                m_rateNext          = 0;
+                m_rateLogged        = false;
                 m_lastRateOffsetSet = false;
             } else {
                 ESP_LOGW(TAG, "CFG-TP5 delay change %s", r == 0 ? "rejected" : "unanswered");
@@ -850,8 +858,7 @@ void GpsTime::task()
          * for everything -- MON-VER only answered at 1.2 s -- so a NAK that
          * early is not always a refusal. Only the refusals are retried; a
          * message that was acknowledged is left alone. */
-        if (m_warmRetries < 3 && nowUs >= m_warmRetryAtUs &&
-            (m_antCfgNaked || m_timTpNaked)) {
+        if (m_warmRetries < 3 && nowUs >= m_warmRetryAtUs && (m_antCfgNaked || m_timTpNaked)) {
             ++m_warmRetries;
             m_warmRetryAtUs = nowUs + 10000000;
             if (m_antCfgNaked) {
@@ -915,8 +922,8 @@ void GpsTime::task()
              * previous attempt took -- so nothing is outstanding. Left armed the
              * deadline reads as overdue forever in /gps/info. */
             m_holdAssertAtUs = 0;
-        } else if (m_holdWanted && m_tmode != 2 && m_holdAssertAtUs != 0 &&
-                   !m_svinActive && Settings::instance().gpsTimeMode() == "fixed") {
+        } else if (m_holdWanted && m_tmode != 2 && m_holdAssertAtUs != 0 && !m_svinActive &&
+                   Settings::instance().gpsTimeMode() == "fixed") {
             const bool ready = m_fixType >= 2 && m_satCount >= 4 && m_lastEdgeUs > 0 &&
                                nowUs - m_lastEdgeUs < 3000000;
             if (nowUs < m_holdAssertAtUs) {
@@ -964,11 +971,11 @@ void GpsTime::task()
              * not leave on its own. Cold when asked, which throws the almanac
              * away -- the thing to try when a hot start changed nothing and the
              * receiver's own stored state is suspect. */
-            const bool    cold  = m_resetCold;
-            const bool    hard  = m_resetHard;
-            const bool    power = m_resetPower;
-            m_resetHard         = false;
-            m_resetPower        = false;
+            const bool cold  = m_resetCold;
+            const bool hard  = m_resetHard;
+            const bool power = m_resetPower;
+            m_resetHard      = false;
+            m_resetPower     = false;
             /* resetMode: 0x00 is a hardware reset, 0x02 a controlled software
              * one (GNSS only). A hardware reset also drops the module's whole
              * runtime configuration back to its defaults, so the message set is
@@ -980,10 +987,13 @@ void GpsTime::task()
              * every RAM configuration written since power-up goes with it. The
              * saved configuration in the module's own flash comes back, which is
              * the point when the RAM state is what is suspect. */
-            const uint8_t mode = power ? 0x04 : hard ? 0x00 : 0x02;
+            const uint8_t mode   = power ? 0x04 : hard ? 0x00 : 0x02;
             const uint8_t rst[4] = {static_cast<uint8_t>(cold ? 0xFF : 0x00),
                                     static_cast<uint8_t>(cold ? 0xFF : 0x00), mode, 0x00};
-            ESP_LOGW(TAG, "receiver %s%s start requested", power ? "POWER-CYCLE " : hard ? "HARDWARE " : "",
+            ESP_LOGW(TAG, "receiver %s%s start requested",
+                     power  ? "POWER-CYCLE "
+                     : hard ? "HARDWARE "
+                            : "",
                      cold ? "cold" : "hot");
             if (hard || power) {
                 /* Forced for the same reason as the clear above: the module
@@ -1002,7 +1012,7 @@ void GpsTime::task()
         {
             static int64_t nextSenseUs = 0;
             if (nowUs >= nextSenseUs) {
-                nextSenseUs = nowUs + 250000;
+                nextSenseUs     = nowUs + 250000;
                 const int level = gpio_get_level(static_cast<gpio_num_t>(kAntSensePin));
                 if (level != m_senseLogged) {
                     m_senseLogged = level;
@@ -1030,7 +1040,7 @@ void GpsTime::task()
             m_nextHwUs = nowUs + 2000000;
         }
         if (!m_timTpProbed && m_timTpCount == 0 && nowUs >= m_timTpProbeAtUs) {
-            m_timTpProbed = true;
+            m_timTpProbed   = true;
             const int8_t pr = sendAndWait(0x06, 0x01, kTimTpEnable, sizeof(kTimTpEnable));
             if (pr == 0) {
                 m_timTpNaked = true;
@@ -1057,8 +1067,9 @@ uint32_t GpsTime::suppressPps(uint32_t seconds)
     }
 
     const Status st = status();
-    ESP_LOGW(TAG, "PPS edges ignored for %u s at the request of POST /gps/pps: the holdover from "
-                  "here is deliberate, and %s",
+    ESP_LOGW(TAG,
+             "PPS edges ignored for %u s at the request of POST /gps/pps: the holdover from "
+             "here is deliberate, and %s",
              static_cast<unsigned>(seconds),
              st.rateSamples >= kRateMinSamples ? "the servo is carrying it"
                                                : "with no rate yet it demotes in 3 s");

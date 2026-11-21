@@ -47,9 +47,9 @@ constexpr uint8_t kSync2 = 0x62;
 constexpr std::size_t kMaxPayload = 512;
 
 struct Frame {
-    uint8_t  cls = 0;
-    uint8_t  id  = 0;
-    uint16_t len = 0;
+    uint8_t                  cls = 0;
+    uint8_t                  id  = 0;
+    uint16_t                 len = 0;
     std::span<const uint8_t> payload;
 
     /* Field reads. The caller has already been guaranteed Frame::len is inside
@@ -113,8 +113,8 @@ enum class Drop : uint8_t { Checksum, Length };
 
 class Listener {
 public:
-    virtual ~Listener() = default;
-    virtual void onFrame(const Frame &frame) = 0;
+    virtual ~Listener()                               = default;
+    virtual void onFrame(const Frame &frame)          = 0;
     virtual void onDrop(Drop why, const Frame &frame) = 0;
 };
 
@@ -150,16 +150,16 @@ private:
     void emit();
     void warn(Drop why);
 
-    Listener   *m_listener  = nullptr;
-    State       m_state     = State::Idle;
+    Listener   *m_listener = nullptr;
+    State       m_state    = State::Idle;
     Frame       m_frame{};
     uint8_t     m_payload[kMaxPayload] = {};
-    std::size_t m_got       = 0;
-    uint8_t     m_ckA       = 0;
-    uint8_t     m_ckB       = 0;
-    uint32_t    m_frames    = 0;
-    uint32_t    m_badChecksum = 0;
-    uint32_t    m_badLength   = 0;
+    std::size_t m_got                  = 0;
+    uint8_t     m_ckA                  = 0;
+    uint8_t     m_ckB                  = 0;
+    uint32_t    m_frames               = 0;
+    uint32_t    m_badChecksum          = 0;
+    uint32_t    m_badLength            = 0;
 };
 
 }  // namespace ubx

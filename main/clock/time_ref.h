@@ -39,7 +39,7 @@ struct TimeReference {
      * substitutes 3 ("clock not synchronised") itself when it is not. 1 means
      * the last minute of the UTC day has 61 seconds, 2 means 59. Zero is both
      * "no warning" and "no opinion", which are the same thing to a client. */
-    uint8_t  leap     = 0;
+    uint8_t leap = 0;
 
     /* The reference's own error budget, in nanoseconds, with 0 for "not
      * stated". The responder then falls back to its LAN guesses -- 1 ms of
@@ -56,14 +56,13 @@ struct TimeReference {
      * this is only the reason, for the log and for /healthz. A reference that
      * knows it is out and keeps advertising a lock is worse than one that
      * admits it, because the client has no way to check. */
-    bool     demoted  = false;
+    bool demoted = false;
 };
 
 /* "INIT" in ASCII. RFC 5905 7.3: a server that cannot vouch for its clock says
  * so in the refid field, and a client that reads it knows the stratum 16 it was
  * sent with was not a mistake. */
-constexpr uint32_t kRefIdInit =
-    (static_cast<uint32_t>('I') << 24) | ('N' << 16) | ('I' << 8) | 'T';
+constexpr uint32_t kRefIdInit = (static_cast<uint32_t>('I') << 24) | ('N' << 16) | ('I' << 8) | 'T';
 
 /* The refid field is four bytes that mean different things depending on the
  * stratum: text ("GPS", "INIT", "RATE") at stratum 1 and for the kiss codes,
@@ -85,8 +84,7 @@ inline std::string refIdText(uint32_t refId, uint8_t stratum)
     }
 
     return std::format("{}.{}.{}.{}", static_cast<uint8_t>(bytes[0]),
-                       static_cast<uint8_t>(bytes[1]),
-                       static_cast<uint8_t>(bytes[2]),
+                       static_cast<uint8_t>(bytes[1]), static_cast<uint8_t>(bytes[2]),
                        static_cast<uint8_t>(bytes[3]));
 }
 

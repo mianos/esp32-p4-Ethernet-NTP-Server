@@ -128,8 +128,7 @@ private:
      * is not caught -- only the dotted quad is compared. */
     static bool isSelfAddress(const std::string &name);
 
-    static void onSyncEvent(void *arg, esp_event_base_t base,
-                            int32_t event_id, void *event_data);
+    static void onSyncEvent(void *arg, esp_event_base_t base, int32_t event_id, void *event_data);
 
     /* The upstream name is read on the responder task (every reply, for the
      * refid) while two other tasks rewrite it: the HTTP task on a POST /config
@@ -150,13 +149,13 @@ private:
     std::atomic<bool>                 m_running{false};
     /* Taken with the singleton and never given back: this object lives as long
      * as the device. */
-    mutable SemaphoreHandle_t         m_serverLock = xSemaphoreCreateMutex();
+    mutable SemaphoreHandle_t m_serverLock = xSemaphoreCreateMutex();
     /* Serialises start()/stop() against each other. They are reached from the
      * HTTP task (POST /config, POST /ntp/sync) and now from the GPS task as
      * well (a fallback engaging or the receiver coming back), and
      * esp_netif_sntp_init() fails outright if it is called over a live one. */
-    mutable SemaphoreHandle_t         m_switchLock = xSemaphoreCreateMutex();
-    std::string                       m_server;            /* guarded by m_serverLock */
-    char                              m_lwipServer[kMaxServerName] = {};
-    std::atomic<long long>            m_last_sync{0};
+    mutable SemaphoreHandle_t m_switchLock = xSemaphoreCreateMutex();
+    std::string               m_server; /* guarded by m_serverLock */
+    char                      m_lwipServer[kMaxServerName] = {};
+    std::atomic<long long>    m_last_sync{0};
 };

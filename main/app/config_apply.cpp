@@ -61,8 +61,8 @@ void config_apply::afterChange(const std::string &hostnameBefore, bool logChange
      * has to reach the Announce, and the mode test below never restarted for
      * one, so they are handed over directly. */
     ptp::setIdentity(settings.ptpDomain(), settings.ptpPriority1());
-    const std::string &mode = settings.ptpMode();
-    ptp::Mode wanted = ptp::Mode::Off;
+    const std::string &mode   = settings.ptpMode();
+    ptp::Mode          wanted = ptp::Mode::Off;
     if (mode == "master") {
         wanted = ptp::Mode::Master;
     } else if (mode == "slave") {
