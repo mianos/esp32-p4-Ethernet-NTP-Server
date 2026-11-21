@@ -28,6 +28,16 @@ import time
 TRANS = bytes(range(8))  # a distinctive client transmit timestamp
 
 
+def now_stamp():
+    """This host's clock as an NTP timestamp, fraction included.
+
+    The box measures its serve path from the transmit stamps clients send, so a
+    made-up fraction reads there as half a second of path jitter.
+    """
+    t = time.time() + 2208988800
+    return struct.pack(">II", int(t), int((t % 1) * 2**32))
+
+
 def request(transmit=TRANS, version=4, mode=3, poll=0):
     hdr = bytearray(48)
     hdr[0] = (version << 3) | mode
@@ -126,7 +136,7 @@ def exchange(host, origin=b"\x00" * 8, receive=b"\x00" * 8, transmit=None):
     accidentally also equal to transmit, which would be read as a basic request.
     """
     if transmit is None:
-        transmit = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
+        transmit = now_stamp()
     hdr = bytearray(request(transmit))
     hdr[24:32] = origin
     hdr[32:40] = receive
@@ -149,8 +159,8 @@ def interleaved_section(host):
     # 2. A request whose origin is the previous receive timestamp is interleaved:
     #    the reply must echo that as origin and carry the *previous* transmit
     #    timestamp, not a fresh one.
-    t1 = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
-    receive = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
+    t1 = now_stamp()
+    receive = now_stamp()
     second = exchange(host, origin=t2_first, receive=receive, transmit=t1)
     if second is None:
         print("second (interleaved)              NO REPLY")
@@ -189,13 +199,30 @@ def interleaved_section(host):
         return
     t2_fresh, t3_fresh = fresh[32:40], fresh[40:48]
     time.sleep(2.2)
-    same = struct.pack(">II", int(time.time()) + 2208988800, 7)
+    same = now_stamp()
     fifth = exchange(host, origin=t2_fresh, receive=same, transmit=same)
     if fifth is None:
         print("receive == transmit               NO REPLY")
     else:
         print(f"receive == transmit               replayed_old_transmit="
               f"{fifth[40:48] == t3_fresh} (must be False: basic)")
+
+    # 6. An RFC 5905 client echoes the previous *transmit* as its origin, with a
+    #    receive that differs from its transmit. That is a basic request, and a
+    #    server keyed on the transmit timestamp answers it interleaved -- with an
+    #    origin the client then rejects as bogus.
+    prior = exchange(host)
+    if prior is None:
+        print("echoed transmit (basic client)    NO REPLY")
+        return
+    time.sleep(2.2)
+    t1 = now_stamp()
+    sixth = exchange(host, origin=prior[40:48], receive=prior[32:40], transmit=t1)
+    if sixth is None:
+        print("echoed transmit (basic client)    NO REPLY")
+    else:
+        print(f"echoed transmit (basic client)    origin_is_our_transmit={sixth[24:32] == t1} "
+              f"(must be True: basic)")
 
     print(f"  check /healthz ntp_interleaved_served increments, and "
           f"ntp_tx_correction_us is a plausible few-microsecond figure")

@@ -70,8 +70,10 @@ public:
     {
         return m_interleaved.load(std::memory_order_relaxed);
     }
-    /* Debug while interleaved mode is being exercised: how often a request
-     * claimed a saved exchange, and how often the claim matched. */
+    /* How often a request could have been an interleaved one (a non-zero origin
+     * and a receive that differs from its transmit), and how often the origin
+     * matched a saved receive timestamp. A basic client that echoes the
+     * previous transmit counts as a try and never as a hit. */
     uint32_t interleavedTried() const { return m_ilTry.load(std::memory_order_relaxed); }
     /* Replies whose transmit stamp had the socket-lag correction applied. With
      * the raw send that is none of them, and the healthz figure is then a
