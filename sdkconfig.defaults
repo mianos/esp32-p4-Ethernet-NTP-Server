@@ -88,3 +88,8 @@ CONFIG_LWIP_MAX_SOCKETS=16
 # `tasks` in the console needs both; nothing else in the firmware does.
 CONFIG_FREERTOS_USE_TRACE_FACILITY=y
 CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS=y
+
+# lwIP, the NTP responder's raw replies and the PTP task all transmit, from
+# three tasks on two cores, and the EMAC's descriptor ring has no lock of its
+# own.
+CONFIG_ETH_TRANSMIT_MUTEX=y

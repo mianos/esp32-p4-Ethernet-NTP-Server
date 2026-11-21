@@ -1,7 +1,7 @@
 # UBX framing
 
 The receiver's line and the u-center bridge both carry this, and both feed one
-decoder (`main/ubx.cpp`). This note is what that code assumes, and why.
+decoder (`main/gps/ubx.cpp`). This note is what that code assumes, and why.
 
 ## A frame
 
@@ -64,9 +64,16 @@ this firmware has no opinion about.
 
 ## Buffer
 
-`kMaxPayload` is 512. A frame claiming more is still walked to its end and
-dropped as a length error, so one over-long message costs a frame and not the
-stream. NAV-SAT and TIM-SVIN are the largest decoded; both are far below it.
+`kMaxPayload` is 512. A frame claiming more, or a known message claiming a
+length outside its definition, is dropped the moment the length is read
+(`gps_dropped_len`) and the two length bytes go back through the sync hunt.
+It used to be walked to its end, on the grounds that one over-long message
+should cost a frame and not the stream -- but the length is sixteen bits that
+nothing has checked yet. A frame cut short on the line runs into the next
+frame's sync pair, `B5 62` reads as 25269, and the decoder sat through 25 KB of
+good stream: five minutes with no frames, a baud scan, and a reset of a receiver
+that had never stopped. NAV-SAT and TIM-SVIN are the largest decoded; both are
+far below the limit.
 
 ## The bridge
 
@@ -84,16 +91,18 @@ looks for:
 ## Silence
 
 Five seconds without a frame sets the baud scan going again
-(`gps_rescans` at `/healthz`). A u-center session holds the port and must not have
+(`gps_rescans` at `/healthz`). The decoder is reset and the rate that was
+working keeps its full fifteen seconds before the scan moves off it. A u-center session holds the port and must not have
 its rate moved underneath it, so the bridge suppresses the rescan while attached.
 
 ## Tests
 
 `tools/ubx_test.py` covers the cases that broke the search: every split offset, a
 sync pair inside a payload, a corrupt byte in the header or the payload, a
-truncated frame, an over-long one, and the length gates. `tools/ubx.py` is the
+truncated frame, an over-long one, a frame cut short ahead of the next one's
+sync, and the length gates. `tools/ubx.py` is the
 host twin the tests run against and the tools now use; a table-parity test keeps
-it and `main/ubx.h` in step.
+it and `main/gps/ubx.h` in step.
 
 ## Attribution
 

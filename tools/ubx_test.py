@@ -4,7 +4,7 @@
 These exist because the bridge's sniffer was a byte search, and every case below
 is one it got wrong: a frame split across two reads, a sync pair occurring inside
 a payload, a corrupt byte, a frame that claims the wrong length. The same state
-machine is on both sides (tools/ubx.py and main/ubx.cpp), so a case here is a
+machine is on both sides (tools/ubx.py and main/gps/ubx.cpp), so a case here is a
 case against the firmware's shape even though the code under test is the host
 twin.
 
@@ -108,17 +108,33 @@ class Framing(unittest.TestCase):
         self.assertEqual(len(d.frames), 0)
         self.assertEqual(len(d.dropped_length), 1)
 
+    def test_truncated_frame_does_not_swallow_the_stream(self):
+        """Seen on the board: NAV-TIMELS cut after its id, so the next frame's
+        sync pair was read as a length of 0x62B5 and 25 KB went unparsed."""
+        d = ubx.Decoder()
+        nxt = ubx.build(0x01, 0x07, bytes(92))
+        d.feed(bytes((ubx.SYNC1, ubx.SYNC2, 0x01, 0x26)) + nxt + nxt)
+        self.assertEqual(len(d.dropped_length), 1)
+        self.assertEqual(len(d.frames), 2)
+
+    def test_overlong_does_not_swallow_the_stream(self):
+        d = ubx.Decoder()
+        nxt = ubx.build(0x01, 0x07, bytes(92))
+        d.feed(bytes((ubx.SYNC1, ubx.SYNC2, 0x13, 0x40, 0xFF, 0xFF)) + nxt)
+        self.assertEqual(len(d.dropped_length), 1)
+        self.assertEqual(len(d.frames), 1)
+
     def test_pending_reports_mid_frame(self):
         d = ubx.Decoder()
         self.assertEqual(d.pending, 0) if hasattr(d, "pending") else None
 
 
 class Tables(unittest.TestCase):
-    """tools/ubx.py and main/ubx.h must agree, or a tool passes what the board
+    """tools/ubx.py and main/gps/ubx.h must agree, or a tool passes what the board
     drops."""
 
     def test_definitions_match(self):
-        header = (HERE / "main" / "ubx.h").read_text()
+        header = (HERE / "main" / "gps" / "ubx.h").read_text()
         found = set()
         for match in re.finditer(
             r"\{\s*0x([0-9A-Fa-f]{2}),\s*0x([0-9A-Fa-f]{2}),\s*(\d+),\s*(\d+),\s*\"([A-Za-z0-9-]+)\"\s*\}",

@@ -11,3 +11,6 @@ __pycache__/
 docs/demos.zip
 docs/demos_eth/
 docs/sch*.txt
+
+# macOS AppleDouble sidecars, written by the Mac that shares this directory
+._*

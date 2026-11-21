@@ -1,0 +1,63 @@
+# The style this code was already written in, written down. Derived from the
+# tree rather than chosen: each option was kept if it made the first reformat
+# smaller. Run from the repository root:
+#
+#   clang-format -i $(git ls-files 'main/*.cpp' 'main/*.h')
+#
+# Comments are never reflowed and includes are never sorted -- the comments are
+# prose somebody laid out, and the include order is not always free.
+Language: Cpp
+Standard: Latest
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterClass: false
+  AfterStruct: false
+  AfterEnum: false
+  AfterNamespace: false
+  AfterControlStatement: Never
+  BeforeElse: false
+  BeforeCatch: false
+  SplitEmptyFunction: true
+PointerAlignment: Right
+ReferenceAlignment: Right
+DerivePointerAlignment: false
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: Consecutive
+AlignConsecutiveMacros: Consecutive
+AlignTrailingComments: true
+AlignOperands: Align
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortLambdasOnASingleLine: All
+BinPackArguments: true
+BinPackParameters: true
+BreakConstructorInitializers: BeforeColon
+Cpp11BracedListStyle: true
+IndentCaseLabels: false
+NamespaceIndentation: None
+FixNamespaceComments: true
+SpacesBeforeTrailingComments: 2
+MaxEmptyLinesToKeep: 2
+KeepEmptyLinesAtTheStartOfBlocks: false
+ReflowComments: false
+SortIncludes: Never
+IncludeBlocks: Preserve
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: true
+InsertBraces: false
+PenaltyReturnTypeOnItsOwnLine: 200
+AlignConsecutiveShortCaseStatements:
+  Enabled: true
+  AcrossEmptyLines: false
+  AcrossComments: true
+  AlignCaseColons: false

@@ -28,6 +28,16 @@ import time
 TRANS = bytes(range(8))  # a distinctive client transmit timestamp
 
 
+def now_stamp():
+    """This host's clock as an NTP timestamp, fraction included.
+
+    The box measures its serve path from the transmit stamps clients send, so a
+    made-up fraction reads there as half a second of path jitter.
+    """
+    t = time.time() + 2208988800
+    return struct.pack(">II", int(t), int((t % 1) * 2**32))
+
+
 def request(transmit=TRANS, version=4, mode=3, poll=0):
     hdr = bytearray(48)
     hdr[0] = (version << 3) | mode
@@ -126,7 +136,7 @@ def exchange(host, origin=b"\x00" * 8, receive=b"\x00" * 8, transmit=None):
     accidentally also equal to transmit, which would be read as a basic request.
     """
     if transmit is None:
-        transmit = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
+        transmit = now_stamp()
     hdr = bytearray(request(transmit))
     hdr[24:32] = origin
     hdr[32:40] = receive
@@ -149,8 +159,8 @@ def interleaved_section(host):
     # 2. A request whose origin is the previous receive timestamp is interleaved:
     #    the reply must echo that as origin and carry the *previous* transmit
     #    timestamp, not a fresh one.
-    t1 = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
-    receive = struct.pack(">II", int(time.time()) + 2208988800, random.getrandbits(32))
+    t1 = now_stamp()
+    receive = now_stamp()
     second = exchange(host, origin=t2_first, receive=receive, transmit=t1)
     if second is None:
         print("second (interleaved)              NO REPLY")
@@ -167,8 +177,8 @@ def interleaved_section(host):
     if third is None:
         print("reused origin                     NO REPLY")
     else:
-        print(f"reused origin                     origin_echo={third[24:32] == t3_first} "
-              f"(basic reply echoes our transmit; interleaved would echo our receive)")
+        print(f"reused origin                     origin_is_our_transmit={third[24:32] == t1} "
+              f"(must be True: a consumed receive timestamp gets a basic reply)")
 
     # 4. Basic requests stay basic: an origin nobody knows.
     junk = struct.pack(">II", 1, 2)
@@ -189,13 +199,30 @@ def interleaved_section(host):
         return
     t2_fresh, t3_fresh = fresh[32:40], fresh[40:48]
     time.sleep(2.2)
-    same = struct.pack(">II", int(time.time()) + 2208988800, 7)
+    same = now_stamp()
     fifth = exchange(host, origin=t2_fresh, receive=same, transmit=same)
     if fifth is None:
         print("receive == transmit               NO REPLY")
     else:
         print(f"receive == transmit               replayed_old_transmit="
               f"{fifth[40:48] == t3_fresh} (must be False: basic)")
+
+    # 6. An RFC 5905 client echoes the previous *transmit* as its origin, with a
+    #    receive that differs from its transmit. That is a basic request, and a
+    #    server keyed on the transmit timestamp answers it interleaved -- with an
+    #    origin the client then rejects as bogus.
+    prior = exchange(host)
+    if prior is None:
+        print("echoed transmit (basic client)    NO REPLY")
+        return
+    time.sleep(2.2)
+    t1 = now_stamp()
+    sixth = exchange(host, origin=prior[40:48], receive=prior[32:40], transmit=t1)
+    if sixth is None:
+        print("echoed transmit (basic client)    NO REPLY")
+    else:
+        print(f"echoed transmit (basic client)    origin_is_our_transmit={sixth[24:32] == t1} "
+              f"(must be True: basic)")
 
     print(f"  check /healthz ntp_interleaved_served increments, and "
           f"ntp_tx_correction_us is a plausible few-microsecond figure")
@@ -219,6 +246,9 @@ def control(host, opcode, associd=0, data=b"", sequence=None):
 def mode6(host, opcode, associd=0, data=b"", label=""):
     """Send a control request and check the reply honours the protocol."""
     payload, sequence = control(host, opcode, associd, data)
+    # Control queries share the rate limiter with everything else now, and this
+    # section follows the burst that empties it: one token arrives every 2 s.
+    time.sleep(2.1)
     reply = ask(host, payload, timeout=2.0)
     if reply is None:
         print(f"{label:<34} NO REPLY")
@@ -288,6 +318,7 @@ def control_section(host):
     # not none: answering the whole document here would hide the omission.
     payload, sequence = control(host, 2, 0, b"stratum,refid")
     payload = payload[:10] + b"\x00\x00" + payload[12:]
+    time.sleep(2.1)
     reply = ask(host, payload, timeout=2.0)
     if reply is None:
         print(f"{'readvar, count 0':<34} NO REPLY")
