@@ -483,6 +483,7 @@ void GpsTime::onNavSat(const ubx::Frame &f)
      * stack, because this runs on the GPS task and 32 entries is 256 bytes of
      * it. What changed is only how long the lock is held, not where the data
      * lives. */
+    m_satsSeq.fetch_add(1, std::memory_order_release); /* odd: rows in flux */
     for (uint8_t i = 0; i < walk; ++i) {
         const std::size_t sv  = 8 + 12 * static_cast<std::size_t>(i);
         const uint8_t     cno = f.u8(sv + 2);
@@ -522,6 +523,7 @@ void GpsTime::onNavSat(const ubx::Frame &f)
     m_satCount   = kept;
     m_navSatAtUs = esp_timer_get_time();
     portEXIT_CRITICAL(&m_mux);
+    m_satsSeq.fetch_add(1, std::memory_order_release);
 }
 
 void GpsTime::onNavSvin(const ubx::Frame &f)
@@ -579,6 +581,7 @@ void GpsTime::onNavSvin(const ubx::Frame &f)
 
 void GpsTime::onNavPvt(const ubx::Frame &f)
 {
+    m_statusDue = true; /* this second's facts are in: publish after the read */
     /* The first 24 bytes carry everything used here; the decoder has already
      * held the frame to its full 92. */
     const uint8_t valid = f.u8(11);

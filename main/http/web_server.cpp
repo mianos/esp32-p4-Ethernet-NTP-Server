@@ -787,6 +787,8 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
     doc.AddItem("servo_clamps", static_cast<double>(gps.servoClamps));
     doc.AddItem("edge_spikes", static_cast<double>(gps.edgeSpikes));
     doc.AddItem("edge_outliers", static_cast<double>(gps.edgeOutliers));
+    doc.AddItem("status_seq", static_cast<double>(gps.snapshotSeq));
+    doc.AddItem("status_age_ms", static_cast<double>(gps.snapshotAgeUs) / 1000.0);
     /* Edges the trust test refused outright, and whether the newest one passed.
      * A spike is an edge that landed a millisecond or more from where it was
      * expected, and an outlier one refused for being 20 us from the fit; a reject
@@ -960,6 +962,8 @@ static constexpr const char *kPolled[] = {
     "servo_clamps",
     "edge_spikes",
     "edge_outliers",
+    "status_seq",
+    "status_age_ms",
     "tie_max_ns",
     "tie_rms_ns",
     "pvt_nano_ns",

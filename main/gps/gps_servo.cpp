@@ -329,25 +329,28 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
             missing = kSampleRing;
         }
         for (uint32_t i = 0; i < missing; ++i) {
-            portENTER_CRITICAL(&m_mux);
-            Sample &slot  = m_samples[m_sampleSeq % kSampleRing];
-            slot.seq      = m_sampleSeq;
-            slot.epoch    = epoch - missing + i;
-            slot.kind     = 1;
-            slot.offsetNs = 0;
-            slot.ratePpb  = m_ratePpb;
             /* The row has no measurement, but the seconds it covers were still
              * served: their bound is the one in force at the time, which is the
              * current budget plus the wander over the age of that particular
              * second. Leaving it zero said "no uncertainty here" about seconds
-             * that had nothing but the crystal behind them. */
-            const int64_t ageUs = static_cast<int64_t>(epoch) - slot.epoch;
-            slot.dispersionNs   = static_cast<uint32_t>(
-                clamp(dispersionNs(ageUs * 1000000, unobservedNs()), 0, UINT32_MAX));
-            slot.jitterNs = 0;
-            slot.flags    = 0;
-            slot.sats     = 0;
-            slot.fix      = 0;
+             * that had nothing but the crystal behind them. Worked out before
+             * the lock, like the measured row's below. */
+            const int64_t  ageS     = static_cast<int64_t>(missing - i);
+            const uint32_t gapBound = static_cast<uint32_t>(
+                clamp(dispersionNs(ageS * 1000000, unobservedNs()), 0, UINT32_MAX));
+
+            portENTER_CRITICAL(&m_mux);
+            Sample &slot      = m_samples[m_sampleSeq % kSampleRing];
+            slot.seq          = m_sampleSeq;
+            slot.epoch        = epoch - missing + i;
+            slot.kind         = 1;
+            slot.offsetNs     = 0;
+            slot.ratePpb      = m_ratePpb;
+            slot.dispersionNs = gapBound;
+            slot.jitterNs     = 0;
+            slot.flags        = 0;
+            slot.sats         = 0;
+            slot.fix          = 0;
             ++m_sampleSeq;
             if (m_sampleSeq - m_sampleOldest > kSampleRing) {
                 m_sampleOldest = m_sampleSeq - kSampleRing;
@@ -356,23 +359,26 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
         }
     }
 
-    portENTER_CRITICAL(&m_mux);
-    Sample &slot  = m_samples[m_sampleSeq % kSampleRing];
-    slot.seq      = m_sampleSeq;
-    slot.epoch    = epoch;
-    slot.kind     = 0;
-    slot.offsetNs = static_cast<int32_t>(clamp(offsetNs, INT32_MIN, INT32_MAX));
-    slot.ratePpb  = m_ratePpb;
     /* The bound this reference states about the packet it would have built for
      * this second, from the same terms status() uses. Recorded at the instant
      * of the sample, so the age term is zero and the wander arrives later, in
-     * the rows a holdover generates. */
-    slot.dispersionNs =
+     * the rows a holdover generates. Worked out before the lock: it reads a
+     * clock and takes the serve path's own lock on the way. */
+    const uint32_t boundNs =
         static_cast<uint32_t>(clamp(dispersionNs(0, unobservedNs()), 0, UINT32_MAX));
-    slot.jitterNs = static_cast<uint16_t>(clamp(m_jitterNs, 0, UINT16_MAX));
-    slot.flags    = m_timTpFlags;
-    slot.sats     = m_satCount;
-    slot.fix      = m_fixType;
+
+    portENTER_CRITICAL(&m_mux);
+    Sample &slot      = m_samples[m_sampleSeq % kSampleRing];
+    slot.seq          = m_sampleSeq;
+    slot.epoch        = epoch;
+    slot.kind         = 0;
+    slot.offsetNs     = static_cast<int32_t>(clamp(offsetNs, INT32_MIN, INT32_MAX));
+    slot.ratePpb      = m_ratePpb;
+    slot.dispersionNs = boundNs;
+    slot.jitterNs     = static_cast<uint16_t>(clamp(m_jitterNs, 0, UINT16_MAX));
+    slot.flags        = m_timTpFlags;
+    slot.sats         = m_satCount;
+    slot.fix          = m_fixType;
     ++m_sampleSeq;
     if (m_sampleSeq - m_sampleOldest > kSampleRing) {
         m_sampleOldest = m_sampleSeq - kSampleRing;
@@ -385,21 +391,27 @@ void GpsTime::recordSample(uint32_t epoch, int64_t offsetNs)
 size_t GpsTime::drainSamples(uint32_t since, Sample *out, size_t max, uint32_t &first,
                              uint32_t &last, uint32_t &lost) const
 {
-    portENTER_CRITICAL(&m_mux);
-    const uint32_t newest = m_sampleSeq; /* one past the last written */
-    first                 = m_sampleOldest;
+    /* No lock. The GPS task is the only writer and moves the sequence on after
+     * a record is complete, so everything below `newest` is whole; a record is
+     * only overwritten 900 s after it was written, and each copy is checked
+     * against its own sequence number in case this reader was away that long. */
+    const uint32_t newest = m_sampleSeq.load(std::memory_order_acquire);
+    const uint32_t oldest = m_sampleOldest.load(std::memory_order_acquire);
+    first                 = oldest;
     last                  = newest == 0 ? 0 : newest - 1;
-    if (since == 0 || since < m_sampleOldest) {
-        lost  = since == 0 ? 0 : m_sampleOldest - since;
-        since = m_sampleOldest;
+    if (since == 0 || since < oldest) {
+        lost  = since == 0 ? 0 : oldest - since;
+        since = oldest;
     } else {
         lost = 0;
     }
     size_t copied = 0;
     for (uint32_t seq = since; seq < newest && copied < max; ++seq) {
-        out[copied++] = m_samples[seq % kSampleRing];
+        out[copied] = m_samples[seq % kSampleRing];
+        if (out[copied].seq == seq) {
+            ++copied;
+        }
     }
-    portEXIT_CRITICAL(&m_mux);
     return copied;
 }
 
