@@ -4,6 +4,7 @@
  */
 #include "gps/gps_internal.h"
 
+#include "gps/pps_latency.h"
 
 using namespace gps_detail;
 
@@ -19,6 +20,9 @@ void GpsTime::anchor(time_t second)
     ppsMonoNs = m_ppsMonoNs;
     ppsPtpNs  = m_ppsPtpNs;
     ppsCount  = m_ppsCount;
+    /* Before qErr moves it: the latency probe holds the stamp the handler took,
+     * not the corrected edge. */
+    const int64_t rawPpsMonoUs = ppsMonoUs;
     /* The edge's own quantisation, from the TIM-TP that described this pulse.
      * Convention is corrected = captured - qErr (gnssdo, qerr.rs); the sawtooth
      * is the receiver only being able to place an edge on its own clock's grid.
@@ -146,7 +150,24 @@ void GpsTime::anchor(time_t second)
      * count below -- across a holdover the prediction has been running on the
      * crystal and its error is the thing being measured. See kEdgeOutlierNs. */
     const int64_t errorNs = static_cast<int64_t>(second) * 1000000000 - predictedNs;
-    const bool    outlier = spaced && hadAnchor && rateKnown && gapUs < kLockWindowUs &&
+
+    /* The edge's wait for the interrupt next to its distance from the fit, and
+     * only when one of the two is worth looking at. An error that tracks the
+     * wait is core 1 having been held off; one without it is the receiver
+     * having moved the pulse. The overhead is logged so it can be subtracted. */
+    if (rateKnown) {
+        int64_t latencyNs = 0;
+        if (pps_latency::forEdge(rawPpsMonoUs, &latencyNs) &&
+            (latencyNs >= 2000 || (hadAnchor && (errorNs >= 4000 || errorNs <= -4000)))) {
+            pps_latency::Stats probe      = {};
+            const int64_t      overheadNs = pps_latency::stats(&probe) ? probe.minNs : 0;
+            ESP_LOGW(TAG, "edge latency %lld ns (overhead %lld), %+lld ns from the fit",
+                     static_cast<long long>(latencyNs), static_cast<long long>(overheadNs),
+                     static_cast<long long>(errorNs));
+        }
+    }
+
+    const bool outlier = spaced && hadAnchor && rateKnown && gapUs < kLockWindowUs &&
                          (errorNs > kEdgeOutlierNs || errorNs < -kEdgeOutlierNs);
     const bool trusted = spaced && !outlier;
 

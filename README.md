@@ -519,6 +519,10 @@ that does have a rate knob; that is the next step.
   interrupt, is on core 0, so a masked stretch in the network stack or the heap
   cannot hold the edge off. IDF's tick, idle task and flash-write parking still
   run on core 1. `tasks` and `intr` on the console show who is where.
+- What the interrupt itself cost is measured, not inferred. A GPTimer capture is
+  latched by the edge through the ETM and read at the top of the handler;
+  `pps_latency_*` publishes the result, and its `min` is the two reads' own
+  overhead. Nothing is corrected with it yet.
 - Between edges the anchor is extended with `esp_timer_get_time()`, corrected by
   the servo's rate, so what is left is the fit's residual — 2 µs measured across
   a two-and-a-half-minute holdover — instead of 30 µs of crystal error per
@@ -889,6 +893,7 @@ the box. See `viewer/README.md`.
 | `gps_time.h` | the `GpsTime` class: everything below is its implementation |
 | `gps_internal.h` | the wiring (`kTxPin`, `kRxPin`, `kPpsPin`), windows and limits the parts share |
 | `gps_time.cpp` | UART1 and the PPS interrupt, start-up, the task loop, the request setters |
+| `pps_latency.{cpp,h}` | how long the edge waited for its interrupt, captured in hardware |
 | `gps_receiver.cpp` | configuring the module: the burst, the baud scan, time mode and position hold, send-and-wait |
 | `gps_frames.cpp` | one handler per UBX message |
 | `gps_servo.cpp` | the anchor, the rate fit, the served time, the uncertainty budget, the slew |

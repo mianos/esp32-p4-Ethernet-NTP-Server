@@ -1,0 +1,225 @@
+#include "gps/pps_latency.h"
+
+#include <atomic>
+#include <cstring>
+#include <inttypes.h>
+
+#include "driver/gpio_etm.h"
+#include "driver/gptimer.h"
+#include "driver/gptimer_etm.h"
+#include "esp_etm.h"
+#include "esp_log.h"
+
+namespace pps_latency {
+namespace {
+
+constexpr const char *TAG = "pps_latency";
+
+/* The timer runs from PLL_F80M, so a tick is 12.5 ns; the division keeps the
+ * result in whole nanoseconds without a floating point multiply in the ISR. */
+constexpr int64_t  kTicksToNsNum = 125;
+constexpr int64_t  kTicksToNsDen = 10;
+constexpr uint32_t kResolutionHz = 80000000;
+
+/* An interrupt that took longer than this did not merely wait behind a masked
+ * stretch, so the capture belongs to an earlier edge or none at all. */
+constexpr int64_t kMaxPlausibleNs = 100000;
+
+/* Upper edges of the buckets, in ns. The sixth bucket is unbounded. */
+constexpr int64_t kBucketNs[] = {1000, 2000, 5000, 10000, 20000};
+constexpr int     kBuckets    = 6;
+
+gptimer_handle_t         s_timer;
+esp_etm_channel_handle_t s_channel;
+esp_etm_event_handle_t   s_event;
+esp_etm_task_handle_t    s_task;
+
+/* The ISR is the only writer. It brackets a whole update with an odd then an
+ * even sequence, because the 64-bit fields are not atomic on RV32 and readers
+ * run on the other core. */
+std::atomic<uint32_t> s_seq{0};
+uint32_t              s_edges;
+uint32_t              s_unmatched;
+int64_t               s_lastStampUs;
+int64_t               s_lastNs = -1;
+int64_t               s_minNs  = INT64_MAX;
+int64_t               s_maxNs;
+uint32_t              s_hist[kBuckets];
+
+void teardown()
+{
+    if (s_channel != nullptr) {
+        esp_etm_channel_disable(s_channel);
+        esp_etm_del_channel(s_channel);
+        s_channel = nullptr;
+    }
+    if (s_timer != nullptr) {
+        gptimer_stop(s_timer);
+        gptimer_disable(s_timer);
+    }
+    if (s_task != nullptr) {
+        esp_etm_del_task(s_task);
+        s_task = nullptr;
+    }
+    if (s_event != nullptr) {
+        esp_etm_del_event(s_event);
+        s_event = nullptr;
+    }
+    if (s_timer != nullptr) {
+        gptimer_del_timer(s_timer);
+        s_timer = nullptr;
+    }
+}
+
+}  // namespace
+
+esp_err_t begin(const int pin)
+{
+    if (s_timer != nullptr) {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "step: timer");
+    gptimer_config_t timer = {};
+    timer.clk_src          = GPTIMER_CLK_SRC_PLL_F80M;
+    timer.direction        = GPTIMER_COUNT_UP;
+    timer.resolution_hz    = kResolutionHz;
+    esp_err_t err          = gptimer_new_timer(&timer, &s_timer);
+
+    ESP_LOGI(TAG, "step: event");
+    if (err == ESP_OK) {
+        gpio_etm_event_config_t event = {};
+        event.edge                    = GPIO_ETM_EVENT_EDGE_POS;
+        err                           = gpio_new_etm_event(&event, &s_event);
+    }
+    ESP_LOGI(TAG, "step: bind");
+    if (err == ESP_OK) {
+        err = gpio_etm_event_bind_gpio(s_event, pin);
+    }
+    ESP_LOGI(TAG, "step: task");
+    if (err == ESP_OK) {
+        gptimer_etm_task_config_t task = {};
+        task.task_type                 = GPTIMER_ETM_TASK_CAPTURE;
+        err                            = gptimer_new_etm_task(s_timer, &task, &s_task);
+    }
+    ESP_LOGI(TAG, "step: channel");
+    if (err == ESP_OK) {
+        esp_etm_channel_config_t channel = {};
+        err                              = esp_etm_new_channel(&channel, &s_channel);
+    }
+    ESP_LOGI(TAG, "step: connect");
+    if (err == ESP_OK) {
+        err = esp_etm_channel_connect(s_channel, s_event, s_task);
+    }
+    /* The timer is started before the channel is enabled, or an edge in between
+     * would capture while it is stopped. */
+    ESP_LOGI(TAG, "step: enable");
+    if (err == ESP_OK) {
+        err = gptimer_enable(s_timer);
+    }
+    ESP_LOGI(TAG, "step: start");
+    if (err == ESP_OK) {
+        err = gptimer_start(s_timer);
+    }
+    ESP_LOGI(TAG, "step: channel enable");
+    if (err == ESP_OK) {
+        err = esp_etm_channel_enable(s_channel);
+    }
+    if (err != ESP_OK) {
+        teardown();
+        return err;
+    }
+
+    ESP_LOGI(TAG, "GPIO%d: hardware capture at %" PRIu32 " Hz, latency in 12.5 ns ticks", pin,
+             kResolutionHz);
+    return ESP_OK;
+}
+
+void IRAM_ATTR onEdge(const int64_t stampUs)
+{
+    if (s_timer == nullptr) {
+        return;
+    }
+
+    /* The captured register first: the raw read is a software capture into that
+     * same register and would overwrite it. */
+    uint64_t captured = 0;
+    uint64_t raw      = 0;
+    if (gptimer_get_captured_count(s_timer, &captured) != ESP_OK ||
+        gptimer_get_raw_count(s_timer, &raw) != ESP_OK) {
+        return;
+    }
+    const int64_t ns = (static_cast<int64_t>(raw) - static_cast<int64_t>(captured)) *
+                       kTicksToNsNum / kTicksToNsDen;
+
+    const uint32_t seq = s_seq.load(std::memory_order_relaxed) + 1;
+    s_seq.store(seq, std::memory_order_relaxed);
+    s_lastStampUs = stampUs;
+    ++s_edges;
+    if (ns < 0 || ns > kMaxPlausibleNs) {
+        ++s_unmatched;
+        /* Not this edge's figure, so the next lookup must not use it either. */
+        s_lastNs = -1;
+    } else {
+        s_lastNs = ns;
+        if (ns < s_minNs) {
+            s_minNs = ns;
+        }
+        if (ns > s_maxNs) {
+            s_maxNs = ns;
+        }
+        int bucket = 0;
+        while (bucket < kBuckets - 1 && ns >= kBucketNs[bucket]) {
+            ++bucket;
+        }
+        ++s_hist[bucket];
+    }
+    s_seq.store(seq + 1, std::memory_order_release);
+}
+
+bool forEdge(const int64_t stampUs, int64_t *ns)
+{
+    if (s_timer == nullptr || ns == nullptr) {
+        return false;
+    }
+    for (;;) {
+        const uint32_t before = s_seq.load(std::memory_order_acquire);
+        if ((before & 1u) != 0) {
+            continue;
+        }
+        const bool    match = s_lastNs >= 0 && s_lastStampUs == stampUs;
+        const int64_t value = s_lastNs;
+        if (s_seq.load(std::memory_order_acquire) == before) {
+            if (match) {
+                *ns = value;
+            }
+            return match;
+        }
+    }
+}
+
+bool stats(Stats *out)
+{
+    if (s_timer == nullptr || out == nullptr) {
+        return false;
+    }
+    for (;;) {
+        const uint32_t before = s_seq.load(std::memory_order_acquire);
+        if ((before & 1u) != 0) {
+            continue;
+        }
+        Stats copy     = {};
+        copy.edges     = s_edges;
+        copy.unmatched = s_unmatched;
+        copy.lastNs    = s_lastNs;
+        copy.minNs     = s_minNs == INT64_MAX ? 0 : s_minNs;
+        copy.maxNs     = s_maxNs;
+        std::memcpy(copy.hist, s_hist, sizeof copy.hist);
+        if (s_seq.load(std::memory_order_acquire) == before) {
+            *out = copy;
+            return true;
+        }
+    }
+}
+
+}  // namespace pps_latency

@@ -23,6 +23,7 @@
 #include "app/config_apply.h"
 #include "net/eth_link.h"
 #include "gps/gps_time.h"
+#include "gps/pps_latency.h"
 #include "net/net_log.h"
 #include "net/net_state.h"
 #include "ntp/ntp_server.h"
@@ -798,6 +799,21 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
     doc.AddItem("last_edge_trusted", gps.lastEdgeTrusted);
     doc.AddItem("tie_max_ns", gps.tieMaxNs);
     doc.AddItem("tie_rms_ns", gps.tieRmsNs);
+    /* How long the edge waited for its interrupt, captured in hardware at the
+     * edge. The same question as tie_* asks, but of the stamp rather than the
+     * fit; min is the two reads' own cost and belongs subtracted. */
+    pps_latency::Stats latency = {};
+    if (pps_latency::stats(&latency)) {
+        doc.AddItem("pps_latency_last_ns", static_cast<double>(latency.lastNs));
+        doc.AddItem("pps_latency_min_ns", static_cast<double>(latency.minNs));
+        doc.AddItem("pps_latency_max_ns", static_cast<double>(latency.maxNs));
+        doc.AddItem("pps_latency_edges", static_cast<double>(latency.edges));
+        doc.AddItem("pps_latency_unmatched", static_cast<double>(latency.unmatched));
+        doc.AddItem("pps_latency_hist",
+                    std::format("{}/{}/{}/{}/{}/{}", latency.hist[0], latency.hist[1],
+                                latency.hist[2], latency.hist[3], latency.hist[4],
+                                latency.hist[5]));
+    }
     /* Where the pulse sits and where the solution epoch sits, which are not the
      * same question and, in fixed mode, are not both zero: `pvt_nano_ns` is
      * NAV-PVT's own offset into the second it names and `pulse_offset_ns` is
@@ -966,6 +982,7 @@ static constexpr const char *kPolled[] = {
     "status_age_ms",
     "tie_max_ns",
     "tie_rms_ns",
+    "pps_latency_max_ns",
     "pvt_nano_ns",
     "pulse_offset_ns",
     "pulse_on_second",

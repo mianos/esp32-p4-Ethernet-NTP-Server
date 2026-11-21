@@ -630,8 +630,10 @@ private:
                                     const mcpwm_capture_event_data_t *edge, void *arg);
     /* Both edge paths end here: one from a plain interrupt stamp, one from the
      * capture's latched tick. The gates are shared so the suppression hook and
-     * the spacing rule cannot be bypassed by one of them. */
-    void        recordEdge(int64_t edgeNs);
+     * the spacing rule cannot be bypassed by one of them. The PHC half of the
+     * anchor is passed in because the stamping handler has to take it before
+     * any lock. */
+    void        recordEdge(int64_t edgeNs, int64_t edgePhcNs);
     esp_err_t   beginCapture();
     esp_err_t   beginInterruptEdge();
     esp_err_t   beginEdge();

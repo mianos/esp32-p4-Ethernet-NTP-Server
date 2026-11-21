@@ -1,5 +1,7 @@
 #include "gps/gps_internal.h"
 
+#include "gps/pps_latency.h"
+
 using namespace gps_detail;
 
 GpsTime &GpsTime::instance()
@@ -72,7 +74,7 @@ void GpsTime::requestReset(bool cold, bool hardware, bool powerCycle)
     m_resetReq   = true;
 }
 
-void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
+void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs, const int64_t edgePhcNs)
 {
     const int64_t nowUs = edgeNs / 1000;
     /* Stamped here rather than in the capture handler because this is the path
@@ -83,12 +85,6 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
      * without the lock sees the change and reads them again. */
     m_edgeSeq.fetch_add(1, std::memory_order_release);
     m_lastEdgeUs = nowUs;
-
-    /* The same edge in the 1588 counter's base, read before the lock rather
-     * than under it: the other core can hold m_mux for the length of a status
-     * copy, and a read taken after that wait put the counter's anchor late by
-     * the wait while the esp_timer stamp, taken on entry, was not. */
-    const int64_t edgePhcNs = ptp::hardware() ? ptp::nowNs() : 0;
 
     portENTER_CRITICAL_ISR(&m_mux);
     /* The POST /gps/pps hook swallows the edge here rather than further up, so
@@ -110,7 +106,8 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs)
 
 /* The fallback edge handler, used only if the capture timer cannot be set up.
  * Stamps with esp_timer at whole-microsecond resolution, so the residual
- * carries the interrupt latency. */
+ * carries the interrupt latency; pps_latency measures how much of it there
+ * was. */
 void IRAM_ATTR GpsTime::ppsIsr(void *arg)
 {
     auto *self = static_cast<GpsTime *>(arg);
@@ -118,7 +115,19 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
      * lets this handler be an IRAM interrupt: an OTA write disables the flash
      * cache for milliseconds at a time, and an edge landing in that window must
      * not be a crash. */
-    self->recordEdge(esp_timer_get_time() * 1000);
+    const int64_t stampUs = esp_timer_get_time();
+
+    /* The same edge in the 1588 counter's base, read before the lock rather
+     * than under it: the other core can hold m_mux for the length of a status
+     * copy, and a read taken after that wait put the counter's anchor late by
+     * the wait while the esp_timer stamp, taken on entry, was not. */
+    const int64_t edgePhcNs = ptp::hardware() ? ptp::nowNs() : 0;
+
+    /* After the stamp and the PHC read, so neither waits on the two timer
+     * registers, and before recordEdge, which is where the anchor is set. */
+    pps_latency::onEdge(stampUs);
+
+    self->recordEdge(stampUs * 1000, edgePhcNs);
 }
 
 /* The edge as the capture peripheral latched it.
@@ -139,6 +148,10 @@ bool IRAM_ATTR GpsTime::ppsCapIsr(mcpwm_cap_channel_handle_t,
     auto         *self = static_cast<GpsTime *>(arg);
     const int64_t atUs = esp_timer_get_time();
 
+    /* See ppsIsr: the PHC half of the anchor is taken before anything that can
+     * wait. */
+    const int64_t edgePhcNs = ptp::hardware() ? ptp::nowNs() : 0;
+
     /* The software catch below runs this handler again a tick or two later.
      * Real edges are a second apart, so anything this close is that echo. The
      * store itself is in recordEdge, which both handlers reach. */
@@ -157,7 +170,7 @@ bool IRAM_ATTR GpsTime::ppsCapIsr(mcpwm_cap_channel_handle_t,
         }
     }
 
-    self->recordEdge(edgeNs);
+    self->recordEdge(edgeNs, edgePhcNs);
     return false;
 }
 
@@ -184,6 +197,10 @@ esp_err_t GpsTime::beginEdge()
         ESP_LOGE(TAG, "GPIO%d: %s -- no PPS", static_cast<int>(kPpsPin), esp_err_to_name(err));
         return err;
     }
+
+    /* The latency probe is armed from app_main() once the link is up, so its
+     * failure is readable over the network console. It measures the interrupt
+     * stamp below; the capture path does not need it. */
 
     err = kCaptureEdge ? beginCapture() : ESP_ERR_NOT_SUPPORTED;
     if (err != ESP_OK) {

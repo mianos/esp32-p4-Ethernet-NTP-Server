@@ -10,6 +10,7 @@ idf_component_register(SRCS "app/config_apply.cpp"
                             "gps/gps_servo.cpp"
                             "gps/gps_status.cpp"
                             "gps/gps_time.cpp"
+                            "gps/pps_latency.cpp"
                             "gps/ubx.cpp"
                             "http/web_server.cpp"
                             "net/eth_link.cpp"
@@ -25,6 +26,7 @@ idf_component_register(SRCS "app/config_apply.cpp"
                        PRIV_REQUIRES console esp_eth esp_netif esp_http_server nvs_flash
                                      esp_app_format app_update esp_timer lwip
                                      esp_driver_uart esp_driver_gpio esp_driver_mcpwm
+                                     esp_driver_gptimer
                        INCLUDE_DIRS ".")
 
 # IDF's -Wall leaves these as warnings, and dead code then only surfaces when a
