@@ -177,8 +177,8 @@ def interleaved_section(host):
     if third is None:
         print("reused origin                     NO REPLY")
     else:
-        print(f"reused origin                     origin_echo={third[24:32] == t3_first} "
-              f"(basic reply echoes our transmit; interleaved would echo our receive)")
+        print(f"reused origin                     origin_is_our_transmit={third[24:32] == t1} "
+              f"(must be True: a consumed receive timestamp gets a basic reply)")
 
     # 4. Basic requests stay basic: an origin nobody knows.
     junk = struct.pack(">II", 1, 2)
@@ -246,6 +246,9 @@ def control(host, opcode, associd=0, data=b"", sequence=None):
 def mode6(host, opcode, associd=0, data=b"", label=""):
     """Send a control request and check the reply honours the protocol."""
     payload, sequence = control(host, opcode, associd, data)
+    # Control queries share the rate limiter with everything else now, and this
+    # section follows the burst that empties it: one token arrives every 2 s.
+    time.sleep(2.1)
     reply = ask(host, payload, timeout=2.0)
     if reply is None:
         print(f"{label:<34} NO REPLY")
@@ -315,6 +318,7 @@ def control_section(host):
     # not none: answering the whole document here would hide the omission.
     payload, sequence = control(host, 2, 0, b"stratum,refid")
     payload = payload[:10] + b"\x00\x00" + payload[12:]
+    time.sleep(2.1)
     reply = ask(host, payload, timeout=2.0)
     if reply is None:
         print(f"{'readvar, count 0':<34} NO REPLY")
