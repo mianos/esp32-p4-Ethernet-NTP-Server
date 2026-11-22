@@ -137,15 +137,7 @@ void GpsTime::publishStatus()
     StatusExtras &ex = slot.extra;
     st               = StatusData{};
 
-    {
-        const uint32_t lo = systimer_ll_get_counter_value_low(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);
-        const uint32_t hi =
-            systimer_ll_get_counter_value_high(&SYSTIMER, SYSTIMER_COUNTER_ESPTIMER);
-        st.ticksPerUs = static_cast<uint32_t>(systimer_us_to_ticks(1));
-        st.tickUsDelta =
-            static_cast<int64_t>(systimer_ticks_to_us((static_cast<uint64_t>(hi) << 32) | lo)) -
-            esp_timer_get_time();
-    }
+    st.ticksPerUs = static_cast<uint32_t>(systimer_us_to_ticks(1));
 
     EdgeWords edge;
     readEdge(edge);

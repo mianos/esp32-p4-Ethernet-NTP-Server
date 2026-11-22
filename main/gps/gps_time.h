@@ -296,7 +296,6 @@ public:
          * k at 2^k seconds. Zero where the window is too short to reach it, and
          * the count below says how many samples stand behind the numbers. */
         uint32_t ticksPerUs  = 0; /* systimer ticks in a microsecond, as IDF converts it */
-        int64_t  tickUsDelta = 0; /* ticks-derived microseconds minus esp_timer's */
 
         /* Link health, which was the one thing with no observation at all. At
          * 9600 baud the wire is the scarcest resource here, and until now a

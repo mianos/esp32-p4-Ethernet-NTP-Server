@@ -863,7 +863,6 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
      * stopped. */
     doc.AddItem("baud", static_cast<double>(gps.baud));
     doc.AddItem("ticks_per_us", static_cast<double>(gps.ticksPerUs));
-    doc.AddItem("tick_us_delta", static_cast<double>(gps.tickUsDelta));
     doc.AddItem("recent_frames", gps.recentFrames);
     {
         doc.AddItem("baud_dup", static_cast<double>(gps.baud));

@@ -21,8 +21,6 @@
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "esp_private/systimer.h"
-#include "hal/systimer_ll.h"
-#include "soc/systimer_struct.h"
 #include "esp_cpu.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
