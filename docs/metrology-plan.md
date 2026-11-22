@@ -8,18 +8,16 @@ they are.
 
 | | now |
 |---|---|
-| reference | u-blox LEA-M8T, `CFG-TP5` 1 Hz asserted, `NAV-TIM-TP` refused, position surveyable |
-| discipline | PPS edge → anchor + least-squares rate over 300 anchors, open loop |
-| serving | NTPv4 stratum 1, root delay 2 µs, dispersion 2 µs + 1 ppm/s |
-| timestamps | **software**, taken after `recvfrom()` returns |
-| internal offset | ~30 µs between `CLOCK_REALTIME` and the anchor |
-| PPS jitter | published as `tp_jitter_ns`, from the servo's own residuals |
-| sky | 22 satellites, median C/N0 26 dBHz, site wander 26–30 m |
-| holdover | anchor + measured rate, demotion after 10 min, no oscillator model |
+| reference | u-blox LEA-M8T, `CFG-TP5` 1 Hz asserted, `TIM-TP` qErr applied, position surveyable |
+| discipline | PPS edge (interrupt latency excess removed) → anchor + least-squares rate over 300 anchors; rate pushed into the PHC, PHC phase stepped onto the edge |
+| serving | NTPv4 stratum 1 from the PHC, root delay 0, dispersion ~43 µs + 1 ppm/s; PTP two-step master |
+| timestamps | **hardware** receive and transmit (1588 unit) |
+| PPS jitter | TIE ~300 ns rms over the fit window |
+| sky | 37 satellites with GPS+Galileo+GLONASS+QZSS, site scatter 26–30 m |
+| holdover | anchor + measured rate; demoted by the 400 µs dispersion gate after about 6 min |
 
-That is a good stratum-1 NTP server and it is not metrology. Three things
-separate them: the timestamps are software, nothing states an uncertainty budget,
-and nothing independent checks the output.
+Still short of metrology: no independent reference checks the output, and the
+dispersion is a bound rather than a measured uncertainty budget.
 
 ## 1. The ladder
 
@@ -54,10 +52,9 @@ receiver).
 Acceptance: an ADEV curve at two known temperatures, reproducible across two
 sessions.
 
-## 3. Phase 1 — hardware timestamps
+## 3. Phase 1 — hardware timestamps (shipped)
 
-IDF 6.0 exposes more than the README used to say. The P4's EMAC has an IEEE 1588
-unit, and there is no driver patch in it:
+The P4's EMAC has an IEEE 1588 unit, usable without a driver patch:
 
 | API | gives |
 |---|---|
@@ -110,17 +107,16 @@ p95 for an hour, survives a PPS pull for the first minute of holdover, and a
 GPS-only client sees no regression.
 
 Shipped as a two-step master and a slave, with hardware stamps and the announce
-quality derived from the reference. Still short of the acceptance above: the
-p95 has only been measured over software stamps on a veth (~200 us), and the
-MAC has an occasional transmit stall that a watchdog now clears. The 500 ns
-figure needs a host with a timestamping NIC bridged on the segment.
+quality derived from the reference. With a hardware-stamping host (igc NIC,
+`ptp4l -2 -s`) a few minutes of lock gave offsets of about 19 ns rms; the
+one-hour p95 and the PPS-pull test have not been run. The MAC has an occasional
+transmit stall that a watchdog clears.
 
 ## 5. Phase 3 — one clock, stated properly
 
-- The PHC becomes the served clock for both NTP and PTP; `CLOCK_REALTIME` is
-  slewed to it, no longer the source of anything served.
-- Steer the PHC in ppb from PPS phase, rate-limited, keeping the 100 ms guard and
-  200 ppm clamp in the new time base.
+- Done: the PHC is the served clock for NTP and PTP, rate-steered from the fit,
+  with its phase stepped onto the PPS edge in 10 µs steps.
+- Open: steer the phase through the rate instead of stepping it.
 - Uncertainty becomes a published number: base (PPS quantisation from `qErr`,
   cable, position, PHY asymmetry) plus growth while unlocked. That is what
   `rootDispersion` should be.

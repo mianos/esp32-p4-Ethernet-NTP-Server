@@ -1,44 +1,28 @@
-# Chrony configuration for a client of this box. Drop-in; no `prefer`.
+# Chrony configuration for a client of this box.
 #
-# The box is a stratum-1 GPS reference one cable away, and it beats a pool by
-# four orders of magnitude of distance while it is sane. It has also returned
-# 134 ms of confidently-wrong time for two and a half hours while claiming
-# 2.4 us, so it must be able to lose. Without `prefer`, chrony ranks on distance
-# and does exactly that within minutes; with `prefer` it keeps taking it.
+# No `prefer`: the box once served 134 ms of wrong time for hours while
+# claiming 2.4 us, and without `prefer` chrony can outvote it.
 #
-# Named, not addressed: the box holds a static DHCP reservation, so the name
-# survives an address change instead of the client going quietly stale. The
-# suffix is left off and comes from the resolver's search domain; write it in
-# full on a client that has none.
+# Named, not addressed, so an address change does not leave the client stale;
+# the domain comes from the resolver's search list.
 #
-# Internet sources stay as the fallback for a reboot, a lost fix or a dead box.
-# chrony needs no mark removed to switch back.
+# `xleave` (RFC 9769 interleaved mode) makes chrony use the MAC-measured
+# transmit timestamp of the previous reply. Without it the transmit field is
+# written before the frame leaves, which showed as an 85 us bias on a test
+# client. The box falls back to basic replies when it has lost the exchange;
+# `chronyc ntpdata <addr>` shows `Interleaved: yes`, and the box counts them in
+# `ntp_interleaved_served`.
 
-server esp32p4-ntp iburst minpoll 4 maxpoll 6
+server esp32p4-ntp iburst minpoll 4 maxpoll 6 xleave
 
-# Interleaved mode (RFC 9769) is the interesting experiment with this box, and
-# it is off by default because it is the one part of it that other servers do
-# not all speak. Adding `xleave` to the line above makes chrony ask for the
-# *measured* transmit timestamp of the previous reply instead of a prediction of
-# the current one, which removes the server's processing interval from the
-# measurement rather than bounding it. The box answers in that mode and falls
-# back to basic replies whenever it has lost the exchange, so a mixed
-# environment is safe; `chronyc ntpdata <addr>` then reports `Interleaved: yes`
-# and `/healthz` on the box counts them in `ntp_interleaved_served`.
-#
-# server esp32p4-ntp iburst minpoll 4 maxpoll 6 xleave
-
-# Fallbacks. minpoll 5 is 32 s, which is plenty for a source that should rarely
-# be needed.
+# Fallbacks, polled every 32 s or slower.
 pool 2.debian.pool.ntp.org iburst minpoll 5 maxpoll 7
 server time.cloudflare.com iburst minpoll 5 maxpoll 7
 server time.apple.com      iburst minpoll 5 maxpoll 7
 
-# Step only for gross errors: a jump of a second is a fault, not drift, and
-# slewing it would take twenty minutes.
+# Step only for gross errors.
 makestep 1.0 3
 
-# Never trust a source that claims more than this.
 maxdistance 16.0
 
 driftfile /var/lib/chrony/chrony.drift

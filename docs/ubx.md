@@ -51,29 +51,21 @@ straddling a read was invisible, and it re-read the same bytes once per frame.
 
 ## Definitions
 
-`ubx.h` carries a table of `{class, id, minLen, maxLen, name}` for the messages
-this firmware decodes, and the decoder enforces it. Handlers read named fields
-(`f.u4(8)`) rather than open-coding offsets with a length guard apiece, so "is
-this long enough for the field I am about to read" is answered once, in the
-table, instead of in a guard somebody has to keep in step with the offsets
-below it.
+`ubx.h` carries a table of `{class, id, minLen, maxLen, name}`, and the decoder
+drops a listed message whose length is outside its range, so those handlers read
+fields without their own length checks.
 
-Messages outside the table are delivered ungated. The gate exists to protect the
-readers of specific fields, not to police the protocol, and u-center sends plenty
-this firmware has no opinion about.
+Messages outside the table are delivered ungated. Several decoded ones are not
+in it (NAV-DOP, NAV-CLOCK, NAV-STATUS, the MON-IO/RXBUF/TXBUF/MSGPP/RF group) and
+check their own length; MON-RF's handler does not.
 
 ## Buffer
 
 `kMaxPayload` is 512. A frame claiming more, or a known message claiming a
 length outside its definition, is dropped the moment the length is read
 (`gps_dropped_len`) and the two length bytes go back through the sync hunt.
-It used to be walked to its end, on the grounds that one over-long message
-should cost a frame and not the stream -- but the length is sixteen bits that
-nothing has checked yet. A frame cut short on the line runs into the next
-frame's sync pair, `B5 62` reads as 25269, and the decoder sat through 25 KB of
-good stream: five minutes with no frames, a baud scan, and a reset of a receiver
-that had never stopped. NAV-SAT and TIM-SVIN are the largest decoded; both are
-far below the limit.
+Walking it instead let a truncated frame read the next sync pair `B5 62` as a
+length of 25269 and swallow 25 KB of good stream.
 
 ## The bridge
 
@@ -92,8 +84,8 @@ looks for:
 
 Five seconds without a frame sets the baud scan going again
 (`gps_rescans` at `/healthz`). The decoder is reset and the rate that was
-working keeps its full fifteen seconds before the scan moves off it. A u-center session holds the port and must not have
-its rate moved underneath it, so the bridge suppresses the rescan while attached.
+working keeps its full fifteen seconds before the scan moves off it. The rescan
+is suppressed while a u-center client is attached.
 
 ## Tests
 
@@ -111,4 +103,4 @@ description, with the TIM 1.10 dialect for `NAV-TIMELS` and `TIM-SVIN`. The layo
 of the definition table follows [pyubx2](https://github.com/semuconsulting/pyubx2)
 (BSD-3-Clause, © semuadmin); the framing follows [gpsd](https://gitlab.com/gpsd/gpsd)'s
 `driver_ubx.c` (BSD-2-Clause). Neither is vendored — the tables here are
-hand-written for the thirteen messages used — but both were read.
+hand-written — but both were read.
