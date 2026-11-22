@@ -1,3 +1,7 @@
+/* Compiles this file's ESP_LOGD lines in; they stay hidden until raised with
+ * the console's `loglevel` command. */
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include "ntp/tx_lag.h"
 
 #include <algorithm>
@@ -110,7 +114,7 @@ void TxLag::absorb(int64_t lag)
     m_lagNs.store(median, std::memory_order_relaxed);
     m_scatterNs.store(deviations[m_ringFill / 2], std::memory_order_relaxed);
 
-    ESP_LOGI(TAG, "txprobe raw %lld us  median %.1f  mad %.1f  n %u", (long long)(lag / 1000),
+    ESP_LOGD(TAG, "txprobe raw %lld us  median %.1f  mad %.1f  n %u", (long long)(lag / 1000),
              lagUs(), scatterUs(), (unsigned)n);
 }
 
@@ -145,7 +149,7 @@ void TxLag::reportReplies()
     }
 
     const auto pct = [&](double p) { return sorted[static_cast<uint32_t>(p * (filled - 1))]; };
-    ESP_LOGI(TAG, "replypath n %u p10 %.1f med %.1f p90 %.1f us%s", (unsigned)filled,
+    ESP_LOGD(TAG, "replypath n %u p10 %.1f med %.1f p90 %.1f us%s", (unsigned)filled,
              pct(0.10) / 1000.0, pct(0.50) / 1000.0, pct(0.90) / 1000.0,
              flooded > 0 ? " (flooded)" : "");
 }

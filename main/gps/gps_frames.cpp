@@ -1,3 +1,7 @@
+/* Compiles this file's ESP_LOGD lines in; they stay hidden until raised with
+ * the console's `loglevel` command. */
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 /* One handler per UBX message, called once a frame has passed its checksum
  * and length checks. */
 #include "gps/gps_internal.h"
@@ -68,7 +72,7 @@ void GpsTime::onFrame(const ubx::Frame &frame)
     /* The first dozen frames, to see what the receiver actually sends. */
     if (m_framesLogged < 12) {
         ++m_framesLogged;
-        ESP_LOGI(TAG, "frame %02x/%02x len %u", cls, id, static_cast<unsigned>(frame.len));
+        ESP_LOGD(TAG, "frame %02x/%02x len %u", cls, id, static_cast<unsigned>(frame.len));
     }
 
     if (cls == 0x05 && (id == 0x00 || id == 0x01)) { /* UBX-ACK-ACK / UBX-ACK-NAK */
@@ -360,7 +364,7 @@ void GpsTime::onMonHw(const ubx::Frame &f)
     /* Logged when it changes; CFG-ANT names these pins. */
     if (pinSel != m_pinsLogged) {
         m_pinsLogged = pinSel;
-        ESP_LOGW(TAG, "receiver pins: sel 0x%08lx dir 0x%08lx val 0x%08lx",
+        ESP_LOGI(TAG, "receiver pins: sel 0x%08lx dir 0x%08lx val 0x%08lx",
                  static_cast<unsigned long>(pinSel), static_cast<unsigned long>(pinDir),
                  static_cast<unsigned long>(pinVal));
     }
@@ -652,12 +656,9 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     if (!m_timTpLogged) {
         m_timTpLogged = true;
         if (qErrInvalid) {
-            ESP_LOGW(TAG,
-                     "NAV-TIM-TP flowing but qErr is flagged invalid: root delay stays "
-                     "the named %lld us",
-                     static_cast<long long>(kIsrLatencyNs / 1000));
+            ESP_LOGW(TAG, "TIM-TP flowing but qErr is flagged invalid: not applied");
         } else {
-            ESP_LOGI(TAG, "NAV-TIM-TP flowing: the receiver states %.3f us of pulse quantisation",
+            ESP_LOGI(TAG, "TIM-TP flowing: the receiver states %.3f us of pulse quantisation",
                      static_cast<double>(qErrNs) / 1000.0);
         }
     }

@@ -567,10 +567,7 @@ void GpsTime::logLockChange()
         portENTER_CRITICAL(&m_mux);
         m_qErrValid = false;
         portEXIT_CRITICAL(&m_mux);
-        ESP_LOGW(TAG,
-                 "NAV-TIM-TP stopped 10 s ago: the pulse's quantisation is no longer stated, "
-                 "root delay falls back to the named %lld us",
-                 static_cast<long long>(kIsrLatencyNs / 1000));
+        ESP_LOGW(TAG, "TIM-TP stopped 10 s ago: qErr no longer applied");
     }
 }
 

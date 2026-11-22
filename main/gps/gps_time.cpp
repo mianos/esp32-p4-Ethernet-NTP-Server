@@ -173,8 +173,10 @@ esp_err_t GpsTime::beginEdge()
 
     err = kCaptureEdge ? beginCapture() : ESP_ERR_NOT_SUPPORTED;
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "MCPWM capture unavailable (%s): falling back to an interrupt stamp",
-                 esp_err_to_name(err));
+        if (kCaptureEdge) {
+            ESP_LOGW(TAG, "MCPWM capture unavailable (%s): falling back to an interrupt stamp",
+                     esp_err_to_name(err));
+        }
         /* Without the probe the edge still works, uncorrected. */
         const esp_err_t probe = pps_latency::begin(kPpsPin);
         if (probe != ESP_OK) {
@@ -231,7 +233,7 @@ esp_err_t GpsTime::beginInterruptEdge()
         err = gpio_isr_handler_add(kPpsPin, &GpsTime::ppsIsr, this);
     }
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "PPS edge: GPIO interrupt on core %d (stamp on entry, latency included)",
+        ESP_LOGI(TAG, "PPS edge: GPIO interrupt on core %d (stamp on entry)",
                  static_cast<int>(xPortGetCoreID()));
     }
     return err;

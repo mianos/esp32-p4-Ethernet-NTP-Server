@@ -1,3 +1,7 @@
+/* Compiles this file's ESP_LOGD lines in; they stay hidden until raised with
+ * the console's `loglevel` command. */
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include "ntp/ntp_server.h"
 
 #include "app/cores.h"
@@ -855,7 +859,7 @@ void NtpServer::reportServePath(int64_t nowUs)
         return;
     }
     m_serveReportUs = nowUs;
-    ESP_LOGI(TAG, "servepath kept %u family %u origin-zero %u out-of-range %u",
+    ESP_LOGD(TAG, "servepath kept %u family %u origin-zero %u out-of-range %u",
              static_cast<unsigned>(m_serveWhy[0]), static_cast<unsigned>(m_serveWhy[1]),
              static_cast<unsigned>(m_serveWhy[2]), static_cast<unsigned>(m_serveWhy[3]));
     m_serveWhy[0] = m_serveWhy[1] = m_serveWhy[2] = m_serveWhy[3] = 0;
@@ -870,7 +874,7 @@ void NtpServer::reportServePath(int64_t nowUs)
         }
         const uint8_t *ip     = reinterpret_cast<const uint8_t *>(&s.addr);
         const int64_t  halfNs = (s.maxNs - s.minNs) / 2;
-        ESP_LOGI(TAG, "servepath %u.%u.%u.%u n %u half %.1f us centre %.1f us", ip[0], ip[1], ip[2],
+        ESP_LOGD(TAG, "servepath %u.%u.%u.%u n %u half %.1f us centre %.1f us", ip[0], ip[1], ip[2],
                  ip[3], static_cast<unsigned>(s.count), static_cast<double>(halfNs) / 1000.0,
                  static_cast<double>(s.minNs + s.maxNs) / 2000.0);
         halves[clients++] = halfNs;
@@ -987,7 +991,7 @@ void NtpServer::serveLoop()
         static bool toldStamp = false;
         if (len >= 0 && !toldStamp) {
             toldStamp = true;
-            ESP_LOGI(TAG, "arrival stamp: %s family %d peerLen %u port %u peer0 %02x%02x",
+            ESP_LOGD(TAG, "arrival stamp: %s family %d peerLen %u port %u peer0 %02x%02x",
                      hardware ? "hardware" : "software", static_cast<int>(from.ss_family),
                      static_cast<unsigned>(peerLen), static_cast<unsigned>(peerPort), peer[0],
                      peer[1]);
@@ -1176,7 +1180,7 @@ void NtpServer::serveLoop()
             /* Publish the completed window's rate before clearing it. */
             m_ratePerMin.store((winAnswered * 60000u) / kReportEveryMs, std::memory_order_relaxed);
             if (winAnswered != 0 || winKod != 0 || winDropped != 0) {
-                ESP_LOGI(TAG, "answered %u, KoD %u, dropped %u in the last %u s", winAnswered,
+                ESP_LOGD(TAG, "answered %u, KoD %u, dropped %u in the last %u s", winAnswered,
                          winKod, winDropped, kReportEveryMs / 1000);
             }
             m_ilSaved.store(pairs.m_saved, std::memory_order_relaxed);

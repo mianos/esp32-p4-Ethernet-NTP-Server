@@ -1,3 +1,7 @@
+/* Compiles this file's ESP_LOGD lines in; they stay hidden until raised with
+ * the console's `loglevel` command. */
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 #include "ptp/ptp.h"
 
 #include "soc/emac_dma_struct.h"
@@ -87,10 +91,6 @@ void recordRx(const uint8_t *mac, const uint8_t *addr, uint8_t addrLen, uint16_t
 
     ++s_stats.rxStamps;
     s_stats.lastNs = ns;
-    if (s_stats.rxStamps <= 20) {
-        ESP_LOGW(TAG, "record port %u from %u.%u.%u.%u", static_cast<unsigned>(port), addr[0],
-                 addr[1], addr[2], addr[3]);
-    }
 }
 
 /* Record the stamp of a UDP datagram to port 123, IPv4 or IPv6. */
@@ -668,7 +668,7 @@ esp_err_t enable(bool restart)
 
     s_enabled        = true;
     ptp::gHardwareOn = true;
-    ESP_LOGI(TAG, "phc running, 25 ns steps, started from %u.%09u",
+    ESP_LOGI(TAG, "phc running, 40 ns steps, started from %u.%09u",
              static_cast<unsigned>(start.seconds), static_cast<unsigned>(start.nanoseconds));
     return ESP_OK;
 }
@@ -958,7 +958,7 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
     static bool firstLogged = false;
     if (!firstLogged) {
         firstLogged = true;
-        ESP_LOGI(TAG, "first raw send: %u bytes to %u.%u.%u.%u:%u, %s",
+        ESP_LOGD(TAG, "first raw send: %u bytes to %u.%u.%u.%u:%u, %s",
                  static_cast<unsigned>(total), dstAddr[0], dstAddr[1], dstAddr[2], dstAddr[3],
                  static_cast<unsigned>(dstPort), esp_err_to_name(err));
     }
@@ -1009,7 +1009,7 @@ bool takeRx(const uint8_t *addr, size_t addrLen, uint16_t port, Rx *out)
     if (found) {
         ++s_stats.hits;
     } else if (s_stats.hits == 0) {
-        ESP_LOGW(TAG, "takeRx miss port %u addrLen %u (best age %lld ns; %u recorded)",
+        ESP_LOGD(TAG, "takeRx miss port %u addrLen %u (best age %lld ns; %u recorded)",
                  static_cast<unsigned>(port), static_cast<unsigned>(addrLen),
                  static_cast<long long>(age), static_cast<unsigned>(s_stats.rxStamps));
     }

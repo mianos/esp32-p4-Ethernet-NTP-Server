@@ -1,3 +1,7 @@
+/* Compiles this file's ESP_LOGD lines in; they stay hidden until raised with
+ * the console's `loglevel` command. */
+#define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
+
 /* Anchoring, the rate fit, served time, the error budget and the system clock
  * slew. */
 #include "gps/gps_internal.h"
@@ -624,7 +628,7 @@ bool GpsTime::now(struct timespec &ts) const
             static bool told = false;
             if (!told) {
                 told = true;
-                ESP_LOGI(TAG, "phc anchor: phc elapsed %lld ns, mono elapsed %lld ns",
+                ESP_LOGD(TAG, "phc anchor: phc elapsed %lld ns, mono elapsed %lld ns",
                          static_cast<long long>(elapsedNs),
                          static_cast<long long>(esp_timer_get_time() * 1000 - monoUs * 1000));
             }
