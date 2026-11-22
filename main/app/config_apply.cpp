@@ -38,8 +38,6 @@ void config_apply::afterChange(const std::string &hostnameBefore, bool logChange
 {
     Settings &settings = Settings::instance();
 
-    /* The sink first: a changed logHost is usually the reason the box is being
-     * reconfigured at all, and it is harmless if nothing else changed. */
     if (logChanged) {
         net_log::start();
     }
@@ -47,19 +45,14 @@ void config_apply::afterChange(const std::string &hostnameBefore, bool logChange
         hostname(settings.hostname());
     }
 
-    /* Addressing before the clock: a new address is what makes the box
-     * reachable again, and the responders bind to all addresses anyway. */
+    /* Addressing before the clock: it is what makes the box reachable again. */
     EthernetLink::instance().applySettings();
 
-    /* The arbiter goes before the client: leaving "auto" has to hand the clock
-     * back before NtpTime decides whether a client should be running at all. */
+    /* ClockSource before NtpTime, so leaving "auto" hands the clock back first. */
     ClockSource::instance().applySettings();
     NtpTime::instance().applySettings();
-    /* And so does serveNtp: off stops the responder, on starts it. */
     NtpServer::instance().applySettings();
-    /* PTP is decided entirely by these three keys. A changed domain or priority
-     * has to reach the Announce, and the mode test below never restarted for
-     * one, so they are handed over directly. */
+    /* Domain and priority1 are passed to a running PTP task directly. */
     ptp::setIdentity(settings.ptpDomain(), settings.ptpPriority1());
     const std::string &mode   = settings.ptpMode();
     ptp::Mode          wanted = ptp::Mode::Off;

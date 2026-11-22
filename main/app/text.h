@@ -1,26 +1,7 @@
-/* Text in and out of C++ types, without the C library's habit of trusting the
- * caller.
- *
- * The two jobs here are the two the printf family did badly. `put` formats into
- * storage whose size is part of its type: the bounds are checked while the
- * compiler can still see them, the specifier and the argument types cannot
- * disagree, and a value that does not fit is truncated rather than corrupting
- * what follows. `getList` is the read side: from_chars cannot walk past the end
- * of the string it was given, and it names the field that failed instead of
- * returning a bare count that every caller then had to compare against its own
- * number.
- *
- * Fixed storage rather than std::string is deliberate where a value is shared
- * between tasks: an array of char is POD, so it can be copied under a spinlock
- * without allocating in a critical section. It is the storage that is C, not the
- * code around it.
- *
- * Parsing is strict on purpose. A field must be followed by the delimiter or by
- * the end of the string, so "12x" is an error and not a 12, and the field count
- * has to match exactly -- a settings string that has grown a field is a
- * different thing from one that changed a value, and the old code silently
- * took the first n.
- */
+/* Bounded formatting into fixed buffers (put) and strict parsing (getList).
+ * Fixed char buffers can be copied under a spinlock without allocating.
+ * getList needs exactly the right number of fields, each followed by the
+ * separator or the end, so "12x" is an error. */
 #pragma once
 
 #include <array>
@@ -35,8 +16,7 @@
 
 namespace text {
 
-/* A size in the type, for the reason in the header comment. One less than N is
- * always available to the terminator, so a full buffer is still a string. */
+/* Fixed-size buffer; the last byte is kept for the terminator. */
 template <std::size_t N> using Buf = std::array<char, N>;
 
 template <std::size_t N, typename... Args>
@@ -47,9 +27,7 @@ void put(Buf<N> &dst, std::format_string<Args...> fmt, Args &&...args)
     *r.out       = '\0';
 }
 
-/* A char array is what the C APIs in the SDK take, so both shapes are accepted:
- * put() on a Buf, and this on the three places that hand the address straight to
- * lwIP or inet_ntop. */
+/* For C APIs that take a char array. */
 template <std::size_t N, typename... Args>
 void put(char (&dst)[N], std::format_string<Args...> fmt, Args &&...args)
 {
@@ -58,9 +36,8 @@ void put(char (&dst)[N], std::format_string<Args...> fmt, Args &&...args)
     *r.out       = '\0';
 }
 
-/* Split `text` on `sep` into exactly sizeof...(Ts) numbers. All or nothing: a
- * short field list, a long one, an empty field or trailing junk all return false
- * and leave the outputs as they were found. */
+/* Split `text` on `sep` into exactly sizeof...(Ts) numbers. On any error the
+ * outputs are left unchanged and false is returned. */
 template <typename... Ts> bool getList(std::string_view text, char sep, Ts &...out)
 {
     auto        fields = std::array<std::string_view, sizeof...(Ts)>{};
@@ -93,10 +70,7 @@ template <typename... Ts> bool getList(std::string_view text, char sep, Ts &...o
     return ok;
 }
 
-/* Whole numbers in and out of a wire frame. UBX is little-endian on every
- * field and so is the target, so this is a memcpy with the size taken from the
- * type rather than written next to it -- which is where the "4" and the
- * uint16_t beside it drift apart. */
+/* Little-endian field access (UBX and the target), sized by the type. */
 template <typename T> void putLe(std::uint8_t *at, T v)
 {
     static_assert(std::is_integral_v<T> || std::is_enum_v<T>, "putLe is for whole numbers");

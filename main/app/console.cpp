@@ -16,7 +16,6 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 
-
 #include "cmd_nvs.h"
 #include "cmd_system.h"
 
@@ -34,8 +33,7 @@ namespace {
 
 constexpr const char *TAG = "console";
 
-/* Filled by start(), never at static-init time: Settings opens an NVS handle,
- * and NVS is not initialised until app_main has run. */
+/* Filled by start(): Settings needs NVS, which is initialised in app_main. */
 struct Context {
     Settings     *settings = nullptr;
     EthernetLink *link     = nullptr;
@@ -43,23 +41,15 @@ struct Context {
 
 Context s_ctx;
 
-/* The port has two states: a log stream, which is the default, or a prompt for
- * a debug session. `console on` means "give me the prompt" and holds the log
- * while it is up; `console off` returns to the stream.
+/* The port is either a log stream (default) or a prompt: `console on` holds
+ * the log and shows a prompt, `console off` returns to the stream.
  *
- * The console component's own REPL task is created but never started. It is
- * blocked on its start notification, which is the point: a REPL that is running
- * sits in a blocking UART read, and that pending read takes input out of the
- * driver for a task that may not be able to run it. Reading here, in one task
- * that dispatches through esp_console_run(), keeps exactly one reader on the
- * port. It also avoids linenoise's terminal probes -- the `ESC[6n` cursor
- * queries that arrive as input and get chewed as commands.
- *
- * The cost is line editing: backspace works, arrows and history do not. */
+ * The console component's REPL task is created but never started, so this task
+ * is the only reader of the UART and linenoise's terminal probes (ESC[6n)
+ * never arrive as input. Backspace works; arrows and history do not. */
 constexpr const char *kPrompt = "ntp> ";
 
 bool s_prompted = false;
-/* The level to come back to when the prompt goes away again. */
 esp_log_level_t s_logLevel = ESP_LOG_INFO;
 
 int cmdConsole(void *, int argc, char **argv)
@@ -100,9 +90,7 @@ int cmdConsole(void *, int argc, char **argv)
     return 0;
 }
 
-/* The one reader. A prompt is printed only when one has been asked for, and the
- * line is dispatched through the same entry point the REPL uses, so the command
- * layer is unchanged. */
+/* The only UART reader; dispatches through esp_console_run(). */
 void readerTask(void *)
 {
     std::string line;
@@ -164,13 +152,9 @@ void printAddressing()
     std::printf("link    : %s\n", net_state::linkUp() ? "up" : "down");
 }
 
-/* The one write path: a document, applyJson(), save, and the shared hook
- * sequence.
- *
- * Success is judged on the key's value afterwards, not on the blob having
- * changed. Setting something to what it already was is a legitimate no-op --
- * `net static` re-issued with the stored address has to keep going and set the
- * mode -- while a value applyJson refused leaves a different one behind. */
+/* Set one key through applyJson(), save, and reapply. Success means the key
+ * holds the value afterwards, so re-setting the current value succeeds and a
+ * refused value fails. */
 bool applyOne(const char *key, const std::string &value)
 {
     if (s_ctx.settings == nullptr) {
@@ -180,9 +164,7 @@ bool applyOne(const char *key, const std::string &value)
 
     const std::string host = s_ctx.settings->hostname();
 
-    /* Refused before it is applied. applyJson shortens a long value and keeps
-     * it, so the comparison below then said "nothing changed" about a value
-     * that was now live in RAM and would ride out on the next save. */
+    /* Refused here: applyJson would truncate it and keep it. */
     if (std::strcmp(key, "hostname") != 0 && value.size() > Settings::kMaxValueLen) {
         std::printf("'%s': value longer than %u characters -- nothing changed\n", key,
                     static_cast<unsigned>(Settings::kMaxValueLen));
@@ -193,7 +175,6 @@ bool applyOne(const char *key, const std::string &value)
     doc.AddItem(key, value);
     s_ctx.settings->applyJson(doc);
 
-    /* The only field applyJson is allowed to shorten. */
     const std::string wanted =
         std::strcmp(key, "hostname") == 0 ? value.substr(0, Settings::kMaxHostnameLen) : value;
     std::string now;
@@ -257,7 +238,7 @@ int cmdNet(void *, int argc, char **argv)
         }
     }
 
-    /* Mode last: nothing tries to program a half-written address. */
+    /* Mode last, so the address is complete before it is used. */
     if (!applyOne("ipAddress", argv[2]) || !applyOne("ipGateway", argv[3]) ||
         !applyOne("ipMode", "static")) {
         return 1;
@@ -267,7 +248,6 @@ int cmdNet(void *, int argc, char **argv)
     return 0;
 }
 
-/* Print, set or reset the whole config. */
 int cmdConfig(void *, int argc, char **argv)
 {
     if (s_ctx.settings == nullptr) {
@@ -281,8 +261,7 @@ int cmdConfig(void *, int argc, char **argv)
             std::printf("%s\n", compact.c_str());
             return 0;
         }
-        /* Readable, because this is the one place a person reads the whole
-         * config. cJSON is already a dependency of the settings store. */
+        /* Pretty-printed, since this is where a person reads the whole config. */
         cJSON *root   = cJSON_Parse(compact.c_str());
         char  *pretty = root != nullptr ? cJSON_Print(root) : nullptr;
         if (pretty != nullptr) {
@@ -332,7 +311,6 @@ int cmdHostname(void *, int argc, char **argv)
         std::printf("hostname: %s\n", s_ctx.settings->hostname().c_str());
         return 0;
     }
-    /* applyJson truncates past the cap, so this only says what happened. */
     if (std::strlen(argv[1]) > Settings::kMaxHostnameLen) {
         std::printf("at most %u characters -- truncating\n",
                     static_cast<unsigned>(Settings::kMaxHostnameLen));
@@ -429,10 +407,7 @@ int cmdLog(void *, int argc, char **argv)
     return applyOne("logHost", argv[1]) && applyOne("logPort", argv[2]) ? 0 : 1;
 }
 
-/* What the box is doing, in one screen. The console's value is that it works
- * when the network does not, so the first thing it should be able to do is say
- * what is wrong -- without this you read the log and guess. Read-only: every
- * line here is something the HTTP surface also reports. */
+/* Status in one screen; everything here is also in /healthz. */
 int cmdStatus(void *, int, char **)
 {
     if (s_ctx.settings == nullptr) {
@@ -465,8 +440,7 @@ int cmdStatus(void *, int, char **)
     return 0;
 }
 
-/* The link, and the recovery for it. A wedged MAC is the one fault that takes
- * the HTTP surface with it, so it needs a way back that does not use it. */
+/* MAC restart without HTTP, for a wedged link. */
 int cmdEth(void *, int argc, char **argv)
 {
     if (s_ctx.link == nullptr) {
@@ -489,9 +463,8 @@ int cmdEth(void *, int argc, char **argv)
     return err == ESP_OK ? 0 : 1;
 }
 
-/* The receiver's own controls. The settings behind them are reachable through
- * `config set`; what is not is *starting* something -- and a survey that will
- * never converge is exactly what wants stopping from a cable. */
+/* Receiver commands that start or stop something; settings are under
+ * `config set`. */
 int cmdGps(void *, int argc, char **argv)
 {
     GpsTime &gps = GpsTime::instance();
@@ -554,8 +527,7 @@ int cmdGps(void *, int argc, char **argv)
         }
         char      *end  = nullptr;
         const long mask = std::strtol(argv[2], &end, 16);
-        /* The same seven constellation bits HTTP takes, and nothing after
-         * the number. */
+        /* The same 7-bit mask HTTP takes. */
         if (end == argv[2] || *end != '\0' || mask <= 0 || mask > 0x7F) {
             std::printf("'%s' is not a hex mask, 1..7f\n", argv[2]);
             return 1;
@@ -569,8 +541,7 @@ int cmdGps(void *, int argc, char **argv)
             std::printf("usage: gps suppress <seconds>  (0 to stop)\n");
             return 1;
         }
-        /* The same hour HTTP allows, and digits only: "-1" through strtoul is
-         * 136 years of ignored edges, and a typo read as 0 ends a running test. */
+        /* The same limit as HTTP, digits only: strtoul would read "-1" as huge. */
         char               *end    = nullptr;
         const unsigned long parsed = std::strtoul(argv[2], &end, 10);
         if (argv[2][0] < '0' || argv[2][0] > '9' || *end != '\0' || parsed > 3600) {
@@ -624,7 +595,6 @@ esp_err_t console::start()
     esp_console_repl_config_t repl = ESP_CONSOLE_REPL_CONFIG_DEFAULT();
     repl.prompt                    = "ntp>";
     repl.max_cmdline_length        = 512;
-    /* The default 4096 is thin for stdio plus argtable. */
     repl.task_stack_size = 6144;
     repl.task_core_id    = cores::kWork;
 
@@ -651,10 +621,7 @@ esp_err_t console::start()
         "suppress <s> | defaults]",
         cmdGps);
 
-    /* Whichever transport the console is configured for. It is UART0 on this
-     * board -- the USB-C port is a CH343 bridge wired to it, the same cable
-     * esptool flashes through -- but the chain costs nothing and keeps the file
-     * honest if the wiring ever changes. */
+    /* UART0 on this board (the USB-C port is a CH343 bridge to it). */
     esp_console_repl_t *handle = nullptr;
     esp_err_t           err    = ESP_FAIL;
 #if defined(CONFIG_ESP_CONSOLE_UART_DEFAULT) || defined(CONFIG_ESP_CONSOLE_UART_CUSTOM)
@@ -672,8 +639,7 @@ esp_err_t console::start()
         ESP_LOGE(TAG, "repl: %s", esp_err_to_name(err));
         return err;
     }
-    /* Deliberately not esp_console_start_repl(): the REPL task stays parked on
-     * its notification while the reader below owns the port. */
+    /* The REPL task stays parked; the reader task owns the port. */
     (void)handle;
 
     if (xTaskCreatePinnedToCore(&readerTask, "console_in", 6144, nullptr, 5, nullptr,

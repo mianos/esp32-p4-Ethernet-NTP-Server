@@ -12,17 +12,11 @@
 
 namespace {
 
-/* The same namespace/key the hand-written implementation used, so an existing
- * stored blob is still read. */
+/* NVS namespace and key, kept from the earlier implementation. */
 constexpr const char *kNvsNamespace = "settings";
 constexpr const char *kNvsKey       = "config";
 
-/* The keys POST /config accepts. Anything else in the body is ignored, as it
- * always was. */
-/* Writable through POST /config. gpsFixedPos is here because a known antenna
- * position should be provisioned rather than surveyed: it is the one input that
- * lets the receiver stop solving for itself, which is what the interface
- * description asks for before any timing claim. */
+/* Keys POST /config accepts; others are ignored. */
 constexpr const char *kKeys[] = {"hostname",    "tz",          "timeSource", "ntpServer",
                                  "serveNtp",    "gpsFixedPos", "logHost",    "logPort",
                                  "ipMode",      "ipAddress",   "ipGateway",  "ipDns",
@@ -62,14 +56,10 @@ Settings::Settings(NvsStorageManager &nvs) : SettingsBase(nvs, kNvsKey)
     field("ipGateway", m_ipGateway);
     field("ipDns", m_ipDns);
 
-    /* A new TZ string takes effect immediately, including after POST
-     * /config/reset. Safe to attach here: it only touches this object and the C
-     * library. */
+    /* Applies at once, including after a reset. */
     onChange("tz", [this] { applyTimezone(); });
-    /* The log sink is deliberately *not* started from onChange: settings load
-     * happens before lwIP exists, and socket() with no tcpip thread asserts
-     * "Invalid mbox" on every boot. The POST handler starts it instead, and the
-     * lease starts it again at boot. */
+    /* Not started from onChange: settings load before lwIP exists, and socket()
+     * then asserts. POST /config and the first address start it. */
     onChange("timeSource", [this] {
         m_timeSourceEnum.store(parseTimeSource(m_timeSource), std::memory_order_relaxed);
     });
@@ -80,13 +70,10 @@ Settings::Settings(NvsStorageManager &nvs) : SettingsBase(nvs, kNvsKey)
 void Settings::begin()
 {
     load();  // stored blob over the defaults (SettingsBase)
-    /* Counted before anything else can fail, and saved at once: the interesting
-     * boot is the one that does not reach the end. */
+    /* Counted and saved first, so a boot that crashes is still counted. */
     m_boots = std::to_string(std::strtoul(m_boots.c_str(), nullptr, 10) + 1);
     save();
-    /* The onChange hooks only fire for a field that actually changed, so a
-     * stored value equal to the default would never reach the atomics without
-     * this. */
+    /* onChange only fires on a change, so seed the atomics from stored values. */
     m_timeSourceEnum.store(parseTimeSource(m_timeSource), std::memory_order_relaxed);
     m_serveNtpOn.store(m_serveNtp == "on", std::memory_order_relaxed);
     applyTimezone();  // before the first timestamped log line
@@ -162,8 +149,7 @@ bool Settings::validAddressing(const char *key, const std::string &value)
         return false;
     }
 
-    /* Only the two quad-shaped keys are checked here; everything else in
-     * kKeys validates itself or not at all. */
+    /* Only the address keys are checked here. */
     if (std::strcmp(key, "ipGateway") != 0 && std::strcmp(key, "ipDns") != 0) {
         return true;
     }
@@ -177,8 +163,7 @@ bool Settings::validAddressing(const char *key, const std::string &value)
 
 void Settings::applyJson(const JsonWrapper &doc)
 {
-    /* SettingsBase applies whatever keys it sees, so cap the values on the way
-     * in: a hand-crafted 4 kB body would otherwise sit in NVS forever. */
+    /* Cap values so an oversized body cannot fill NVS. */
     JsonWrapper capped;
     for (const char *key : kKeys) {
         std::string value;
@@ -188,17 +173,13 @@ void Settings::applyJson(const JsonWrapper &doc)
             }
             continue;
         }
-        /* The hostname has a smaller cap than the rest: esp_netif_set_hostname()
-         * refuses more than 32 bytes, and at boot that refusal is fatal, so the
-         * limit has to be applied where the value is stored. */
+        /* See kMaxHostnameLen. */
         const size_t limit = std::strcmp(key, "hostname") == 0 ? kMaxHostnameLen : kMaxValueLen;
         if (value.size() > limit) {
             ESP_LOGW(TAG, "'%s' truncated to %u characters", key, static_cast<unsigned>(limit));
             value.resize(limit);
         }
-        /* Addressing is validated here rather than in eth_link.cpp, so a bad
-         * value never reaches NVS and never survives a reboot. An empty string
-         * is a legitimate way to clear a gateway or a resolver. */
+        /* Validated before it reaches NVS. Empty clears a gateway or resolver. */
         if (!validAddressing(key, value)) {
             continue;
         }

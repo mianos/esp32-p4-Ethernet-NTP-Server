@@ -1,39 +1,16 @@
-/*
- * esp32p4-ntp -- the boot sequence, and nothing else.
+/* esp32p4-ntp boot sequence. Board: Waveshare ESP32-P4-ETH (IP101GRI PHY, RMII).
  *
- * Board: Waveshare ESP32-P4-ETH (ESP32-P4NRW32 + IP101GRI 10/100 PHY on RMII).
- * The RJ45 is the only interface the P4 has -- no radio -- so everything
- * field-facing hangs off it: the DHCP lease, the clock the NTP responder
- * serves, and the HTTP surface that configures it.
+ * Order matters:
+ *   1. NVS, then Settings, which are stored there.
+ *   2. The serial console, before anything that can hang.
+ *   3. esp_netif and the default event loop, which EthernetLink needs.
+ *   4. ClockSource, whose quiet timer must run from boot.
+ *   5. GpsTime: UART1 and the PPS interrupt; needs no network.
+ *   6. NtpTime, before the first DHCP DISCOVER (option 42).
+ *   7. EthernetLink. The rest is event driven: link, address (web server, NTP
+ *      responder, PTP), IPv6.
  *
- * The link itself (pin map, EMAC + PHY, netif, event handlers, PHY diagnostics,
- * the status task) is EthernetLink's, in eth_link.h/.cpp. What is left here is
- * the order those parts come up in, which is the part that is easy to get wrong:
- *
- *   1. NVS. Settings live there; a stale blob from an older layout is erased
- *      rather than migrated.
- *   2. Settings. Hostname (DHCP option 12), the upstream NTP server, the test
- *      mode flag. Read from NVS, so it has to follow 1.
- *   3. esp_netif_init() and the default event loop. EthernetLink registers
- *      handlers on that loop and creates its netif on that stack, so both come
- *      first.
- *   4. GpsTime::begin(). UART1 and the PPS interrupt: the stratum-1 reference,
- *      armed before anything asks it for the time. It needs no network, so it
- *      can come first, and a board with no receiver on those pins simply never
- *      locks instead of failing here.
- *   5. NtpTime::begin(). Arms the SNTP client before the first DHCP DISCOVER:
- *      lwIP only keeps an option-42 NTP server if sntp_servermode_dhcp() is on
- *      when the ACK is processed. It yields the clock to the GPS when
- *      timeSource is "gps".
- *   6. EthernetLink::begin(). Driver, PHY diagnostic, netif, handlers, status
- *      task, esp_eth_start(). Everything after that is event-driven: link up,
- *      the lease (which starts the web server and the responder and confirms an
- *      OTA'd image), then IPv6 addresses as DAD and SLAAC deliver them.
- *
- * A failure on this path is not recoverable -- there is no console to type a
- * second command into -- so ESP_ERROR_CHECK aborts with the file and line, which
- * is what the README's troubleshooting section points at.
- */
+ * A failure here aborts via ESP_ERROR_CHECK with file and line. */
 
 #include "esp_check.h"
 #include "esp_event.h"
@@ -50,12 +27,10 @@
 
 namespace {
 
-/* The same tag as eth_link.cpp: one device, one log prefix, whichever file
- * emits the line. */
+/* Shares eth_link.cpp's tag. */
 constexpr const char *TAG = "eth_demo";
 
-/* Settings live in NVS. A stale blob from an older layout is erased rather than
- * carried forward: the defaults are the documented starting point. */
+/* A stale NVS layout is erased rather than migrated. */
 void initNvs()
 {
     esp_err_t err = nvs_flash_init();
@@ -77,9 +52,8 @@ extern "C" void app_main()
     initNvs();
     Settings::instance().begin();
 
-    /* The console comes up before anything that can hang, because it is the way
-     * back in when a stored address is wrong or the link never comes up. Not
-     * fatal: a box without a console still has to boot and serve. */
+    /* First, so a bad stored address or a dead link can still be fixed. Not
+     * fatal. */
     if (console::start() != ESP_OK) {
         ESP_LOGW(TAG, "console unavailable; continuing without it");
     }
@@ -87,17 +61,10 @@ extern "C" void app_main()
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    /* The arbiter's quiet timer starts before the receiver does: under
-     * timeSource=auto a device that boots with no antenna has to fall back
-     * fifteen seconds from here, and the timer is what counts it. */
     ClockSource::instance().begin();
 
-    /* The receiver's UART and PPS line: a fix takes tens of seconds to settle,
-     * so the sooner it is listening the sooner the clock is real. */
     ESP_ERROR_CHECK(GpsTime::instance().begin());
 
-    /* Armed before the first DHCP DISCOVER: lwIP only keeps an option-42 NTP
-     * server if sntp_servermode_dhcp() is on when the ACK is processed. */
     ESP_ERROR_CHECK(NtpTime::instance().begin());
 
     ESP_ERROR_CHECK(EthernetLink::instance().begin());
