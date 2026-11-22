@@ -24,9 +24,8 @@ namespace {
 
 constexpr const char *TAG = "ptp";
 
-/* Enough for the NTP excursions of a burst plus a PTP exchange's worth; the
- * responder takes its entry immediately after recvfrom(), so entries are only
- * briefly live. */
+/* Entries live only until the responder's recvfrom(), so a short ring holds a
+ * burst. */
 constexpr size_t  kRing       = 16;
 constexpr int64_t kStampAgeNs = 500000000LL; /* an entry older than this is noise */
 
@@ -94,8 +93,7 @@ void recordRx(const uint8_t *mac, const uint8_t *addr, uint8_t addrLen, uint16_t
     }
 }
 
-/* A UDP datagram bound for port 123, in either family. Returns the source once
- * the frame has been checked far enough to have one. */
+/* Record the stamp of a UDP datagram to port 123, IPv4 or IPv6. */
 void maybeRecordUdp(const uint8_t *frame, uint32_t len, int64_t ns)
 {
     if (len < 34) {
@@ -127,19 +125,10 @@ void maybeRecordUdp(const uint8_t *frame, uint32_t len, int64_t ns)
     }
 }
 
-
 /* ------------------------------------------------------------------ PTP ---
  *
- * The message layer. Two-step only: a Sync goes out with the twoStepFlag set and
- * a Follow_Up carries the stamp the MAC gave that Sync, so nothing here has to
- * predict a transmit time. That is the one thing this unit cannot do (one-step
- * needs the timestamp inserted into the outgoing frame by hardware).
- *
- * The stamps are TAI, which is what PTP counts: the counter runs on the UTC the
- * rest of the box uses, so every stamp has the UTC offset added and the same
- * offset is announced. A host that keeps its clock in UTC therefore sees 37 s
- * against its own clock and the right answer against another PTP node.
- */
+ * Two-step only: the MAC cannot insert a stamp into an outgoing frame. The
+ * counter is UTC, so the TAI-UTC offset is added to every stamp and announced. */
 
 constexpr uint8_t kMsgSync      = 0x00;
 constexpr uint8_t kMsgDelayReq  = 0x01;
@@ -156,16 +145,9 @@ constexpr size_t kDelayRespLen = kHeader + kStamp + 10;
 constexpr size_t kAnnounceLen  = kHeader + 30;
 
 constexpr uint8_t kMulticast[6] = {0x01, 0x1b, 0x19, 0x00, 0x00, 0x00};
-/* flagField is a 16-bit big-endian bit field: bit 1 is twoStep, bit 7 is
- * currentUtcOffsetValid, and ptpTimescale/timeTraceable are bits 8 and 9, i.e.
- * the second octet. Putting twoStep in the second octet instead is what makes
- * a two-step master look like a one-step one and a slave wait for a Follow_Up
- * that never matches. */
 /* flagField octet 0: bit 0 alternateMaster, bit 1 twoStep, bit 2 unicast.
  * Octet 1: bit 0 leap61, bit 1 leap59, bit 2 currentUtcOffsetValid, bit 3
- * ptpTimescale, bit 4 timeTraceable, bit 5 frequencyTraceable. Getting the
- * octet wrong is silent: the announce still parses, it just says the time is
- * ARB and a slave then leaves the 37 s of TAI in its offset. */
+ * ptpTimescale, bit 4 timeTraceable, bit 5 frequencyTraceable. */
 constexpr uint8_t kFlagTwoStep   = 0x02; /* octet 0 */
 constexpr uint8_t kFlagUtcValid  = 0x04; /* octet 1 */
 constexpr uint8_t kFlagTimescale = 0x08; /* octet 1 */
@@ -173,13 +155,9 @@ constexpr uint8_t kFlagTraceable = 0x30; /* octet 1, time and frequency */
 
 constexpr int kTaskStack = 4096;
 
-/* Whether a transmit stamp is asked of the hardware, and only for the frames
- * whose stamp is used: an NTP reply's arrival comes from the RX side and its
- * transmit field has to be written before the frame leaves anyway, so it gains
- * nothing from the read-back. The read-back is the path that can leave a
- * descriptor holding a pending timestamp, so the exposure is kept to the one
- * frame a second that needs it. The Follow_Up falls back to the counter read
- * just before the send, which is what any non-stamped master does. */
+/* Hardware transmit stamps, requested per frame by the callers that use them
+ * (the Sync, the slave's Delay_Req, and NTP replies to possibly interleaved
+ * clients). Without one the Follow_Up carries the counter read before sending. */
 constexpr bool kTxStamp = true;
 
 volatile uint8_t  gMode      = 0;
@@ -200,9 +178,8 @@ struct DelayReq {
 };
 constexpr size_t kDelayRing = 8;
 
-/* Slave side: the exchange in flight and what the last one measured. Single
- * peer, single exchange at a time -- a LAN has one master and the servo is
- * reported, not applied, so a pipelined design buys nothing. */
+/* Slave side: one exchange with one master at a time. The offset is reported,
+ * not applied. */
 struct Exchange {
     bool     syncSeen;
     int64_t  t2; /* arrival of the Sync */
@@ -241,23 +218,17 @@ void putStamp(uint8_t *p, int64_t ns)
     for (int i = 0; i < 6; ++i) {
         p[5 - i] = static_cast<uint8_t>(seconds >> (8 * i));
     }
-    /* The fraction starts after the six second bytes: p[3-i] would overwrite
-     * four of them, which reads back as a timestamp in the wrong century. */
     uint32_t frac = static_cast<uint32_t>(ns % 1000000000LL);
     for (int i = 0; i < 4; ++i) {
         p[9 - i] = static_cast<uint8_t>(frac >> (8 * i));
     }
 }
 
-/* TAI, from the counter and the receiver's leap offset. NAV-TIMELS carries
- * GPS-UTC; TAI is GPS plus 19 s. */
+/* TAI-UTC: NAV-TIMELS gives GPS-UTC, and TAI = GPS + 19 s. 18 s is assumed
+ * until the receiver reports it. */
 uint8_t utcOffset()
 {
-    /* GPS-UTC is 18 s; TAI is GPS plus 19. The receiver's own figure is used
-     * when it has one, and the known constant when NAV-TIMELS is silent --
-     * announcing 19 would put a slave 18 s out. */
-    /* The one byte, not status(): that is two kilobytes of this task's four,
-     * every second, and it left 156 bytes of stack. */
+    /* leapSeconds(), not status(), which is too big for this task's stack. */
     const int leap   = static_cast<int>(GpsTime::instance().leapSeconds());
     const int offset = (leap > 0 ? leap : 18) + 19;
     return static_cast<uint8_t>(offset > 127 ? 127 : offset);
@@ -271,33 +242,26 @@ int64_t taiNs()
 size_t putHeader(uint8_t *out, uint8_t type, size_t length, uint16_t seq, uint8_t flags0,
                  uint8_t flags1)
 {
-    /* Transport specific in the high nibble of the first byte and the message
-     * type in the low one; versionPTP is the low nibble of the *second* byte.
-     * Putting the version in the first byte is the mistake that reads as PTPv0
-     * and makes ptp4l discard the frame without saying so. */
+    /* Octet 0: transportSpecific (high nibble), messageType (low). Octet 1:
+     * versionPTP. */
     out[0] = static_cast<uint8_t>(type & 0x0f);
     out[1] = kPtpVersion;
     put16(out + 2, static_cast<uint16_t>(length));
     out[4] = gDomain;
     out[6] = flags0;
     out[7] = flags1;
-    /* correctionField (8) stays zero: two-step puts the precise origin in the
-     * Follow_Up, and a Delay_Resp's correction is the responder's processing
-     * time, which this does not measure. */
+    /* correctionField (8) is left zero. */
     std::memcpy(out + 20, gClock, 8);
     put16(out + 28, gPort);
     put16(out + 30, seq);
-    /* control is deprecated but set for older readers; logMessageInterval is
-     * 2^n seconds, so 0 is once a second and 127 (which reads as 2^127) is not
-     * a legal interval at all. The Sync and Follow_Up go out as n = 0 too,
-     * since a 1 Hz timepulse has nothing to offer a faster rate. */
+    /* controlField (deprecated) is left 0 for every message type.
+     * logMessageInterval 0 is 2^0 = 1 s. */
     out[32] = 0x00;
     out[33] = 0x00;
     return kHeader;
 }
 
-/* One PTP frame out, ethertype 0x88F7, to `dest` (multicast or the peer). Returns
- * the egress stamp in the counter's base. */
+/* One PTP frame (ethertype 0x88F7) to `dest`, with its egress stamp if asked. */
 esp_err_t sendPtp(const uint8_t dest[6], const uint8_t *body, size_t length, int64_t *stampNs)
 {
     static uint8_t frame[kHeader + 30 + 14];
@@ -311,24 +275,22 @@ esp_err_t sendPtp(const uint8_t dest[6], const uint8_t *body, size_t length, int
     frame[12] = 0x88;
     frame[13] = 0xf7;
     std::memcpy(frame + 14, body, length);
-    /* Ethernet needs 60 bytes before the FCS and a Sync is 58. The padding is
-     * below the PTP layer, so messageLength stays as built. */
+    /* Pad to Ethernet's 60-byte minimum; messageLength is unchanged. */
     const size_t frameLen = 14 + length < 60 ? 60 : 14 + length;
     return ptp::transmit(frame, frameLen, stampNs);
 }
 
 void announcedQuality(uint8_t &clockClass, uint8_t &accuracy, uint8_t &timeSource)
 {
-    /* The reply facts carry both answers: locked is the lock test with the
-     * dispersion gate applied, and demoted is the lock test passing while the
-     * gate does not. status() said the same and cost this task its stack. */
+    /* replyFacts(): locked includes the dispersion gate; demoted means locked
+     * but over it. */
     const GpsTime::ReplyFacts facts = GpsTime::instance().replyFacts();
     if (facts.locked) {
         clockClass = 6;
-        accuracy   = 0x25; /* 10 us: the stamps are interrupt- and software-class */
+        accuracy   = 0x25; /* 10 us */
         timeSource = 0x20;
     } else if (facts.demoted) {
-        clockClass = 7;    /* holdover, inside the window */
+        clockClass = 7;    /* demoted by the dispersion gate */
         accuracy   = 0x27; /* 100 us */
         timeSource = 0x20;
     } else {
@@ -362,38 +324,30 @@ void sendAnnounce()
     ++s_stats.announceSent;
 }
 
-/* Sync, then the Follow_Up that carries its stamp. The pair is the measurement;
- * a slave may not use the Sync's own timestamp. */
+/* Sync, then the Follow_Up carrying its egress stamp. */
 void sendSync()
 {
     const uint16_t seq            = gSeq[kMsgSync]++;
     uint8_t        sync[kSyncLen] = {};
     putHeader(sync, kMsgSync, kSyncLen, seq, kFlagTwoStep, 0);
-    /* The counter is read before the frame: without a hardware stamp that is
-     * the best the Follow_Up can carry, and it is within the send cost of the
-     * truth. With one, the measured value replaces it. */
+    /* The fallback if the Sync gets no hardware stamp. */
     const int64_t beforeNs = ptp::nowNs();
     int64_t       syncNs   = 0;
     if (sendPtp(kMulticast, sync, kSyncLen, kTxStamp ? &syncNs : nullptr) != ESP_OK) {
         return;
     }
-    /* A Sync that left without a stamp still gets its Follow_Up. Returning here
-     * meant a timestamp unit that had stopped stamping left slaves with an
-     * announced master and nothing to synchronise to. */
+    /* A Sync sent without a stamp still gets a Follow_Up. */
     if (syncNs == 0) {
         syncNs = beforeNs;
     }
     uint8_t follow[kFollowUpLen] = {};
     putHeader(follow, kMsgFollowUp, kFollowUpLen, seq, kFlagTwoStep, 0);
-    /* The counter is UTC-based; the wire is TAI. */
     putStamp(follow + kHeader, syncNs + static_cast<int64_t>(utcOffset()) * 1000000000LL);
     (void)sendPtp(kMulticast, follow, kFollowUpLen, nullptr);
     ++s_stats.syncSent;
 }
 
-/* One queued request, oldest first; false when the queue is empty. The task
- * drains the whole queue each tick, so a client that bursts (or several) is
- * answered up to the ring's depth instead of one per second. */
+/* One queued Delay_Req, or false when the queue is empty. */
 bool takeDelayReq(DelayReq &req)
 {
     bool have = false;
@@ -425,9 +379,8 @@ void slaveTick();
 
 void ptpTask(void *)
 {
-    /* The start hangs off the address, which is applied a moment before the
-     * driver starts the MAC. Wait for a transmit to be accepted rather than
-     * firing the first announces into a downed link. */
+    /* The task starts when the address is set, slightly before the MAC is up;
+     * wait until a transmit is accepted. */
     for (int i = 0; i < 50 && gMode != 0; ++i) {
         uint8_t probe[kHeader] = {};
         putHeader(probe, kMsgAnnounce, kHeader, 0, 0, 0);
@@ -438,8 +391,7 @@ void ptpTask(void *)
     }
     TickType_t last = xTaskGetTickCount();
     while (gMode != 0) {
-        /* Only a master announces: a slave that kept announcing would be
-         * elected by the master it is trying to follow. */
+
         if (gMode == static_cast<uint8_t>(ptp::Mode::Master)) {
             sendAnnounce();
             sendSync();
@@ -508,12 +460,8 @@ void onDelayResp(const uint8_t *frame, int64_t rxNs, uint16_t seq)
     if (seq != gSlave.delaySeq || gSlave.t3 == 0 || gSlave.t1 == 0 || gSlave.t2 == 0) {
         return;
     }
-    /* offset = ((t2 - t1) - (t4 - t3)) / 2. t1 and t4 are the master's, and t4
-     * is the receiveTimestamp in this message's body -- when the master heard
-     * the Delay_Req -- not when its answer got here: with the local arrival in
-     * its place the two path terms were both ours and the master's turnaround
-     * was read as offset. The master's stamps are TAI and the counter is UTC,
-     * so the announced offset comes off them first. */
+    /* offset = ((t2 - t1) - (t4 - t3)) / 2, with t4 the receiveTimestamp in
+     * this Delay_Resp. The master's TAI stamps are converted to UTC first. */
     const uint8_t *stamp   = frame + 14 + kHeader;
     uint64_t       seconds = 0;
     for (int i = 0; i < 6; ++i) {
@@ -549,8 +497,7 @@ void slaveTick()
     }
 }
 
-/* A Delay_Req from a peer: keep where it came from, its portIdentity and the
- * arrival stamp, and answer from the task so the RX path stays short. */
+/* Queue a Delay_Req for the task to answer, keeping the RX path short. */
 void noteDelayReq(const uint8_t *frame, uint32_t len, int64_t ns)
 {
     if (len < 14 + kHeader + kStamp || gMode != static_cast<uint8_t>(ptp::Mode::Master)) {
@@ -573,7 +520,7 @@ void notePeer(const uint8_t *frame)
     std::memcpy(s_stats.lastPeer, frame + 6, 4);
     s_stats.lastPeer[4] = frame[10];
     s_stats.lastPeer[5] = frame[11];
-    s_stats.lastPeerLen = 4; /* an IPv4-shaped summary; the MAC is what matters */
+    s_stats.lastPeerLen = 4; /* the MAC in four "octets" plus two */
 }
 
 esp_err_t inputHandler(esp_eth_handle_t, uint8_t *buffer, uint32_t length, void *priv, void *info)
@@ -590,17 +537,14 @@ esp_err_t inputHandler(esp_eth_handle_t, uint8_t *buffer, uint32_t length, void 
             s_stats.lastNs = ns;
         }
         if (length >= 14 + 34) {
-            /* Delay_Reqs are the only frames answered from here, and only as a
-             * master; everything else is for the slave side. Parsed in place and
-             * the buffer handed back at once. */
+            /* Parsed in place; the buffer is freed below. */
             notePeer(buffer);
             if (gMode == static_cast<uint8_t>(ptp::Mode::Master) && buffer[14] == kMsgDelayReq) {
                 noteDelayReq(buffer, length, ns);
             } else if (gMode == static_cast<uint8_t>(ptp::Mode::Slave)) {
                 switch (buffer[14]) {
                 case kMsgSync: onSync(buffer, ns, get16(buffer + 14 + 30)); break;
-                /* Both read a ten-octet stamp after the header, and the
-                 * guard above only promises the header. */
+                /* These two also read a stamp after the header. */
                 case kMsgFollowUp:
                     if (length >= 14 + kHeader + kStamp) {
                         onFollowUp(buffer, get16(buffer + 14 + 30));
@@ -621,8 +565,7 @@ esp_err_t inputHandler(esp_eth_handle_t, uint8_t *buffer, uint32_t length, void 
     if (valid) {
         maybeRecordUdp(buffer, length, ns);
     }
-    /* priv is the netif: esp_eth_update_input_path_info() overwrites the glue's
-     * own priv slot with it, so it cannot be anything else. */
+    /* priv is the netif passed to esp_eth_update_input_path_info(). */
     return esp_netif_receive(static_cast<esp_netif_t *>(priv), buffer, length, NULL);
 }
 
@@ -641,9 +584,7 @@ esp_err_t attach(esp_eth_handle_t eth, esp_eth_mac_t *mac, esp_netif_t *netif)
     s_eth   = eth;
     s_mac   = mac;
     s_netif = netif;
-    /* Clock identity from the MAC: the EUI-64 the 802.1AS form makes of it (the
-     * U/L bit set, ff:fe in the middle). Stable for the life of the board, which
-     * is all a port identity needs. */
+    /* Clock identity: EUI-64 from the MAC (U/L bit set, ff:fe inserted). */
     uint8_t ourMac[6] = {};
     if (esp_eth_ioctl(eth, ETH_CMD_G_MAC_ADDR, ourMac) == ESP_OK) {
         gClock[0] = static_cast<uint8_t>(ourMac[0] | 0x02);
@@ -673,26 +614,18 @@ esp_err_t enable(bool restart)
         return ESP_OK;
     }
 
-    /* A second ptp_enable() on an already running block leaves the timestamp
-     * unit unable to produce anything -- the frames still go out, without
-     * stamps, and the responder stops being able to send a Sync at all. A
-     * restart disables it first and puts the counter back on the clock
-     * afterwards, since ptp_start() zeroes it. */
+    /* Enabling a running block again stops it stamping, so disable first. */
     if (restart && s_enabled && s_mac != nullptr) {
         gSteered = false;
         (void)esp_eth_mac_ptp_disable(s_mac);
     }
 
     eth_mac_ptp_config_t config = {};
-    /* The crystal, at 40 MHz: 25 ns is the finest the counter can be stepped and
-     * is also what its increment is set to. The 80 MHz PLL is the alternative
-     * and buys 12.5 ns for a clock that has to be kept running. */
+    /* 40 MHz crystal. */
     config.clk_src           = EMAC_PTP_CLK_SRC_XTAL;
     config.clk_src_period_ns = 25.0f;
-    /* 40 and not the 25 ns the source ticks at: the driver derives the addend
-     * from 2^32 * period / accuracy, and at 25/25 that is exactly 2^32, which
-     * truncates to zero in a uint32. 40 ns keeps it well inside and still
-     * resolves far finer than the microseconds this clock has to serve. */
+    /* Also the sub-second increment, so the counter moves in 40 ns steps. The
+     * addend is 2^32 * period / accuracy, and 25/25 would overflow it to 0. */
     config.required_accuracy_ns = 40.0f;
     config.roll_type            = ETH_PTP_DIGITAL_ROLLOVER;
 
@@ -701,9 +634,8 @@ esp_err_t enable(bool restart)
         ESP_LOGE(TAG, "phc enable: %s", esp_err_to_name(err));
         return err;
     }
-    /* Receive stamps on every frame, not only PTP's: the responder needs the
-     * arrival stamp of a UDP/123 datagram long before there is a PTP message to
-     * serve. The transmit side is the opposite -- see transmit(). */
+    /* Stamp every received frame, for NTP; transmit stamps are per frame (see
+     * transmit()). */
     err = esp_eth_mac_enable_ts4all(s_mac, true);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ts4all: %s", esp_err_to_name(err));
@@ -722,9 +654,8 @@ esp_err_t enable(bool restart)
         (void)stepToRealtime();
     }
 
-    /* Start it at CLOCK_REALTIME so a stamp is an epoch instant and can be read
-     * by eye. Before the clock is set this is 1970, which the anchor corrects
-     * from the first fix. */
+    /* From CLOCK_REALTIME, which may still be 1970; the clock step on the
+     * first fix moves the counter too. */
     struct timeval tv = {};
     gettimeofday(&tv, nullptr);
     eth_mac_time_t start = {};
@@ -789,11 +720,8 @@ esp_err_t stepToRealtime()
     return esp_eth_mac_set_ptp_time(s_mac, &now);
 }
 
-/* The MAC stops transmitting now and then -- ARP included, so the box goes
- * dark while it still reports a link -- and nothing in the driver clears it. A
- * restart of the MAC does, so the failure is watched for here and escalated
- * once it is clearly not a one-off, with a floor so a stuck restart cannot
- * spin. The errno's own log line is the evidence trail. */
+/* The MAC occasionally stops transmitting with the link still up, and only a
+ * MAC restart clears it. A burst of failures triggers one, at most every 30 s. */
 uint32_t gTxFails       = 0;
 int64_t  gLastTxFailUs  = 0;
 int64_t  gLastRestartUs = 0;
@@ -805,8 +733,6 @@ void noteTxResult(esp_err_t err)
         return; /* link not up yet: not a fault */
     }
     const int64_t now = esp_timer_get_time();
-    /* Anything sparse enough to be individual losses is left alone; a burst is
-     * the stall. */
     if (now - gLastTxFailUs > 2000000) {
         gTxFails = 0;
     }
@@ -816,16 +742,12 @@ void noteTxResult(esp_err_t err)
     }
     gRestarting    = true;
     gLastRestartUs = now;
-    /* What the DMA itself says: a fatal bus error or an underflow halts the
-     * transmit channel and nothing in the driver restarts it. The status word
-     * is the difference between "the ring is full of stuck descriptors" and
-     * "the channel stopped". */
+    /* DMA status, to tell a halted channel from a full ring. */
     const uint32_t dmaStatus = EMAC_DMA.dmastatus.val;
     const uint32_t opMode    = EMAC_DMA.dmaoperation_mode.val;
     const uint32_t current   = EMAC_DMA.dmatxcurrdesc;
-    /* The transmit descriptor the DMA is sitting on, sampled twice: a pointer
-     * that does not move while frames are being queued is a stopped channel,
-     * and one that moves is the ring full of descriptors nobody reclaimed. */
+    /* Sampled again below: a descriptor pointer that does not move is a
+     * stopped channel. */
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGW(TAG,
              "transmit stalled (%u in a row): dma status 0x%08x opmode 0x%08x "
@@ -837,14 +759,10 @@ void noteTxResult(esp_err_t err)
     gRestarting = false;
 }
 
-/* The transmit path stamps a frame only when the descriptor flag is set for it,
- * and the driver sets that flag globally for every frame once timestamping is
- * on. That is the problem this works around: the MAC writes the timestamp back
- * into the descriptor after the frame has gone, and a descriptor that has been
- * handed to the next frame by then gets it in the words the DMA is reading --
- * `insufficient TX buffer size`, then nothing transmits at all. So the flag is
- * cleared at start-up and raised only around the frames whose stamp is read
- * back, under a mutex because two tasks send. */
+/* The driver sets the transmit-stamp descriptor flag for every frame, and a
+ * stamp written back into a descriptor already reused corrupted the ring
+ * ("insufficient TX buffer size", then no transmit). So the flag is cleared at
+ * start and set only around frames whose stamp is wanted, under a mutex. */
 esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
 {
     if (stampNs != nullptr) {
@@ -876,9 +794,7 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
     xSemaphoreGive(s_txMux);
     if (err != ESP_OK) {
         noteTxResult(err);
-        /* A frame offered while the driver still says the link is down is not a
-         * fault: the task starts on the address, which is up a moment before
-         * the driver's own link flag is. Only the rest are counted. */
+        /* Link not up yet: not counted. */
         if (err == ESP_ERR_INVALID_STATE) {
             return err;
         }
@@ -891,8 +807,7 @@ esp_err_t transmit(const void *frame, size_t len, int64_t *stampNs)
         ++s_stats.txMissing;
         return ESP_OK;
     }
-    /* A stamp that is a second away from the counter was written by an older
-     * frame and describes nothing; the caller falls back to software. */
+    /* A stamp more than a second from now belongs to an older frame. */
     const int64_t got = static_cast<int64_t>(stamp.seconds) * 1000000000LL +
                         static_cast<int64_t>(stamp.nanoseconds);
     const int64_t diff = got - nowNs();
@@ -950,8 +865,7 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
     }
 
     constexpr size_t kEthLen = 14;
-    /* Static, not on the stack: the responder task has a small stack and this
-     * is one sender. */
+    /* Static: the responder's stack is small, and it is the only caller. */
     static uint8_t frame[kEthLen + 40 + 8 + kMaxUdpPayload];
     std::memset(frame, 0, sizeof(frame));
     std::memcpy(frame, dstMac, 6);
@@ -981,8 +895,7 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
         ip[11]               = static_cast<uint8_t>(ipSum & 0xff);
         udpOff               = kEthLen + 20;
     } else if (dstAddrLen == 16) {
-        /* LWIP_IPV6_NUM_ADDRESSES is three in this build, so the array covers
-         * the netif and the returned count is bounded by it. */
+        /* LWIP_IPV6_NUM_ADDRESSES is 3 in this build. */
         esp_ip6_addr_t addresses[3] = {};
         const int      count        = esp_netif_get_all_ip6(s_netif, addresses);
         const uint8_t *src          = nullptr;
@@ -1024,16 +937,14 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
     udp[5]       = static_cast<uint8_t>(udpLen & 0xff);
     std::memcpy(udp + 8, payload, len);
 
-    /* IPv4 does not require a UDP checksum and a zero means "not computed";
-     * IPv6 does, over a pseudo-header. */
+    /* IPv4 UDP checksum is optional (0); IPv6 requires it. */
     if (dstAddrLen == 16) {
         uint32_t sum = 0;
         sum          = sum16(frame + kEthLen + 8, 32, sum);
         sum += udpLen;
         sum += 17;
         sum = sum16(udp, udpLen, sum);
-        /* Zero means "no checksum", which IPv6 does not allow: a sum that
-         * comes out as zero goes on the wire as all ones (RFC 8200 8.1). */
+        /* A computed 0 is sent as 0xffff (RFC 8200 8.1). */
         const uint16_t folded = fold(sum);
         const uint16_t c      = folded == 0 ? 0xffff : folded;
         udp[6]                = static_cast<uint8_t>(c >> 8);
@@ -1041,13 +952,9 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
     }
 
     const size_t total = udpOff + udpLen;
-    /* A transmit stamp only when the caller asks for one. A basic reply has no
-     * use for it -- its transmit field is written before the frame goes -- and
-     * every stamped frame is a turn through the descriptor's timestamp bit, so
-     * the responder asks only for a client that may come back interleaved. */
+
     const esp_err_t err = transmit(frame, total, stampNs);
-    /* Once. This was keyed on the stamp count, which a reply no longer moves,
-     * so with PTP off every reply logged from inside the responder. */
+
     static bool firstLogged = false;
     if (!firstLogged) {
         firstLogged = true;
@@ -1060,8 +967,7 @@ bool sendUdp(const uint8_t *dstAddr, size_t dstAddrLen, uint16_t dstPort, const 
         ESP_LOGW(TAG, "transmit: %s", esp_err_to_name(err));
         return false;
     }
-    /* Sent, stamped or not: the caller must not fall back to sendto() and put
-     * a second copy on the wire. */
+    /* Sent, stamped or not: the caller must not send it again. */
     return true;
 }
 
@@ -1073,13 +979,9 @@ bool takeRx(const uint8_t *addr, size_t addrLen, uint16_t port, Rx *out)
     const int64_t now   = nowNs();
     bool          found = false;
     int64_t       age   = 0;
-    /* No logging inside this section: the responder's log hook sends over
-     * lwIP, and this runs with interrupts off. The first miss is reported
-     * below, once the lock is released. */
+    /* No logging under the lock: the log hook sends over lwIP. */
     portENTER_CRITICAL(&s_mux);
-    /* The oldest live match, not the first in the array: two requests queued
-     * from one address and port otherwise swap stamps whenever the ring has
-     * wrapped between them. */
+    /* Oldest match first, so queued requests from one sender keep their order. */
     RxStamp *best = nullptr;
     for (size_t i = 0; i < kRing; ++i) {
         RxStamp &slot = s_ring[i];
@@ -1150,9 +1052,7 @@ void stop()
 {
     if (gMode != 0) {
         gMode = 0;
-        /* The task deletes itself on its next tick; wait for it to be gone so a
-         * restart cannot leave two senders. The tick is a second, so 300 ms of
-         * waiting usually gave up first and the restart did leave two. */
+        /* Wait up to 1.5 s for the task, whose tick is 1 s, to exit. */
         for (int i = 0; i < 150 && gTask != nullptr; ++i) {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
