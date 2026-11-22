@@ -570,30 +570,6 @@ int cmdIntr(void *, int, char **)
     return esp_intr_dump(stdout) == ESP_OK ? 0 : 1;
 }
 
-int cmdLogLevel(void *, int argc, char **argv)
-{
-    static constexpr struct {
-        const char     *name;
-        esp_log_level_t level;
-    } kLevels[] = {
-        {"none", ESP_LOG_NONE}, {"error", ESP_LOG_ERROR}, {"warn", ESP_LOG_WARN},
-        {"info", ESP_LOG_INFO}, {"debug", ESP_LOG_DEBUG},
-    };
-    if (argc != 3) {
-        std::printf("usage: loglevel <tag|*> <none|error|warn|info|debug>\n");
-        return 1;
-    }
-    for (const auto &entry : kLevels) {
-        if (std::strcmp(argv[2], entry.name) == 0) {
-            esp_log_level_set(argv[1], entry.level);
-            std::printf("%s: %s\n", argv[1], entry.name);
-            return 0;
-        }
-    }
-    std::printf("unknown level '%s'\n", argv[2]);
-    return 1;
-}
-
 void add(const char *name, const char *help, const char *hint,
          esp_console_cmd_func_with_context_t func)
 {
@@ -639,8 +615,6 @@ esp_err_t console::start()
     add("log", "UDP log sink", "[<ip> <port>]", cmdLog);
     add("status", "One screen: link, addressing, fix, serving", "", cmdStatus);
     add("intr", "Which interrupt is on which core", "", cmdIntr);
-    add("loglevel", "Log level for a tag (tx_lag, ntp_server, ptp, gps_time) or *",
-        "<tag|*> <none|error|warn|info|debug>", cmdLogLevel);
     add("eth", "Link state, or restart the MAC", "[restart]", cmdEth);
     add("gps", "Receiver state, survey, reset, antenna, mask, holdover test",
         "[survey <stop|fix> | reset [soft|hard|power|cold] | ant <on|off> | gnss <hex> | "

@@ -1,5 +1,5 @@
 /* Compiles this file's ESP_LOGD lines in; they stay hidden until raised with
- * the console's `loglevel` command. */
+ * the console's `log_level debug <tag>`. */
 #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
 
 #include "ntp/tx_lag.h"
