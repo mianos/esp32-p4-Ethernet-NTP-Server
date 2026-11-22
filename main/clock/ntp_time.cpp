@@ -14,19 +14,14 @@
 
 namespace {
 
-/* Stepping is the only sane option here: a smooth slew would take weeks to move
- * a 1970 clock to the present, and an NTP server must not serve a clock that is
- * still catching up. */
+/* Step, not slew: the clock may start at 1970. */
 constexpr bool kSmoothSync = false;
 
-/* How often the client re-polls once the clock is set. lwIP defaults to an hour,
- * which leaves the responder's freshness window no margin at all: one lost reply
- * would have the server advertising stratum 16 for a whole cycle. */
+/* lwIP's default of an hour leaves no margin within kUpstreamFreshS. */
 constexpr uint32_t kPollIntervalMs = 60000;
 
-/* The server lwIP holds under index 0, as text; empty when unset. Note that
- * lwIP only rewrites that entry on a DHCP bind or an SNTP start, so it stays
- * stale across a stop() — read it at the moment it is known to be current. */
+/* lwIP's server 0 as text, empty when unset. lwIP only rewrites it on a DHCP
+ * bind or an SNTP start, so it is stale after a stop(). */
 std::string lwipServer()
 {
     const ip_addr_t *addr = esp_sntp_getserver(0);
@@ -38,7 +33,6 @@ std::string lwipServer()
     return text;
 }
 
-/* True once the netif has an address, i.e. a mode switch rather than boot. */
 bool haveLease()
 {
     esp_netif_t        *netif = net_state::netif();
@@ -46,10 +40,8 @@ bool haveLease()
     return netif != nullptr && esp_netif_get_ip_info(netif, &info) == ESP_OK && info.ip.addr != 0;
 }
 
-/* lwIP's SNTP client resolves its server with dns_gethostbyname(), i.e. A
- * records only, so an IPv6 literal can never work however it is written: the
- * name goes to DNS, and DNS here only ever answers with an IPv4 address.
- * Catching it turns a silent "never syncs" into one line in the log. */
+/* lwIP's SNTP client resolves A records only, so an IPv6 literal cannot work;
+ * it is reported rather than silently never syncing. */
 bool looksLikeIpv6(const std::string &text)
 {
     return text.find(':') != std::string::npos;
@@ -62,8 +54,7 @@ std::string isoTimestamp(time_t when)
     struct tm local;
     localtime_r(&when, &local);
 
-    /* strftime is the only formatter in the C library that knows about %z, and
-     * it writes to a buffer; 32 bytes holds any output it can produce here. */
+    /* strftime for %z. */
     char text[32];
     strftime(text, sizeof(text), "%Y-%m-%dT%H:%M:%S%z", &local);
     return text;
@@ -75,12 +66,8 @@ NtpTime &NtpTime::instance()
     return ntp;
 }
 
-/* The upstream name is read on the responder task and written on two others, so
- * every access goes through the lock -- see the note in ntp_time.h. */
 namespace {
-/* RAII around the FreeRTOS mutex. std::mutex would read better, but its failure
- * path drags std::system_error into the image for 5 KB, and there is nothing to
- * recover from here: a lock that cannot be taken is already fatal. */
+/* RAII around a FreeRTOS mutex; std::mutex pulls in std::system_error (5 KB). */
 class MutexLock {
 public:
     explicit MutexLock(SemaphoreHandle_t sem) : m_sem(sem)
@@ -117,8 +104,7 @@ void NtpTime::setServer(const std::string &server)
 
 esp_err_t NtpTime::begin()
 {
-    /* NETIF_SNTP_TIME_SYNC carries the stepped time, so /healthz and the logs can
-     * say when the clock was last set instead of guessing from its value. */
+
     esp_err_t err =
         esp_event_handler_register(NETIF_SNTP_EVENT, ESP_EVENT_ANY_ID, &NtpTime::onSyncEvent, this);
     if (err != ESP_OK) {
@@ -134,8 +120,7 @@ Settings::TimeSource NtpTime::fallbackSource(std::string &server) const
 {
     server = Settings::instance().ntpServer();
     if (!server.empty() && isSelfAddress(server)) {
-        /* Worth catching: an offset measured against ourselves is always zero,
-         * so the clock would look disciplined and free-run for ever. */
+
         ESP_LOGW(TAG,
                  "ntpServer '%s' is this device; a zero offset against itself says "
                  "nothing, so the fallback uses the lease's server instead",
@@ -148,15 +133,9 @@ Settings::TimeSource NtpTime::fallbackSource(std::string &server) const
 void NtpTime::armDhcpServer() const
 {
 #if LWIP_DHCP_GET_NTP_SRV
-    /* Under gps/auto nothing starts the client, so nothing would call
-     * sntp_servermode_dhcp() and lwIP would reject option 42 as the ACK is
-     * processed -- leaving a fallback engaged later with no server to use. The
-     * flag only makes the lease's server collectable; no timer runs until a
-     * client does.
-     *
-     * Arming after a lease has already been processed does not replay that
-     * lease, so this runs at boot and again whenever the setting moves to a
-     * source that might need it; the next renewal collects the server. */
+    /* Under gps/auto no client starts, so option 42 must be armed here for a
+     * later fallback to have a server. It does not replay a lease already
+     * processed; the next renewal brings the server. */
     const Settings::TimeSource source = Settings::instance().timeSource();
     if (source == Settings::TimeSource::Gps || source == Settings::TimeSource::Auto) {
         esp_sntp_servermode_dhcp(true);
@@ -177,10 +156,7 @@ esp_err_t NtpTime::applySettings()
     }
     armDhcpServer();
 
-    /* "auto" is not a client mode: what the client should be doing depends on
-     * the receiver, and clock_source.cpp is the one place that knows. Asking it
-     * here keeps a single answer to "who owns the clock" instead of a second
-     * opinion that could disagree with the servo. */
+    /* Under "auto" ClockSource decides whether a client runs. */
     if (wanted == Settings::TimeSource::Auto) {
         wanted = ClockSource::instance().owner() == ClockOwner::Gps ? Settings::TimeSource::Gps
                                                                     : fallbackSource(server);
@@ -193,8 +169,8 @@ esp_err_t NtpTime::applySettings()
         wanted = Settings::TimeSource::Off;
     }
 
-    /* Cheap no-op when a POST /config touched something else. In dhcp mode the
-     * server comes from the lease, so only static mode compares it. */
+    /* No-op when nothing relevant changed; only static mode compares the
+     * server. */
     const bool running    = m_running.load(std::memory_order_relaxed);
     const bool sameSource = wanted == m_source.load(std::memory_order_relaxed);
     const bool sameServer = wanted != Settings::TimeSource::Static || server == serverCopy();
@@ -226,8 +202,7 @@ esp_err_t NtpTime::startFallback()
 {
     MutexLock lock(m_switchLock);
     if (m_running.load(std::memory_order_relaxed)) {
-        /* Already up: nudge the poll rather than rebuild the client, so a retry
-         * does not drop a server address that is working. */
+        /* Already running: just poll. */
         return esp_netif_sntp_start();
     }
 
@@ -236,7 +211,7 @@ esp_err_t NtpTime::startFallback()
     std::string          server;
     Settings::TimeSource source = fallbackSource(server);
     if (source == Settings::TimeSource::Dhcp) {
-        /* The name only: lwIP polls its own server table, filled from the lease. */
+
         server = lwipServer();
         if (server.empty()) {
             ESP_LOGW(TAG, "the current lease carries no option-42 server: the fallback has "
@@ -261,11 +236,8 @@ void NtpTime::stopFallback()
 esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
 {
     if (source == Settings::TimeSource::Gps) {
-        /* The clock is disciplined by gps_time.cpp, not by a poll. There is no
-         * client to start, and starting one would put a second owner on
-         * CLOCK_REALTIME -- SNTP steps, the PPS slews, and the two undo each
-         * other. m_source is still recorded, so /healthz names the source the
-         * device is actually using. */
+        /* No client: the GPS owns CLOCK_REALTIME. m_source is still recorded
+         * for /healthz. */
         m_source.store(source, std::memory_order_relaxed);
         ESP_LOGI(TAG, "time source: gps (u-blox over UART, PPS on GPIO14)");
         return ESP_OK;
@@ -277,8 +249,8 @@ esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
         return ESP_OK;
     }
 
-    /* The name is kept for the refid and /healthz in both modes; in dhcp mode
-     * lwIP's own table is what actually gets polled. */
+    /* Kept for the refid and /healthz; in dhcp mode lwIP polls its own
+     * table. */
     setServer(server);
     if (source == Settings::TimeSource::Static) {
         if (looksLikeIpv6(server)) {
@@ -296,11 +268,7 @@ esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
     config.wait_for_sync     = true; /* gives syncNow() a semaphore to wait on */
     config.start             = true;
     if (source == Settings::TimeSource::Static) {
-        /* lwIP keeps this pointer (sntp_setservername() does not copy), so it is
-         * the buffer that is handed over, not a std::string another task could
-         * reallocate. start() only runs after stop(), so the client that read
-         * the previous contents is already gone. The array therefore stays; the
-         * copy into it is a sized one, which is the part snprintf was doing. */
+        /* lwIP keeps this pointer; see m_lwipServer. */
         const std::string_view name = server;
         const std::size_t      n    = std::min(name.size(), sizeof(m_lwipServer) - 1);
         name.copy(m_lwipServer, n);
@@ -313,8 +281,7 @@ esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
 
     esp_err_t err = esp_netif_sntp_init(&config);
     if (err != ESP_OK) {
-        /* The stored setting stays as it was written: /healthz then reports
-         * ntp_source "off" while the clock is not being polled at all. */
+
         ESP_LOGE(TAG, "sntp init: %s -- the clock is not being polled", esp_err_to_name(err));
         m_source.store(Settings::TimeSource::Off, std::memory_order_relaxed);
         return err;
@@ -324,8 +291,7 @@ esp_err_t NtpTime::start(Settings::TimeSource source, const std::string &server)
     m_running.store(true, std::memory_order_relaxed);
     if (source == Settings::TimeSource::Dhcp) {
         ESP_LOGI(TAG, "time source: dhcp (upstream from option 42, once the lease lands)");
-        /* lwIP only hands the option-42 address over on a DHCP bind, so switching
-         * to "dhcp" with a lease already in hand waits for the next renewal. */
+        /* With a lease already held, option 42 arrives at the next renewal. */
         if (serverCopy().empty() && haveLease()) {
             ESP_LOGW(TAG, "no server in the current lease yet: option 42 arrives at "
                           "the next DHCP bind (a reboot applies it now)");
@@ -342,8 +308,7 @@ void NtpTime::stop()
         esp_netif_sntp_deinit();
         m_running.store(false, std::memory_order_relaxed);
     }
-    /* A stopped client has not synced. Left set, the next fallback inside
-     * fifteen minutes counted as synced before its first poll had answered. */
+    /* Otherwise a new fallback would count as synced before its first answer. */
     m_last_sync.store(0, std::memory_order_relaxed);
     m_source.store(Settings::TimeSource::Off, std::memory_order_relaxed);
     setServer({});
@@ -351,10 +316,8 @@ void NtpTime::stop()
 
 void NtpTime::onGotIp()
 {
-    /* Taken before the running check: the leased name is what the refid and
-     * /healthz report, and under gps/auto no client is running yet at the first
-     * lease. The ACK has just been applied to lwIP's SNTP table (option 42
-     * arrives as an address, not a name), so this is when it is worth reading. */
+    /* Read the leased server now, while lwIP's table is current, even if no
+     * client is running yet. */
     const Settings::TimeSource wanted = Settings::instance().timeSource();
     if (wanted == Settings::TimeSource::Dhcp || wanted == Settings::TimeSource::Auto) {
         setServer(lwipServer());
@@ -372,8 +335,7 @@ void NtpTime::onGotIp()
         ESP_LOGI(TAG, "upstream time server: %s", upstream.c_str());
     }
 
-    /* The poll started at boot may have gone out before the lease (and with it
-     * the option-42 address) existed, so poll again now. */
+    /* The boot poll may have preceded the lease. */
     esp_err_t err = esp_netif_sntp_start();
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "restart sntp: %s", esp_err_to_name(err));
@@ -386,8 +348,7 @@ esp_err_t NtpTime::syncNow(TickType_t timeout)
     if (!m_running.load(std::memory_order_relaxed)) {
         return ESP_ERR_INVALID_STATE;
     }
-    /* start() is stop+init in the SNTP module: it sends a request immediately
-     * rather than waiting out CONFIG_LWIP_SNTP_UPDATE_DELAY. */
+    /* Restarting sends a request at once. */
     esp_err_t err = esp_netif_sntp_start();
     if (err != ESP_OK) {
         return err;
@@ -408,13 +369,8 @@ std::optional<std::string> NtpTime::upstreamName() const
 {
     std::string server = serverCopy();
     if (server.empty()) {
-        /* The name normally lives here, but in dhcp mode it lives in lwIP's
-         * table and m_server is only ever a copy of it. A client that started
-         * after the lease -- a fallback, precisely -- never took the copy, and
-         * without this read the reply's refid falls back to INIT: a client reads
-         * that as "not synchronised" and demotes a server that is in fact
-         * synced. Reading the table costs a format on the reply path and only
-         * while the copy is empty. */
+        /* In dhcp mode a client started after the lease has no copy; read
+         * lwIP's table. */
         server = lwipServer();
     }
     if (!m_running.load(std::memory_order_relaxed) || server.empty()) {
