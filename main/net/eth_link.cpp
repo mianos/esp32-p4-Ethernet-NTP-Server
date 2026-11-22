@@ -1,11 +1,5 @@
-/*
- * Ethernet link: EMAC (RMII) + generic IEEE 802.3 PHY driver, the netif on top
- * of both, and the events they raise. See eth_link.h for why the order is what
- * it is; this file is the mechanics.
- *
- * The generic PHY driver speaks the standard MII registers, which is all the
- * IP101 needs for autonegotiation and link-up detection.
- */
+/* The IP101 is driven by IDF's generic 802.3 PHY driver, which is enough for
+ * autonegotiation and link detection. */
 
 #include <inttypes.h>
 
@@ -39,12 +33,10 @@
 
 namespace {
 
-/* The device logs under one tag whichever file emits the line. */
 constexpr const char *TAG = "eth_demo";
 
-/* Addressing is changed from the httpd task and from the console task, while
- * the driver's event task may be walking the same netif. Recursive, because
- * applySettings() calls onAddressUp() and the CONNECTED path can nest there. */
+/* Addressing changes come from httpd, the console and the event task.
+ * Recursive, because applySettings() calls onAddressUp(). */
 SemaphoreHandle_t s_addrLock = nullptr;
 
 struct AddressLock {
@@ -52,9 +44,8 @@ struct AddressLock {
     ~AddressLock() { xSemaphoreGiveRecursive(s_addrLock); }
 };
 
-/* The stored static address as esp_netif wants it, or false if it does not
- * parse. The gateway is optional and a bad one is dropped rather than fatal:
- * a box with an address and no default route is still reachable on the wire. */
+/* The stored static address, or false if it does not parse. A bad gateway is
+ * dropped, not fatal. */
 bool buildIpInfo(const Settings &settings, esp_netif_ip_info_t &info)
 {
     esp_ip4_addr_t addr{};
@@ -73,8 +64,7 @@ bool buildIpInfo(const Settings &settings, esp_netif_ip_info_t &info)
     return true;
 }
 
-/* Resolver: set, or cleared when the setting is empty (a DHCP lease would
- * otherwise leave its own behind). */
+/* Set the resolver, or clear it when empty so a lease's does not linger. */
 void applyResolver(const std::string &text)
 {
     esp_netif_t *netif = net_state::netif();
@@ -90,10 +80,7 @@ void applyResolver(const std::string &text)
 }
 
 /* ---- Board wiring (Waveshare ESP32-P4-ETH, IP101GRI) --------------------
- * Reference design values. MDC/MDIO are the SMI (management) bus, the rest
- * are the RMII data plane. phyReset is active low; phyAddr 1 is the IP101
- * default set by the PHYAD strap resistors on the board.
- */
+ * phyReset is active low; phyAddr 1 is set by the board's PHYAD straps. */
 struct RmiiPins {
     int mdc;
     int mdio;
@@ -122,37 +109,30 @@ constexpr RmiiPins kEthPins{
     .crsDv    = 28,
 };
 
-/* IEEE 802.3 clause 22 register numbers, as the PHY diagnostic reads them. */
+/* IEEE 802.3 clause 22 registers. */
 constexpr uint32_t kPhyRegBmcr = 0;
 constexpr uint32_t kPhyRegBmsr = 1;
 constexpr uint32_t kPhyRegId1  = 2;
 constexpr uint32_t kPhyRegId2  = 3;
 
 constexpr uint32_t kMdioAddresses = 32;
-/* What a float-bus address reads back: no PHY there. */
+/* What an empty MDIO address reads. */
 constexpr uint32_t kPhyIdAbsent = 0xffff;
 
 constexpr uint32_t kStatusPollMs = 5000;
 
-/* A minute down before the MAC is assumed wedged rather than the cable being
- * out: a switch reboot, a patch lead being moved and a DHCP server restart all
- * finish inside that. The down-window restarts after every attempt, so the
- * attempts space themselves by a minute too, and five of them is where a reboot
- * becomes the honest answer. */
+/* A minute without an address before restarting the MAC, a minute between
+ * attempts, and at most five until an address comes back. */
 constexpr int64_t  kLinkDownRestartUs = 60000000;
 constexpr uint32_t kMaxRestarts       = 5;
-/* Millisecond-scale pause after stopping, so the PHY sees a real break in the
- * link rather than a single sample of it. */
+
 constexpr uint32_t kRestartSettleMs = 250;
-/* The driver polls the link over MDIO by itself every 2 s, and IDF's SMI path
- * has no mutex: two readers can return each other's data, or ESP_ERR_INVALID_STATE.
- * So the registers are read once every six ticks (30 s) while the "waiting"
- * line keeps its 5 s rhythm. */
+/* The driver polls MDIO every 2 s and IDF's SMI path has no lock, so the PHY
+ * status is read only every sixth tick (30 s). */
 constexpr uint32_t    kPhyStatusEvery  = 6;
 constexpr uint32_t    kStatusTaskStack = 3072;
 constexpr UBaseType_t kStatusTaskPrio  = 3;
 
-/* 02:00:5e:00:53:01 -- the form the rest of the documentation uses. */
 std::string macText(const std::array<uint8_t, 6> &mac)
 {
     return std::format("{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}", mac[0], mac[1], mac[2], mac[3],
@@ -160,7 +140,7 @@ std::string macText(const std::array<uint8_t, 6> &mac)
 }
 
 #if CONFIG_LWIP_IPV6
-/* The word the log and /healthz use for an address class. */
+
 const char *ipv6AddrTypeName(esp_ip6_addr_type_t type)
 {
     switch (type) {
@@ -175,15 +155,11 @@ const char *ipv6AddrTypeName(esp_ip6_addr_type_t type)
 }
 #endif
 
-/* Copy this board's pin map into the EMAC config. Only the pads live here:
- * interface mode, clocking and DMA stay in installDriver() with the driver
- * settings they belong to. */
 void applyPinMap(const RmiiPins &pins, eth_esp32_emac_config_t &config)
 {
     config.smi_gpio.mdc_num  = pins.mdc;
     config.smi_gpio.mdio_num = pins.mdio;
 
-    /* P4 routes the RMII data signals through the GPIO matrix. */
     config.emac_dataif_gpio.rmii.tx_en_num  = pins.txEn;
     config.emac_dataif_gpio.rmii.txd0_num   = pins.txd0;
     config.emac_dataif_gpio.rmii.txd1_num   = pins.txd1;
@@ -191,29 +167,13 @@ void applyPinMap(const RmiiPins &pins, eth_esp32_emac_config_t &config)
     config.emac_dataif_gpio.rmii.rxd1_num   = pins.rxd1;
     config.emac_dataif_gpio.rmii.crs_dv_num = pins.crsDv;
 }
-/* An image that arrived over POST /firmware boots in ESP_OTA_IMG_PENDING_VERIFY:
- * the bootloader goes back to the previous slot unless the app confirms this
- * one.
- *
- * Confirming on the lease alone was not enough. A lease arrives about seven
- * seconds in, so an image that gets an address and then panics -- which is
- * exactly what a sky-view sized Status did, every ten seconds for nine hours --
- * confirms itself and the rollback never fires. Reachable for a moment is not
- * the same as working.
- *
- * So confirmation waits out a hold-off first. If the image dies inside it, it
- * stays unverified and the bootloader rolls back on the next reset, which is the
- * only recovery path on a box whose interface is the RJ45. The timer is a
- * one-shot and the state is re-read when it fires, so an image that a USB flash
- * put here (nothing pending) confirms nothing.
- */
+/* An OTA image boots pending verification and is confirmed only after it has
+ * stayed up and reachable for the hold-off, so one that gets an address and
+ * then crashes is still rolled back. */
 constexpr int64_t kConfirmHoldoffUs = 120 * 1000000;
 
 esp_timer_handle_t s_confirmTimer = nullptr;
 
-/* True while the running image is still on probation. Read at both sites rather
- * than once: the timer fires 120 s after a lease, and the image could have been
- * confirmed by something else (or rolled back) in between. */
 bool imagePendingVerify()
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -225,8 +185,7 @@ bool imagePendingVerify()
     return state == ESP_OTA_IMG_PENDING_VERIFY;
 }
 
-/* How many holdoffs an image may spend unreachable before it is given up on:
- * five of them is ten minutes. */
+/* Hold-offs an image may spend unreachable before it is rolled back. */
 constexpr int kConfirmTries  = 5;
 int           s_confirmTries = 0;
 
@@ -236,14 +195,9 @@ void confirmTimerBody(void *)
         return;
     }
 
-    /* Reachable means an address on a link that is up. A static address is
-     * programmed before the link exists, so the address alone confirmed an
-     * image whose Ethernet did not work, with the cable out, two minutes after
-     * boot -- and cancelled the only way back from it. */
+    /* A static address exists without a link, so the link is checked too. */
     if (!EthernetLink::instance().reachable()) {
         if (++s_confirmTries >= kConfirmTries) {
-            /* Nothing else reboots an image that runs but cannot be reached,
-             * and the bootloader only returns to the old slot on a reboot. */
             ESP_LOGE(TAG, "OTA image unreachable for %lld s: rolling back",
                      static_cast<long long>(kConfirmTries * kConfirmHoldoffUs / 1000000));
             esp_ota_mark_app_invalid_rollback_and_reboot();
@@ -277,8 +231,7 @@ void confirmRunningImage()
     args.callback                = confirmTimerBody;
     args.name                    = "ota_confirm";
     if (esp_timer_create(&args, &s_confirmTimer) != ESP_OK) {
-        /* No timer: fall back to confirming now rather than risk a good image
-         * being rolled back for want of a timer. */
+        /* No timer: confirm now rather than risk rolling back a good image. */
         confirmTimerBody(nullptr);
         return;
     }
@@ -311,8 +264,6 @@ esp_err_t EthernetLink::begin()
         return err;
     }
 
-    /* Which PHY answers on the SMI bus, and what does it see? Both before the
-     * netif exists, so a wiring fault shows up before DHCP is waiting on it. */
     scanPhy();
     logPhyStatus();
 
@@ -321,15 +272,8 @@ esp_err_t EthernetLink::begin()
         return err;
     }
 
-    /* The receive path is ours from here: it records the arrival stamp of a
-     * UDP/123 datagram and splits 0x88F7 frames off before lwIP, which is what
-     * makes a hardware reply stamp possible at all. The PHC then stamps every
-     * frame. Neither failing is fatal -- without them the responder keeps its
-     * software stamps -- so both are warnings.
-     *
-     * Before the address is applied, because a static address posts GOT_IP
-     * during that call and the PTP start hangs off it: a start that arrives
-     * before the counter exists is refused. */
+    /* Not fatal: without it NTP uses software stamps. Before the address is
+     * applied, since a static address starts PTP, which needs the counter. */
     if (ptp::attach(m_eth, m_mac, m_netif) == ESP_OK) {
         if (ptp::enable() != ESP_OK) {
             ESP_LOGW(TAG, "hardware timestamping unavailable: software stamps only");
@@ -350,39 +294,22 @@ esp_err_t EthernetLink::begin()
         return err;
     }
 
-    /* Addressing before the MAC: with the DHCP client stopped and a valid
-     * static address in place, the netif's own connected action posts GOT_IP
-     * for it, so the rest of the bring-up needs no static case at all. Under
-     * DHCP this is a no-op and the default action starts the client at link-up,
-     * which is why the boot-time call passes atBoot. */
+    /* Before the MAC starts; under DHCP the netif starts the client at
+     * link-up. */
     err = applySettings(true);
     if (err != ESP_OK) {
         return err;
     }
 
-    /* Multicast has to be let through by hand. esp_eth exposes no multicast
-     * hash, only promiscuous mode, and with the MAC filtering to its own address
-     * the board never hears a router advertisement or a neighbour solicitation:
-     * it has a link-local, answers unicast, and is otherwise invisible to IPv6.
-     * SLAAC and NDP both need ff02::1 and the solicited-node groups, so the
-     * choice is promiscuous or no IPv6 at all. The port is the box's own, so the
-     * extra frames are the segment's broadcast traffic and nothing else. */
     err = esp_eth_start(m_eth);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_eth_start failed: %s", esp_err_to_name(err));
         return err;
     }
-    /* After start, not before: the MAC is programmed during start and that
-     * clears the filter bits, so a promiscuous set beforehand is thrown away. */
+    /* IPv6 needs multicast (ff02::1, solicited-node groups), and esp_eth has
+     * no multicast filter API. After start, which reprograms the filter: set
+     * promiscuous, and the pass-all-multicast (PM) bit, which has no ioctl. */
 #if CONFIG_LWIP_IPV6
-    /* Two filter bits, and only one of them has an ioctl. PRMODE passes frames
-     * whatever their address; the separate PM bit is the one that passes
-     * *multicast*, and promiscuous does not imply it. Without PM the MAC drops
-     * ff02::1 and the solicited-node groups, so the board has a link-local,
-     * answers a unicast ping, and never hears an advertisement or a neighbour
-     * solicitation -- SLAAC cannot work and neither can anything else. The HAL
-     * has a wrapper for PM (emac_ll_pass_all_multicast_enable) but no ioctl
-     * reaches it, so the register is written here. */
     bool            promiscuous    = true; /* the ioctl takes void *, not const */
     const esp_err_t promiscuousErr = esp_eth_ioctl(m_eth, ETH_CMD_S_PROMISCUOUS, &promiscuous);
     if (promiscuousErr != ESP_OK) {
@@ -399,16 +326,14 @@ esp_err_t EthernetLink::begin()
 esp_err_t EthernetLink::installDriver()
 {
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
-    /* The receive task stays on the core that installs the driver, which is the
-     * work core: every caller of this is a task pinned there (app/cores.h). */
+    /* Pin the receive task to the installing core, the work core. */
     mac_config.flags |= ETH_MAC_FLAG_PIN_TO_CORE;
     eth_phy_config_t phy_config = ETH_PHY_DEFAULT_CONFIG();
     phy_config.phy_addr         = kEthPins.phyAddr;
     phy_config.reset_gpio_num   = kEthPins.phyReset;
 
-    /* ETH_ESP32_EMAC_DEFAULT_CONFIG() is written with C99 designated
-     * initialisers in an order C++ rejects, so its defaults are set by hand
-     * here -- same values, plus this board's pin map. */
+    /* ETH_ESP32_EMAC_DEFAULT_CONFIG() does not compile as C++, so its values
+     * are set by hand. */
     eth_esp32_emac_config_t emac_config{};
     applyPinMap(kEthPins, emac_config);
 
@@ -442,18 +367,15 @@ esp_err_t EthernetLink::installDriver()
         return err;
     }
 
-    /* Kept past the release: the 1588 calls take the MAC, and the driver keeps
-     * it alive for the life of the driver. */
+    /* For the 1588 calls; the driver keeps it alive. */
     m_mac = mac.get();
 
-    /* Installed: the driver owns both instances from here. */
     mac.release();
     phy.release();
     return ESP_OK;
 }
 esp_err_t EthernetLink::attachNetif()
 {
-    /* Default Ethernet netif: DHCP client on, ICMP echo on (lwIP default). */
     const esp_netif_config_t netif_config = ESP_NETIF_DEFAULT_ETH();
     m_netif                               = esp_netif_new(&netif_config);
     if (m_netif == nullptr) {
@@ -462,14 +384,8 @@ esp_err_t EthernetLink::attachNetif()
     }
     net_state::setNetif(m_netif);
 
-    /* DHCP option 12 is built when the client's first DISCOVER goes out, which
-     * happens once the netif comes up -- so the hostname has to be in place
-     * before esp_eth_start(), not after the first lease.
-     *
-     * Deliberately not fatal. app_main() turns a begin() error into an abort,
-     * and a device that cannot boot has no way back in -- so a stored hostname
-     * must not be able to stop it. Settings caps the name at esp_netif's own
-     * limit (32), which makes this a backstop rather than the fix. */
+    /* Before esp_eth_start(), for DHCP option 12. Not fatal: a bad stored name
+     * must not stop the boot. */
     const std::string &hostname = Settings::instance().hostname();
     const esp_err_t    err      = esp_netif_set_hostname(m_netif, hostname.c_str());
     if (err != ESP_OK) {
@@ -477,7 +393,6 @@ esp_err_t EthernetLink::attachNetif()
                  hostname.c_str(), esp_err_to_name(err));
     }
 
-    /* The glue is handed to the netif, which owns it from here. */
     esp_eth_netif_glue_handle_t glue = esp_eth_new_netif_glue(m_eth);
     if (glue == nullptr) {
         ESP_LOGE(TAG, "esp_eth_new_netif_glue failed");
@@ -500,9 +415,7 @@ esp_err_t EthernetLink::applySettings(bool atBoot)
     AddressLock lock;
 
     if (usable) {
-        /* Tolerated: the client is normally already stopped by the previous
-         * static apply, and this is what actually keeps a stored DHCP request
-         * from overwriting the address a second later. */
+        /* Stop DHCP so a pending lease cannot overwrite the address. */
         esp_netif_dhcpc_stop(m_netif);
         esp_err_t err = esp_netif_set_ip_info(m_netif, &info);
         if (err != ESP_OK) {
@@ -515,9 +428,7 @@ esp_err_t EthernetLink::applySettings(bool atBoot)
         esp_netif_set_default_netif(m_netif);
         applyResolver(settings.ipDns());
         m_staticAddr = true;
-        /* set_ip_info() does not reliably post GOT_IP the way a lease does, so
-         * the address-up path is entered directly -- and it is also where the
-         * address gets logged, so there is only one line per change. */
+        /* set_ip_info() does not reliably post GOT_IP. */
         onAddressUp(info);
         return ESP_OK;
     }
@@ -528,12 +439,9 @@ esp_err_t EthernetLink::applySettings(bool atBoot)
     }
     m_staticAddr = false;
     if (atBoot) {
-        /* The connected action starts the client; starting it here as well
-         * would only race that. */
         return ESP_OK;
     }
-    /* ESP_ERR_ESP_NETIF_DHCP_ALREADY_STARTED is the normal case for a request
-     * that changed something else. */
+    /* ALREADY_STARTED is normal here. */
     esp_netif_dhcpc_start(m_netif);
     return ESP_OK;
 }
@@ -555,9 +463,7 @@ esp_err_t EthernetLink::restart(const char *why)
         /* stop/start clears the 1588 block with the rest of the MAC. */
         ptp::enable(true);
         ++m_restarts;
-        /* The PHY comes back with whatever autoneg settles on; say so, because
-         * "restarted and still 100 Mb/s" and "restarted into a half-duplex
-         * 10 Mb/s" are different outcomes for the servo's uplink. */
+        /* Log what autonegotiation settled on. */
         logPhyStatus();
     } else {
         ESP_LOGE(TAG, "MAC restart failed: %s", esp_err_to_name(err));
@@ -606,7 +512,6 @@ void EthernetLink::scanPhy()
                  addr, *id1, *id2);
     }
 
-    /* Leave the driver pointed at the PHY it was configured with. */
     uint32_t phy_addr = static_cast<uint32_t>(kEthPins.phyAddr);
     esp_eth_ioctl(m_eth, ETH_CMD_S_PHY_ADDR, &phy_addr);
 }
@@ -625,8 +530,7 @@ void EthernetLink::logPhyStatus()
 }
 
 /* -------------------------------------------------------------------------
- * Event handlers. esp_event passes the instance as `arg`, so these are thin
- * trampolines and the real work is a member function with typed arguments.
+ * Event handlers: trampolines to the instance passed as `arg`.
  * ---------------------------------------------------------------------- */
 void EthernetLink::ethEventHandler(void *arg, esp_event_base_t, int32_t event_id, void *)
 {
@@ -643,11 +547,9 @@ void EthernetLink::onEthEvent(int32_t event_id)
         ESP_LOGI(TAG, "link up   (MAC %s)", macText(mac).c_str());
         ESP_LOGI(TAG, "requesting DHCP lease ...");
 #if CONFIG_LWIP_IPV6
-        /* IPv6 has to be asked for: esp_netif does not create the fe80::
-         * link-local on its own, and without one lwIP has no source address for
-         * the Router Solicitation that would bring a SLAAC address back. Doing
-         * it on every link-up, as the IDF examples do, means a cable bounce
-         * re-arms it rather than leaving the board IPv4-only until reboot. */
+        /* esp_netif does not create the link-local itself, and SLAAC needs it
+         * to send the Router Solicitation. Every link-up, so a cable bounce
+         * re-arms it. */
         if (m_netif != nullptr) {
             const esp_err_t err = esp_netif_create_ip6_linklocal(m_netif);
             if (err != ESP_OK) {
@@ -674,15 +576,12 @@ void EthernetLink::gotIpHandler(void *arg, esp_event_base_t, int32_t, void *even
     static_cast<EthernetLink *>(arg)->onGotIp(*event);
 }
 
-
 void EthernetLink::onGotIp(const ip_event_got_ip_t &event)
 {
     onAddressUp(event.ip_info);
 }
 
-/* The address is up, however it got here: a lease, or a static one the console
- * or POST /config programmed. Everything below hangs off having an address, so
- * both enter it through here rather than through two copies. */
+/* A lease or a static address is up: start what needs an address. */
 void EthernetLink::onAddressUp(const esp_netif_ip_info_t &ip_info)
 {
     m_haveIp.store(true, std::memory_order_relaxed);
@@ -691,12 +590,10 @@ void EthernetLink::onAddressUp(const esp_netif_ip_info_t &ip_info)
              IP2STR(&ip_info.netmask), IP2STR(&ip_info.gw));
     ESP_LOGI(TAG, "ready: ping the IP above from your LAN -- ICMP echo is answered by lwIP");
 
-    /* The lease is where the option-42 NTP server (if any) becomes known, so
-     * the clock can poll it now rather than at the next SNTP interval. */
+    /* A lease may carry an option 42 NTP server. */
     NtpTime::instance().onGotIp();
 
-    /* The HTTP surface is only reachable once there is an address, so start it
-     * on the first lease. Later rebinds leave it listening on all addresses. */
+    /* HTTP on the first address; it listens on all addresses after that. */
     if (!m_webStarted) {
         const esp_err_t err = NtpWebServer::instance().begin();
         if (err == ESP_OK) {
@@ -704,20 +601,13 @@ void EthernetLink::onAddressUp(const esp_netif_ip_info_t &ip_info)
             net_log::start();
             ESP_LOGI(TAG, "http: http://" IPSTR "/healthz  http://" IPSTR "/config",
                      IP2STR(&ip_info.ip), IP2STR(&ip_info.ip));
-            /* Reachable is the condition for keeping an OTA'd image; the slot
-             * only needs confirming once, on its first boot. */
             confirmRunningImage();
         } else {
             ESP_LOGE(TAG, "http server failed to start: %s", esp_err_to_name(err));
         }
     }
 
-    /* The responder binds :123 -- also an address-dependent thing. It serves
-     * whatever the clock is: stratum 3 from the upstream, or 16 with the leap
-     * indicator at 3 while the clock is not locked (i.e. "ignore me"). */
-    /* PTP needs no address, but it is started from the same place as the other
-     * servers: one site owns what this box offers, and a stored mode has to be
-     * honoured at boot as well as by POST /config. */
+    /* PTP needs no address, but is started here with the other services. */
     const std::string &ptpMode = Settings::instance().ptpMode();
     if (ptp::mode() == ptp::Mode::Off && (ptpMode == "master" || ptpMode == "slave")) {
         (void)ptp::start(ptpMode == "master" ? ptp::Mode::Master : ptp::Mode::Slave,
@@ -734,13 +624,8 @@ void EthernetLink::onAddressUp(const esp_netif_ip_info_t &ip_info)
 }
 
 #if CONFIG_LWIP_IPV6
-/* IPv6 arrives on its own event, per address: esp_netif posts GOT_IP6 once DAD
- * has cleared the fe80:: the link-up handler asked for, and again every time
- * SLAAC adds or re-adds a global address from a router advertisement (prefix
- * changes, router restart). Logging each one with the URL it makes reachable is
- * the only way to learn the address without a packet capture -- a link-local
- * one only works from the same segment, hence "[addr]" rather than a host name.
- */
+/* GOT_IP6 is posted per address: the link-local after DAD, then each SLAAC
+ * address. Each is logged with its URL. */
 void EthernetLink::gotIp6Handler(void *arg, esp_event_base_t, int32_t, void *event_data)
 {
     auto *event = static_cast<ip_event_got_ip6_t *>(event_data);
@@ -757,7 +642,8 @@ void EthernetLink::onGotIp6(const ip_event_got_ip6_t &event)
 #endif
 
 /* -------------------------------------------------------------------------
- * Status task: says what the demo is waiting for, then goes quiet.
+ * Status task: logs while there is no address, and restarts the MAC if that
+ * lasts.
  * ---------------------------------------------------------------------- */
 bool EthernetLink::reachable() const
 {
@@ -775,9 +661,8 @@ void EthernetLink::statusLoop()
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(kStatusPollMs));
         if (m_haveIp.load(std::memory_order_relaxed)) {
-            m_linkDownSinceUs = 0; /* the lease is in: quiet, but still watching */
-            /* A recovery earns the budget back. It was per boot, so five bad
-             * minutes anywhere in the uptime spent it for good. */
+            m_linkDownSinceUs = 0;
+            /* An address resets the restart budget. */
             m_autoRestarts     = 0;
             m_restartCapLogged = false;
             continue;
@@ -793,10 +678,7 @@ void EthernetLink::statusLoop()
             logPhyStatus();
         }
 
-        /* Nothing else in this firmware ever touches the MAC again, so a PHY
-         * that stopped answering stays stopped until someone reboots the board
-         * by hand -- and the box is usually the far end of the link that would
-         * have told you about it. */
+        /* Without an address for kLinkDownRestartUs, restart the MAC. */
         if (nowUs - m_linkDownSinceUs < kLinkDownRestartUs || m_restarting) {
             continue;
         }

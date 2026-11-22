@@ -14,10 +14,8 @@ esp_netif_t      *s_netif = nullptr;
 std::atomic<bool> s_link_up{false};
 
 #if CONFIG_LWIP_IPV6
-/* esp_ip6_addr_t and lwIP's ip6_addr_t both start with the four address words,
- * so copying just those is enough; the zone stays IP6_NO_ZONE, which is what
- * formatting wants anyway. lwIP prints hex in upper case; RFC 5952 says lower,
- * and lower is what people paste into curl. */
+/* Both address types start with the four words; the zone stays IP6_NO_ZONE.
+ * Lower-cased, as RFC 5952 asks; lwIP prints upper case. */
 std::string text6(const esp_ip6_addr_t &addr)
 {
     ip6_addr_t lwip{};
@@ -71,11 +69,8 @@ std::string ipv6LinkLocal()
 
 std::string ipv6Global()
 {
-    /* Not esp_netif_get_ip6_global(): that filters on lwIP's ip6_addr_isglobal(),
-     * which is 2000::/3 and so excludes a ULA. A segment numbered out of fd00::/64
-     * -- which is what a private pocket gets, exactly as the IPv4 side is
-     * numbered out of 10.99.0.0/29 -- would report nothing at all while working
-     * perfectly. Take the first address that is not link-local instead. */
+    /* The first non-link-local address. esp_netif_get_ip6_global() only
+     * accepts 2000::/3, which would miss a ULA (fd00::/8). */
     if (s_netif == nullptr) {
         return {};
     }

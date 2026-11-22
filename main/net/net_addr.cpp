@@ -11,9 +11,7 @@
 namespace net_addr {
 namespace {
 
-/* A strict dotted quad: exactly four decimal parts, each 0..255, no shorthand,
- * no hex, no trailing junk. lwIP's ip4addr_aton would take "10.1" and
- * "0x0a.1.2.3"; a hand-typed console line is better served by one shape. */
+/* Exactly four decimal parts, 0..255; unlike ip4addr_aton, no "10.1" or hex. */
 bool parseQuadText(const std::string &text, uint32_t &hostOrder)
 {
     uint32_t parts[4] = {};
@@ -59,16 +57,13 @@ bool parseCidr(const std::string &text, esp_ip4_addr_t &addr, uint8_t &prefix)
     }
 
     const std::string len = text.substr(slash + 1);
-    /* Digits only: strtol stops at the first thing it does not like, so "2x"
-     * was a /2 and the typo became a 192.0.0.0 mask on a static box. */
+    /* Digits only, so "2x" is rejected rather than read as 2. */
     if (len.size() > 2 ||
         !std::all_of(len.begin(), len.end(), [](char c) { return c >= '0' && c <= '9'; })) {
         return false;
     }
     const long value = std::strtol(len.c_str(), nullptr, 10);
-    /* A /31 is a two-host link and a /32 is one host: both are legal, but the
-     * box expects room for a gateway, so they are refused rather than quietly
-     * programmed. */
+    /* /31 and /32 leave no room for a gateway. */
     if (value < 1 || value > 30) {
         return false;
     }

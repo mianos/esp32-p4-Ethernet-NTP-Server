@@ -1,12 +1,5 @@
-/*
- * IPv4 literals, parsed once and validated hard.
- *
- * A static address is the one setting that can make the box unreachable, so it
- * is checked where it is written (settings.cpp, from POST /config or the
- * console) and again where it is programmed (eth_link.cpp). The prefix is the
- * only way to state a netmask, and 1..30 is the only range that leaves both a
- * host and a broadcast.
- */
+/* Strict IPv4 parsing for static addressing, checked when stored and again
+ * when programmed. Prefixes 1..30 only. */
 #pragma once
 
 #include <cstdint>

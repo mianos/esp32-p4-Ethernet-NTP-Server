@@ -1,20 +1,8 @@
-/* Console output over the network.
+/* Copies the log to a UDP host and port (follow it with `nc -ukl 5514`).
  *
- * There is no radio on this board and, once the box is out of reach, no USB
- * cable either: the only way to watch it is the LAN it already sits on. This
- * duplicates ESP_LOG to a UDP port so a phone or laptop on the WiFi can follow
- * it with `nc -ukl 5514`.
- *
- * The hook is esp_log_set_vprintf, which runs in whatever task is logging and
- * must not block: a UDP send with the netif busy can stall for milliseconds.
- * So the hook only formats into a stack buffer and pushes it at a stream
- * buffer; a task drains that and does the sending. When the buffer is full the
- * line is dropped rather than the logger waiting -- a lost log line is cheaper
- * than a stalled GPS task.
- *
- * Off unless both a host and a port are configured. Nothing here is a control
- * path: the console is unchanged and receives the same bytes.
- */
+ * The vprintf hook runs in the logging task and must not block, so it only
+ * queues the line on a stream buffer, dropping it when full; a task sends.
+ * Off unless both host and port are set. The console output is unchanged. */
 #include "net/net_log.h"
 
 #include <cstdarg>
@@ -42,8 +30,7 @@ sockaddr_in          m_to        = {};
 bool                 m_installed = false;
 vprintf_like_t       m_console   = nullptr;
 
-/* The console still gets everything: this forwards to the previous hook first,
- * so a broken sink never costs the local output. */
+/* Forwards to the previous hook first, so the console always gets the line. */
 int hook(const char *fmt, va_list args)
 {
     char    line[kLineMax];
@@ -80,15 +67,12 @@ esp_err_t net_log::start()
     unsigned long      port     = 0;
     if (host.empty() || std::sscanf(settings.logPort().c_str(), "%lu", &port) != 1 || port == 0 ||
         port > 65535) {
-        /* Not configured -- which is also how a running sink is switched off.
-         * This returned with the socket and the old address still in place, so
-         * clearing logHost left the log going to it until the next boot. */
+        /* Not configured: this also switches a running sink off. */
         m_to = {};
         return ESP_OK;
     }
 
-    /* A name would need the resolver here, so only dotted quads are accepted
-     * and /config says as much. */
+    /* Dotted quads only; no resolver here. */
     m_to            = {};
     m_to.sin_family = AF_INET;
     m_to.sin_port   = htons(static_cast<uint16_t>(port));
@@ -97,8 +81,7 @@ esp_err_t net_log::start()
         return ESP_OK;
     }
 
-    /* Re-targeting an existing sink is just the address: a second task and
-     * socket would double every line. */
+    /* A running sink only changes its address. */
     if (m_sock >= 0) {
         ESP_LOGI(TAG, "console now also to udp %s:%lu", host.c_str(), port);
         return ESP_OK;
@@ -120,8 +103,7 @@ esp_err_t net_log::start()
     if (xTaskCreatePinnedToCore(&drainTask, "netlog", 3072, nullptr, kTaskPrio, nullptr,
                                 cores::kWork) != pdPASS) {
         ESP_LOGW(TAG, "no task");
-        /* Undone, or the next call sees a socket and reports a sink that has
-         * nothing draining it. */
+
         vStreamBufferDelete(m_ring);
         m_ring = nullptr;
         close(m_sock);
