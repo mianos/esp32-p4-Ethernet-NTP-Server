@@ -382,6 +382,10 @@ public:
      * the wire attached. Returns the seconds now in force. */
     uint32_t suppressPps(uint32_t seconds);
 
+    /* The 1588 counter was re-initialised: forget every reading taken on the
+     * old one, so served time uses esp_timer until the next edge. */
+    void dropPhcAnchor();
+
     /* Bench requests, carried out by the GPS task: antenna bias on or off, a
      * receiver reset (hot by default), and factory defaults. */
     void requestAntennaBias(bool on);

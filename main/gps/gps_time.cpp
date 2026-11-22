@@ -906,6 +906,16 @@ void GpsTime::task()
     }
 }
 
+void GpsTime::dropPhcAnchor()
+{
+    m_edgeSeq.fetch_add(1, std::memory_order_release);
+    portENTER_CRITICAL(&m_mux);
+    m_anchorPhcNs = 0;
+    m_ppsPtpNs    = 0;
+    portEXIT_CRITICAL(&m_mux);
+    m_edgeSeq.fetch_add(1, std::memory_order_release);
+}
+
 uint32_t GpsTime::suppressPps(uint32_t seconds)
 {
     const int64_t until =

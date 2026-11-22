@@ -668,6 +668,9 @@ esp_err_t enable(bool restart)
 
     s_enabled        = true;
     ptp::gHardwareOn = true;
+    if (restart) {
+        GpsTime::instance().dropPhcAnchor();
+    }
     ESP_LOGI(TAG, "phc running, 40 ns steps, started from %u.%09u",
              static_cast<unsigned>(start.seconds), static_cast<unsigned>(start.nanoseconds));
     return ESP_OK;
