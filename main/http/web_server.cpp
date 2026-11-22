@@ -809,6 +809,7 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
         doc.AddItem("pps_latency_max_ns", static_cast<double>(latency.maxNs));
         doc.AddItem("pps_latency_edges", static_cast<double>(latency.edges));
         doc.AddItem("pps_latency_unmatched", static_cast<double>(latency.unmatched));
+        doc.AddItem("pps_latency_dropped", static_cast<double>(latency.dropped));
         doc.AddItem("pps_latency_hist",
                     std::format("{}/{}/{}/{}/{}/{}", latency.hist[0], latency.hist[1],
                                 latency.hist[2], latency.hist[3], latency.hist[4],

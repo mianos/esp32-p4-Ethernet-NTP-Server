@@ -105,9 +105,8 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs, const int64_t edgePhcNs
 }
 
 /* The fallback edge handler, used only if the capture timer cannot be set up.
- * Stamps with esp_timer at whole-microsecond resolution, so the residual
- * carries the interrupt latency; pps_latency measures how much of it there
- * was. */
+ * Stamps with esp_timer at whole-microsecond resolution; pps_latency measures
+ * the interrupt latency and takes its spread back out. */
 void IRAM_ATTR GpsTime::ppsIsr(void *arg)
 {
     auto *self = static_cast<GpsTime *>(arg);
@@ -115,19 +114,26 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
      * lets this handler be an IRAM interrupt: an OTA write disables the flash
      * cache for milliseconds at a time, and an edge landing in that window must
      * not be a crash. */
+    pps_latency::beforeStamp();
     const int64_t stampUs = esp_timer_get_time();
+    pps_latency::afterStamp();
 
     /* The same edge in the 1588 counter's base, read before the lock rather
      * than under it: the other core can hold m_mux for the length of a status
      * copy, and a read taken after that wait put the counter's anchor late by
      * the wait while the esp_timer stamp, taken on entry, was not. */
     const int64_t edgePhcNs = ptp::hardware() ? ptp::nowNs() : 0;
+    pps_latency::afterPhc();
 
-    /* After the stamp and the PHC read, so neither waits on the two timer
-     * registers, and before recordEdge, which is where the anchor is set. */
-    pps_latency::onEdge(stampUs);
-
-    self->recordEdge(stampUs * 1000, edgePhcNs);
+    /* Core 1 is occasionally held off for 2-10 us, before the handler or inside
+     * one of its reads, by something the other core does. A wait before a read
+     * comes out of that read; a stall inside one leaves the read unplaceable,
+     * and the edge is better missed than anchored microseconds off. */
+    const pps_latency::Edge edge = pps_latency::finish(stampUs);
+    if (!edge.placed) {
+        return;
+    }
+    self->recordEdge(edge.edgeNs, edgePhcNs != 0 ? edgePhcNs - edge.phcLateNs : 0);
 }
 
 /* The edge as the capture peripheral latched it.

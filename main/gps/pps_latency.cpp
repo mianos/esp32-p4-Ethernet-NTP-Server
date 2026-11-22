@@ -25,6 +25,11 @@ constexpr uint32_t kResolutionHz = 40000000;
  * stretch, so the capture belongs to an earlier edge or none at all. */
 constexpr int64_t kMaxPlausibleNs = 100000;
 
+/* How much wider than its narrowest a bracket may be before the read inside it
+ * cannot be placed. Normal brackets vary by about 100 ns; the stalls seen
+ * inside them were 2-4 us. */
+constexpr int64_t kStallNs = 500;
+
 /* Upper edges of the buckets, in ns. The sixth bucket is unbounded. */
 /* In DRAM: the handler reads it, and .rodata is in flash, gone while OTA writes. */
 DRAM_ATTR constexpr int64_t kBucketNs[] = {1000, 2000, 5000, 10000, 20000};
@@ -49,6 +54,17 @@ int64_t           s_lastNs = -1;
 int64_t           s_minNs  = INT64_MAX;
 int64_t           s_maxNs;
 uint32_t          s_hist[kBuckets];
+
+/* Handler-only state: the three reads of this edge and the least each interval
+ * has been. The least edge-to-read figures are the floor the correction is
+ * measured from, so a normal edge moves by tens of ns, not by the floor. */
+uint64_t s_cap;
+uint64_t s_read[3];
+int64_t  s_minStampAtNs   = INT64_MAX;
+int64_t  s_minPhcAtNs     = INT64_MAX;
+int64_t  s_minStampSpanNs = INT64_MAX;
+int64_t  s_minPhcSpanNs   = INT64_MAX;
+uint32_t s_dropped;
 
 void teardown()
 {
@@ -131,27 +147,82 @@ esp_err_t begin(const int pin)
     return ESP_OK;
 }
 
-void IRAM_ATTR onEdge(const int64_t stampUs)
+void IRAM_ATTR beforeStamp()
 {
     if (!s_live.load(std::memory_order_acquire)) {
         return;
     }
-
     /* The captured register first: the raw read is a software capture into that
      * same register and would overwrite it. */
-    uint64_t captured = 0;
-    uint64_t raw      = 0;
-    if (gptimer_get_captured_count(s_timer, &captured) != ESP_OK ||
-        gptimer_get_raw_count(s_timer, &raw) != ESP_OK) {
-        return;
+    gptimer_get_captured_count(s_timer, &s_cap);
+    gptimer_get_raw_count(s_timer, &s_read[0]);
+}
+
+void IRAM_ATTR afterStamp()
+{
+    if (s_live.load(std::memory_order_acquire)) {
+        gptimer_get_raw_count(s_timer, &s_read[1]);
     }
-    const int64_t ns = (static_cast<int64_t>(raw) - static_cast<int64_t>(captured)) * kTickNs;
+}
+
+void IRAM_ATTR afterPhc()
+{
+    if (s_live.load(std::memory_order_acquire)) {
+        gptimer_get_raw_count(s_timer, &s_read[2]);
+    }
+}
+
+namespace {
+
+int64_t IRAM_ATTR ticksNs(const uint64_t later, const uint64_t earlier)
+{
+    return (static_cast<int64_t>(later) - static_cast<int64_t>(earlier)) * kTickNs;
+}
+
+void IRAM_ATTR lower(int64_t &least, const int64_t value)
+{
+    if (value < least) {
+        least = value;
+    }
+}
+
+}  // namespace
+
+Edge IRAM_ATTR finish(const int64_t stampUs)
+{
+    Edge edge = {stampUs * 1000, 0, true};
+    if (!s_live.load(std::memory_order_acquire)) {
+        return edge;
+    }
+    const int64_t ns      = ticksNs(s_read[2], s_cap);
+    const bool    matched = ns >= 0 && ns <= kMaxPlausibleNs;
+
+    if (matched) {
+        const int64_t stampAtNs   = ticksNs(s_read[0], s_cap);
+        const int64_t phcAtNs     = ticksNs(s_read[1], s_cap);
+        const int64_t stampSpanNs = ticksNs(s_read[1], s_read[0]);
+        const int64_t phcSpanNs   = ticksNs(s_read[2], s_read[1]);
+        lower(s_minStampAtNs, stampAtNs);
+        lower(s_minPhcAtNs, phcAtNs);
+        lower(s_minStampSpanNs, stampSpanNs);
+        lower(s_minPhcSpanNs, phcSpanNs);
+        /* Each read sits a fixed way into its bracket, so the bracket's start is
+         * the read less a constant -- unless the bracket stretched, and then the
+         * read may be anywhere in it. */
+        edge.placed =
+            stampSpanNs - s_minStampSpanNs <= kStallNs && phcSpanNs - s_minPhcSpanNs <= kStallNs;
+        edge.edgeNs -= stampAtNs - s_minStampAtNs;
+        edge.phcLateNs = phcAtNs - s_minPhcAtNs;
+    }
 
     const uint32_t seq = s_seq.load(std::memory_order_relaxed) + 1;
     s_seq.store(seq, std::memory_order_relaxed);
-    s_lastStampUs = stampUs;
+    s_lastStampUs = edge.edgeNs / 1000;
     ++s_edges;
-    if (ns < 0 || ns > kMaxPlausibleNs) {
+    if (!edge.placed) {
+        ++s_dropped;
+    }
+    if (!matched) {
         ++s_unmatched;
         /* Not this edge's figure, so the next lookup must not use it either. */
         s_lastNs = -1;
@@ -170,6 +241,7 @@ void IRAM_ATTR onEdge(const int64_t stampUs)
         ++s_hist[bucket];
     }
     s_seq.store(seq + 1, std::memory_order_release);
+    return edge;
 }
 
 bool forEdge(const int64_t stampUs, int64_t *ns)
@@ -206,6 +278,7 @@ bool stats(Stats *out)
         Stats copy     = {};
         copy.edges     = s_edges;
         copy.unmatched = s_unmatched;
+        copy.dropped   = s_dropped;
         copy.lastNs    = s_lastNs;
         copy.minNs     = s_minNs == INT64_MAX ? 0 : s_minNs;
         copy.maxNs     = s_maxNs;
