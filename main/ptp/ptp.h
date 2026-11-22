@@ -63,12 +63,20 @@ inline IRAM_ATTR bool hardware()
 
 /* The counter, in nanoseconds. IRAM-safe: the registers are read directly, so
  * the PPS interrupt may call it while the flash cache is off for an OTA write.
- * Reading the nanoseconds latches the seconds, so the two cannot straddle a
- * second boundary. */
+ * The two registers are not latched together: a pair read across the rollover
+ * came back a second ahead and stepped the counter by it. Reading the
+ * nanoseconds on both sides of the seconds shows whether a rollover fell
+ * between them, and the read after one cannot meet another. */
 inline IRAM_ATTR int64_t nowNs()
 {
-    const uint32_t ns  = EMAC_PTP.sys_nanosec.ts_sub_seconds;
-    const uint32_t sec = EMAC_PTP.sys_seconds.ts_second;
+    uint32_t ns;
+    uint32_t sec;
+    uint32_t nsAfter;
+    do {
+        ns      = EMAC_PTP.sys_nanosec.ts_sub_seconds;
+        sec     = EMAC_PTP.sys_seconds.ts_second;
+        nsAfter = EMAC_PTP.sys_nanosec.ts_sub_seconds;
+    } while (nsAfter < ns);
     return static_cast<int64_t>(sec) * 1000000000LL + ns;
 }
 
