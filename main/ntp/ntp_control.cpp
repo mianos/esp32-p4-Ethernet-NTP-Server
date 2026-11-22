@@ -44,7 +44,7 @@ constexpr uint16_t kAssocId = 1;
 
 constexpr uint32_t kNtpUnixDelta = 2208988800u;
 
-/* 2^-20 s, about 1 us -- the granularity the reply stamps really have. */
+/* 2^-20 s, about 1 us, as in the replies. */
 constexpr int32_t kPrecision = -20;
 
 /* Does a comma-separated request field name `var`? An empty field names
@@ -70,17 +70,12 @@ bool wants(const uint8_t *field, size_t len, const char *var)
     return false;
 }
 
-/* A data field that is appended one whole `name=value,` pair at a time, and
- * only for the names the request asked for. A pair that does not fit is
- * dropped entire: the client splits on commas, so half a pair would be read as
- * the next one's name. */
+/* Appends whole `name=value,` pairs, only for the names requested; a pair that
+ * does not fit is dropped entire. */
 class Writer {
 public:
     Writer(uint8_t *out, size_t cap, const uint8_t *filter, size_t filterLen)
-        /* The whole buffer less the padding, not one fragment's worth: the
-         * list is written entire and cut into fragments afterwards. Clamped to
-         * a fragment it stopped at 468 octets and the rest of the list was
-         * dropped without the client being told. */
+        /* The whole buffer less padding: the list is fragmented afterwards. */
         : m_out(out), m_cap(cap >= 3 ? cap - 3 : 0), m_filter(filter), m_filterLen(filterLen)
     {
         m_len = kHeaderLen;
@@ -146,11 +141,7 @@ private:
     size_t         m_len;
 };
 
-/* NTP-era seconds and fraction, the l_fp form timestamps are read in.
- *
- * The `0x` is not decoration: ntpq's parser wants a prefixed 32-bit value and
- * answers EINVAL to the bare eight digits a hand-written reply would use, and
- * the classic C client's atolfp reads the prefix too. */
+/* l_fp as 0xSSSSSSSS.FFFFFFFF; ntpq rejects it without the 0x. */
 void stamp(Writer &w, const char *name, time_t when)
 {
     if (when == 0) {
@@ -159,11 +150,8 @@ void stamp(Writer &w, const char *name, time_t when)
     w.pair(name, "0x%08x.%08x", static_cast<uint32_t>(when) + kNtpUnixDelta, 0u);
 }
 
-/* Every name the two writers can emit. A request for anything else is answered
- * with "unknown variable" rather than silence, because that is what makes the
- * client retry one variable at a time and carry on past the gap -- `ntpq -c
- * sysstats` asks for a raw `_r` form of each counter as well, and this device
- * serves the plain one. */
+/* Every name the writers can emit. Anything else gets "unknown variable",
+ * which makes ntpq retry one name at a time rather than give up. */
 constexpr const char *kSystemNames[] = {
     "version",      "processor",     "system",        "peermode",    "peeradr",    "stratum",
     "refid",        "leap",          "precision",     "rootdelay",   "rootdisp",   "rootdist",
@@ -187,16 +175,14 @@ bool knownName(const char *name, size_t len, const char *const *list, size_t cou
             return true;
         }
     }
-    /* The `_r` forms are the same counter with its units spelled out; the
-     * writers emit both, so any known name is known with the suffix too. */
+    /* Any known name is also known with an `_r` suffix. */
     if (len > 2 && name[len - 2] == '_' && name[len - 1] == 'r') {
         return knownName(name, len - 2, list, count);
     }
     return false;
 }
 
-/* Every name in a comma-separated field has to be served, or the whole request
- * is an unknown-variable error. */
+/* All requested names must be known, or the request is an error. */
 bool allKnown(const uint8_t *field, size_t len, const char *const *list, size_t count)
 {
     const char *text = reinterpret_cast<const char *>(field);
@@ -219,9 +205,8 @@ double ms(int64_t ns)
     return static_cast<double>(ns) / 1e6;
 }
 
-/* The system's own variables. Names follow RFC 5905 appendix B so `ntpq -c
- * sysinfo` and `-c sysstats` decode them, and nothing is claimed that is not
- * measured. */
+/* System variables, named per RFC 5905 appendix B for ntpq sysinfo and
+ * sysstats. */
 void writeSystemVars(Writer &w, const ControlFacts &f)
 {
     w.pair("version", "\"%s\"", f.version != nullptr && f.version[0] != '\0' ? f.version : "?");
@@ -246,8 +231,7 @@ void writeSystemVars(Writer &w, const ControlFacts &f)
     w.counter("ss_numctlreq", f.controlRequests);
     w.counter("ss_received", f.requests);
     w.counter("ss_thisver", f.requests);
-    /* Everything arrives over IPv4 or a modern IPv6 stack here, so "older
-     * version" and the NTPv1 counters have nothing to report. */
+
     w.counter("ss_oldver", 0);
     w.counter("ss_ver1", 0);
     w.counter("ss_ver1client", 0);
@@ -260,16 +244,13 @@ void writeSystemVars(Writer &w, const ControlFacts &f)
     w.counter("ss_badauth", 0);
     w.counter("ss_declined", 0);
     w.counter("ss_restricted", 0);
-    /* Seconds since the counters were cleared. They never have been, so this
-     * is the uptime -- and ntpq uses it as the period when it turns the packet
-     * counts into rates, so a zero here divides by zero there. */
+    /* The counters are never cleared, so this is the uptime; ntpq divides by
+     * it. */
     w.counter("ss_reset", f.uptimeS);
 }
 
-/* The association's variables. The receiver is given the address and hostname a
- * reference clock uses in ntpd -- 127.127.20.0 with a "(...)" in srchost --
- * because that is exactly what it is: a local reference, not a network peer,
- * and `ntpq -p` renders it as one. */
+/* Association variables. The receiver appears as ntpd shows a reference clock:
+ * 127.127.20.0, with srchost in parentheses. */
 void writePeerVars(Writer &w, const ControlFacts &f)
 {
     w.pair("srcadr", "%s", f.peer.c_str());
@@ -311,15 +292,13 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
         return 0;
     }
 
-    /* Version 1 to 4, as RFC 9327 section 2 requires: a control message with a
-     * version we do not speak is not answered at all. */
+    /* Versions 1 to 4 only (RFC 9327 section 2). */
     const uint8_t version = static_cast<uint8_t>((req[0] >> 3) & 0x07);
     if (version < 1 || version > 4) {
         return 0;
     }
 
-    /* A response is never answered. Without this two servers that speak mode 6
-     * answer each other's answers for ever, started by one spoofed datagram. */
+    /* Never answer a response, or two servers can loop. */
     if ((req[1] & kBitResponse) != 0) {
         return 0;
     }
@@ -328,23 +307,18 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
     const uint16_t sequence = static_cast<uint16_t>((req[2] << 8) | req[3]);
     const uint16_t assoc    = static_cast<uint16_t>((req[6] << 8) | req[7]);
 
-    /* The request's data field, for a varlist: what it actually sent, never
-     * more than the count it claims. */
+    /* The request's data field. */
     const size_t   claimed  = static_cast<size_t>((req[10] << 8) | req[11]);
     const uint8_t *field    = req + kHeaderLen;
     size_t         fieldLen = len - kHeaderLen;
     if (fieldLen > kMaxData) {
         fieldLen = kMaxData;
     }
-    /* The count should bound the data. A client that leaves it at zero and
-     * still sends names means all of them, and ntpq does send the count, so
-     * treating zero as "none" would silently answer the whole document. */
+    /* Bounded by the count field when it is non-zero. */
     if (claimed != 0 && fieldLen > claimed) {
         fieldLen = claimed;
     }
-    /* The datagram is padded to a 32-bit boundary and the padding is not part
-     * of the data. Left on, the last name reads as "refid\0\0\0" and matches
-     * nothing. */
+    /* Strip the 32-bit padding. */
     while (fieldLen > 0 && field[fieldLen - 1] == 0) {
         --fieldLen;
     }
@@ -370,11 +344,8 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
         }
     }
 
-    /* Two status words, and which field gets which is not a choice: an
-     * association's status is the peer status word (configured, reachable,
-     * selected) and the system's is the system one (the leap notice and what is
-     * doing the disciplining). ntpq takes the selection character it prints
-     * from the peer word, so swapping them marks the source as a falsetick. */
+    /* The association gets the peer status word and the system the system
+     * word; ntpq takes the selection character from the peer word. */
     const uint8_t peerFlags =
         facts.locked ? static_cast<uint8_t>(kPstConfig | kPstReach | kSelSysPeer) : kPstConfig;
     const uint16_t peerStatus = static_cast<uint16_t>(static_cast<uint16_t>(peerFlags) << 8);
@@ -410,9 +381,7 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
         status = static_cast<uint16_t>(static_cast<uint16_t>(error) << 8);
     }
 
-    /* Header. The version, sequence and association are echoed so the client
-     * can match this to its request, and LI is zero as RFC 9327 section 2
-     * requires of a control message. */
+    /* Echo version, sequence and association; LI is 0 (RFC 9327 section 2). */
     out[0]             = static_cast<uint8_t>((version << 3) | 6);
     out[1]             = static_cast<uint8_t>(kBitResponse | (error != 0 ? kBitError : 0) | op);
     out[2]             = static_cast<uint8_t>(sequence >> 8);
@@ -429,9 +398,7 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
 
     total = static_cast<uint16_t>(count);
 
-    /* This datagram carries one chunk from `offset`. A fragment that is not the
-     * last says so, and the client stitches by offset -- it drops anything that
-     * overlaps or leaves a hole. */
+    /* One chunk from `offset`; the M bit marks all but the last. */
     size_t chunk = count > offset ? count - offset : 0;
     if (chunk > kMaxData) {
         chunk = kMaxData;
@@ -443,8 +410,7 @@ size_t buildControlReply(uint8_t *out, size_t cap, const uint8_t *req, size_t le
     out[11] = static_cast<uint8_t>(chunk & 0xFF);
     std::memmove(out + kHeaderLen, out + kHeaderLen + offset, chunk);
 
-    /* Padded to a 32-bit boundary, which the client checks; the padding is not
-     * counted. */
+    /* Pad to 32 bits; the padding is not counted. */
     size_t sent = kHeaderLen + chunk;
     while (sent & 0x3) {
         out[sent++] = 0;

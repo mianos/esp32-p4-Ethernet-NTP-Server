@@ -20,30 +20,19 @@ namespace {
 
 constexpr const char *TAG = "tx_lag";
 
-/* How often to measure. The figure is a property of the moment, not of the
- * build, so this is frequent enough that the window closes faster than the
- * thing it is tracking moves, and cheap enough to ignore: one datagram to
- * ourselves every few seconds. */
 constexpr uint32_t kEveryMs = 5000;
 
-/* How many samples before the centre is published. Five is enough for a median
- * to survive two bad ones; below it, the value would jump between the first few
- * probes and a reply would carry whatever the last one saw. */
+/* Samples before the median is used; until then the newest sample is. */
 constexpr uint32_t kMinSamples = 5;
 
-/* Twelve bytes: big enough that the stack does the real work, small enough that
- * the wire time (about 1 us at 100 Mbit) is well under what this measures. */
 constexpr size_t kProbeBytes = 12;
 
-/* A half round trip outside this range is not a transmit path. The floor is
- * about the granularity of the clock; the ceiling is a busy moment. */
+/* Probe results outside this range are discarded. */
 constexpr int64_t kMinNs = 2000;
 constexpr int64_t kMaxNs = 5000000;
 
-/* How long one probe waits before giving up. */
-/* The probe socket's own port, so the datagram is delivered to a bound socket the
- * way a reply is. Sending to a dead port instead works, but the ICMP that comes
- * back is handled inside the same call and inflates the figure. */
+/* The probe sends to its own bound socket: a dead port's ICMP reply would be
+ * handled inside the call and inflate it. */
 constexpr uint16_t kProbePort = 0; /* 0 = let lwIP pick */
 
 constexpr int kTaskStack = 4096;
@@ -84,15 +73,11 @@ void TxLag::absorb(int64_t lag)
     }
     const uint32_t n = m_samples.fetch_add(1, std::memory_order_relaxed) + 1;
 
-    /* A median needs enough of the ring to be a median of anything. Until then
-     * the newest sample stands, which is what the old code did on its first. */
     if (m_ringFill < kMinSamples) {
         m_lagNs.store(lag, std::memory_order_relaxed);
         return;
     }
 
-    /* Insertion sort of at most fifteen values: cheaper than a call and the ring
-     * is already in cache. */
     int64_t sorted[kRing] = {};
     for (uint32_t i = 0; i < m_ringFill; ++i) {
         const int64_t v = m_ring[i];
@@ -106,8 +91,7 @@ void TxLag::absorb(int64_t lag)
 
     const int64_t median = sorted[m_ringFill / 2];
 
-    /* Spread around that centre, taken the same way so a single stall cannot
-     * widen the stated error. */
+    /* Median absolute deviation, so one stall does not widen it. */
     int64_t deviations[kRing] = {};
     for (uint32_t i = 0; i < m_ringFill; ++i) {
         const int64_t d = m_ring[i] - median;
@@ -126,9 +110,6 @@ void TxLag::absorb(int64_t lag)
     m_lagNs.store(median, std::memory_order_relaxed);
     m_scatterNs.store(deviations[m_ringFill / 2], std::memory_order_relaxed);
 
-    /* Every sample, because the point of this run is to see the path move: the
-     * raw value says what one probe saw, the two aggregates say what the
-     * correction and the claimed error would be if they were published now. */
     ESP_LOGI(TAG, "txprobe raw %lld us  median %.1f  mad %.1f  n %u", (long long)(lag / 1000),
              lagUs(), scatterUs(), (unsigned)n);
 }
@@ -144,8 +125,7 @@ void TxLag::recordReply(int64_t ns)
 
 void TxLag::reportReplies()
 {
-    /* Drained by the same task that probes, once a minute. A slot that arrives
-     * while this runs is simply counted next time. */
+    /* Called by the probe task once a minute. */
     const uint32_t filled =
         std::min<uint32_t>(m_replyPos.exchange(0, std::memory_order_relaxed), kReplyRing);
     if (filled < 4) {
@@ -172,7 +152,7 @@ void TxLag::reportReplies()
 
 void TxLag::task()
 {
-    /* Nothing to measure until there is an address to send to. */
+    /* Wait for an address. */
     for (;;) {
         if (net_state::linkUp() && net_state::netif() != nullptr) {
             break;
@@ -185,7 +165,7 @@ void TxLag::task()
         if (lag >= kMinNs && lag <= kMaxNs) {
             absorb(lag);
         }
-        /* Every twelfth probe: a minute, matching the reply report cadence. */
+        /* Every twelfth probe, about a minute. */
         if (++m_tick >= 12) {
             m_tick = 0;
             reportReplies();
@@ -201,10 +181,8 @@ int64_t TxLag::probe()
         return -1;
     }
 
-    /* Our own address and our own bound port, so the datagram traverses the
-     * stack and the driver the way a reply does, and is delivered rather than
-     * refused. Whether it is read does not matter: the interval ends when the
-     * call returns. */
+    /* Our own address and a bound port, so the datagram is delivered rather
+     * than refused; it is never read. */
     esp_netif_ip_info_t ip = {};
     if (esp_netif_get_ip_info(netif, &ip) != ESP_OK || ip.ip.addr == 0) {
         return -1;
@@ -232,16 +210,8 @@ int64_t TxLag::probe()
     uint8_t payload[kProbeBytes] = {};
     int64_t result               = -1;
 
-    /* The quantity that matters is how long *after the stamp* the datagram is
-     * still inside the stack, because that is how early the stamp is. sendto()
-     * returning is where the userspace part of that ends, so its duration is a
-     * direct measurement of it -- and a lower bound on the whole path, since the
-     * driver and the wire happen after the call returns.
-     *
-     * This replaced a self-send and a half round trip. That one read about 1.5x
-     * too high: it measured two stack traversals, two wakeups and the loopback
-     * dispatch, where a reply does one. It showed up as a correction that moved
-     * a client's offset from -39 us to +18 us instead of to about zero. */
+    /* sendto()'s duration: how long after a pre-send stamp the datagram is
+     * still in the stack. A half round trip read about 1.5x too high. */
     const int64_t sent = esp_timer_get_time();
     if (sendto(sock, payload, sizeof(payload), 0, reinterpret_cast<const sockaddr *>(&to),
                sizeof(to)) >= 0) {

@@ -12,11 +12,7 @@ ServePath &ServePath::instance()
 
 int64_t ServePath::settle(int64_t nowUs, int64_t raiseToNs)
 {
-    /* The whole state is one word -- the claim in nanoseconds above, the minute
-     * it was last decayed at below -- so it is read, worked on and swapped back
-     * with no lock. The reply path reads this for every packet and the status
-     * every second, and a lock here is interrupts off on that core. If another
-     * caller swaps first, the arithmetic is done again on what it left. */
+    /* Lock-free: the state is one word, updated by compare-and-swap. */
     const uint32_t nowMin = static_cast<uint32_t>(nowUs / kPeriodUs) & kMinuteMask;
     uint32_t       cur    = m_state.load(std::memory_order_relaxed);
     for (;;) {

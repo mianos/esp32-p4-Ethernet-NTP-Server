@@ -1,24 +1,11 @@
 /*
- * The NTP responder: UDP/123, one socket, 48-byte replies, dual-stack.
+ * The NTP responder: UDP/123, one dual-stack socket, basic and interleaved
+ * modes, and mode 6 control. The time and stratum come from a TimeRef: the
+ * upstream SNTP clock (stratum 3, the default) or the GPS/PPS reference
+ * (stratum 1), chosen by Settings::timeSource.
  *
- * This is the milestone the rest of the firmware was plumbing for. What it
- * serves is decided by a TimeRef, and that split is the whole design: the reply
- * builder knows the protocol and nothing about where the time came from, so the
- * discipline path (GPS/PPS, in gps_time.cpp) plugs in behind the same three
- * calls instead of editing the packet code.
- *
- * Honesty is a protocol requirement, not politeness. A stratum 1 server whose
- * GPS has lost lock must advertise stratum 16 with the leap indicator at 3 --
- * "do not use me" -- because every client downstream believes whatever it is
- * told. So:
- *
- *   locked      stratum = TimeRef's, leap indicator 0, refid names the reference
- *   not locked  stratum 16,              leap indicator 3, refid "INIT"
- *
- * Two TimeRefs exist: the upstream SNTP clock (stratum 3, the default) and the
- * GPS/PPS reference (stratum 1, gps_time.cpp). Settings::timeSource decides
- * which one is served, and the responder itself does not know the difference --
- * that is the point of the split.
+ *   locked      the TimeRef's stratum, leap from the reference, its refid
+ *   not locked  stratum 16, leap indicator 3, refid "INIT"
  */
 #pragma once
 
@@ -36,26 +23,23 @@
 #include "ntp/tx_lag.h"
 #include "clock/time_ref.h"
 
-/* Only a reference is taken to it, and lwIP is a heavy include for a header. */
+/* Forward-declared to keep lwIP out of this header. */
 struct sockaddr_storage;
 
-/* The upstream SNTP clock as a TimeRef. Locked means the clock was set from an
- * upstream server recently enough to still be worth serving: "was set once, at
- * boot" is not a lock, and a responder that cannot tell the difference will
- * hand out a drifting clock with a straight face. */
+/* The upstream SNTP clock as a TimeRef; locked only while its last sync is
+ * recent. */
 std::unique_ptr<TimeRef> makeUpstreamTimeRef();
 
-/* The reference the responder actually serves: whichever Settings::timeSource()
- * names, re-read on every call so POST /config takes effect without swapping
- * anything out from under the serving task. */
+/* The TimeRef Settings::timeSource() names, re-read on every call so a config
+ * change applies at once. */
 std::unique_ptr<TimeRef> makeTimeRef();
 
 class NtpServer {
 public:
     static NtpServer &instance();
 
-    /* Bind :123 and start the answering task. Idempotent; a no-op while
-     * serveNtp is off, and needs an address, so it is called on the lease. */
+    /* Bind :123 and start the task. Idempotent; a no-op while serveNtp is off.
+     * Called once there is an address. */
     esp_err_t begin();
 
     /* serveNtp changed under a running device: start or stop accordingly. */
@@ -63,37 +47,22 @@ public:
 
     bool running() const { return m_running.load(std::memory_order_relaxed); }
 
-    /* Counters for /healthz. Read from the HTTP task while the responder task
-     * writes them, hence the atomics. */
+    /* Counters for /healthz. */
     uint32_t requests() const { return m_requests.load(std::memory_order_relaxed); }
     uint32_t interleavedServed() const { return m_interleaved.load(std::memory_order_relaxed); }
-    /* How often a request could have been an interleaved one (a non-zero origin
-     * and a receive that differs from its transmit), and how often the origin
-     * matched a saved receive timestamp. A basic client that echoes the
-     * previous transmit counts as a try and never as a hit. */
+    /* Requests that could be interleaved (non-zero origin, receive differing
+     * from transmit), and those whose origin matched a saved receive stamp. */
     uint32_t interleavedTried() const { return m_ilTry.load(std::memory_order_relaxed); }
-    /* Replies whose transmit stamp had the socket-lag correction applied. With
-     * the raw send that is none of them, and the healthz figure is then a
-     * description of the fallback rather than of the wire. */
+    /* Replies sent through sendto() with the TxLag correction; zero while the
+     * raw 1588 path is used. */
     uint32_t txCorrected() const { return m_txCorrected.load(std::memory_order_relaxed); }
     uint32_t interleavedHit() const { return m_ilHit.load(std::memory_order_relaxed); }
     uint32_t interleavedSaved() const { return m_ilSaved.load(std::memory_order_relaxed); }
     uint32_t interleavedKeyOnly() const { return m_ilKeyOnly.load(std::memory_order_relaxed); }
-    /* Measured transmit-path delay, so a reader can see the correction the
-     * replies carry. Zero means "not measured yet".
-     *
-     * Paired with the spread the same window produced. The two answer different
-     * questions -- what a reply is shifted by, and how much that shift is
-     * trusted -- and a run that watches only the first cannot tell a path that
-     * moved from a loop reporting its own noise. */
+    /* TxLag's correction and spread; zero until measured. */
     double txLagUs() const { return TxLag::instance().lagUs(); }
     double txScatterUs() const { return TxLag::instance().scatterUs(); }
 
-    /* What the responder has done with requests, beyond counting the answered
-     * ones. `answered` alone cannot tell a client that is being rate-limited
-     * from one that has stopped asking, and cumulative numbers cannot tell a
-     * busy minute from a busy week -- hence the minute rate and the two
-     * rejection counters, all of which move on their own. */
     struct Counters {
         uint32_t answered    = 0;  /* cumulative */
         uint32_t kod         = 0;  /* cumulative KoD replies */
@@ -107,11 +76,8 @@ public:
     /* What a reply would claim right now (also what /healthz reports). */
     TimeReference reference() const;
 
-    /* The root delay and dispersion a reply would carry right now, in
-     * microseconds, before the 16.16 field rounds them: the reference's own
-     * figures where it states them (the GPS), the LAN guesses where it cannot
-     * (the upstream). /healthz reports these so the endpoint and the wire cannot
-     * disagree about how stale the claim is. */
+    /* Root delay and dispersion a reply would carry now, in us, before 16.16
+     * rounding. */
     struct RootFigures {
         double delayUs      = 0.0;
         double dispersionUs = 0.0;
@@ -126,16 +92,12 @@ private:
     /* Task body: receive, decide, answer. Exits when m_running goes false. */
     void serveLoop();
 
-    /* The device side of a mode-6 reply: which reference is serving, what it
-     * claims, and the counters. */
+    /* The device facts for a mode 6 reply. */
     void        fillControlFacts(ControlFacts &facts, const TimeReference &ref) const;
     static void taskEntry(void *arg);
 
-    /* Per-client, per-minute extremes of (our receive stamp - the client's
-     * send stamp). The constant part of that difference is the client's clock
-     * offset and the path; the range is how far the served time moved against
-     * that client while it was watching, which is the only view of our own
-     * error available without hardware stamps. Fixed storage and task-owned. */
+    /* Per-client, per-minute extremes of (our receive stamp - client transmit
+     * stamp), for ServePath. Responder task only. */
     struct ServePathSlot {
         uint32_t addr   = 0;
         uint32_t count  = 0;
@@ -145,8 +107,8 @@ private:
     };
     static constexpr int kServeSlots          = 6;
     ServePathSlot        m_serve[kServeSlots] = {};
-    /* Why samples are being dropped, while the instrument settles: family,
-     * empty origin, out-of-range delta. Index 0 counts the ones kept. */
+    /* ServePath sample outcomes: kept, wrong family, zero origin, out of
+     * range. */
     uint32_t m_serveWhy[4]   = {};
     int64_t  m_serveReportUs = 0;
     void     recordServePath(const sockaddr_storage &from, const struct timespec &received,
@@ -170,8 +132,7 @@ private:
     std::atomic<uint32_t>    m_ratePerMin{0};
     std::atomic<int64_t>     m_lastServedUs{-1};
     std::atomic<uint8_t>     m_clients{0};
-    /* Recent source hashes, so "how many clients" is a fact rather than a guess
-     * from the packet count. Fixed storage: the responder task owns it. */
+    /* Recent source hashes, for the client count. Responder task only. */
     static constexpr uint8_t kRecentSources           = 16;
     uint32_t                 m_recent[kRecentSources] = {};
     uint8_t                  m_recentAt               = 0;

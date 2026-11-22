@@ -37,24 +37,15 @@ namespace {
 
 constexpr int    kPort        = 123;
 constexpr size_t kPacketBytes = 48; /* NTPv4 header, no MAC */
-/* Raw-frame replies, with the hardware transmit stamp. */
-/* Raw-frame replies with the hardware transmit stamp. Off is the old
- * software-only path, kept because it is the fallback when a stamp is missing. */
+/* Send replies as raw frames on the 1588 path when the request was hardware
+ * stamped; otherwise, or when false, through sendto(). */
 constexpr bool     kRawSend          = true;
 constexpr uint32_t kReceiveTimeoutMs = 1000; /* how often the task looks up */
 constexpr uint32_t kReportEveryMs    = 60000;
-/* 12288, not 4096: every request copies a GpsTime::Status by value (the
- * reference's error budget and lock state come out of it) and status() parses
- * the antenna delay with from_chars<double>, whose fast_float path alone is
- * several hundred bytes. At 4096 the stack-protector tripped inside
- * from_chars within a minute of the first client, and the board rolled back.
- * The control path then added a 483-octet request buffer and a reply buffer of
- * up to 1295 (a long variable list in one piece), which is where the rest of
- * the headroom went. */
+/* Mode 6 copies a GpsTime::Status by value and uses request and reply buffers
+ * of about 0.5 and 1.3 KB; 4096 overflowed. */
 constexpr int kTaskStack = 12288;
-/* Above the status logger and just under lwIP (18): a woken responder should
- * preempt now rather than at the next scheduling point. It runs for
- * microseconds per packet, so nothing is starved by it. */
+/* Just under lwIP (18), so a woken responder runs at once. */
 constexpr UBaseType_t kTaskPriority = 17;
 
 constexpr size_t kStampBytes     = 8;
@@ -75,44 +66,26 @@ constexpr uint8_t kStratumUnlocked = 16; /* "unsynchronised": ignore this server
 constexpr uint8_t kLeapNoWarning   = 0;
 constexpr uint8_t kLeapAlarm       = 3; /* "clock not synchronised" */
 
-/* 2^-20 s, roughly one microsecond: the granularity this clock can actually
- * distinguish, as opposed to a made-up number of digits. */
+/* 2^-20 s, about 1 us. */
 constexpr uint8_t kPrecision = 0xEC;
 
-/* Stratum while the upstream is the reference. The upstream's own stratum is
- * not visible through lwIP's SNTP client, so this claims one hop more than a
- * well-behaved internet server rather than one fewer than reality: a client
- * that under-estimates the distance to us is the one that gets hurt. */
+/* Stratum while the upstream is the reference. lwIP's SNTP client does not
+ * expose the upstream's stratum, so this assumes a stratum 2 upstream. */
 constexpr uint8_t kStratumFromUpstream = 3;
 
 constexpr uint32_t kRefIdRate = (static_cast<uint32_t>('R') << 24) | ('A' << 16) | ('T' << 8) | 'E';
 
-/* Root delay and dispersion, 16.16 fixed point. The delay is a standing guess:
- * the round trip to the upstream is not something lwIP exposes, and 1 ms is a
- * fair LAN number. The dispersion starts from the same 1 ms and grows with age
- * (see rootDispersion()), so it never claims a better path than it knows. */
+/* Upstream root delay, 16.16: lwIP does not expose the round trip, so 1 ms is
+ * assumed. Dispersion starts there and grows with age (rootUncertainty()). */
 constexpr uint32_t kRootDelay = 65; /* 1 ms */
 
-/* Cheap-crystal ageing, 15 ppm: after an hour without the reference this is
- * 54 ms of claimed uncertainty, which is what a client needs in order to
- * demote this server instead of trusting a clock nobody is correcting. */
+/* Dispersion growth since the last upstream sync: 15 ppm, 54 ms an hour. */
 constexpr double kDispersionPpm = 15.0;
 
 /* ---- Rate limiting ----------------------------------------------------
- * A LAN full of clients polling at minpoll is fine; one client in a loop is
- * not. Each source address gets a small bucket: the burst is answered, then
- * one token per few seconds, then a single KoD RATE per second, then silence.
- * Only eight sources are remembered, which is a deliberate bound -- the oldest
- * entry is recycled, so a flood from many addresses degrades to answering the
- * newest ones rather than growing the table.
- *
- * The burst is 16 because that is what a *person* testing with sntp costs: sntp
- * fires five queries per run, so two runs back to back are ten packets, and a
- * limit that bites during ordinary manual testing teaches the wrong lesson. The
- * sustained rate is what actually protects the device, and 1 per 2 s is already
- * ~30x more permissive than any real daemon (chronyd, timesyncd and ntpd all
- * poll every 32-1024 s).
- */
+ * A token bucket per source address: a burst of 16 (a few manual sntp runs),
+ * then one every 2 s, then one KoD RATE a second, then silence. Eight sources
+ * are tracked; the least recently seen is recycled. */
 
 constexpr int      kBucketDepth    = 16;
 constexpr uint32_t kRefillEveryMs  = 2000;
@@ -138,8 +111,7 @@ uint32_t load32(const uint8_t *in)
            (static_cast<uint32_t>(in[2]) << 8) | static_cast<uint32_t>(in[3]);
 }
 
-/* A stamp back to nanoseconds since the epoch, or 0 when the field is empty (a
- * client that sent no origin has nothing to compare against). */
+/* An NTP timestamp as Unix ns, or 0 for an empty field. */
 int64_t stampToNs(const uint8_t *stamp)
 {
     const uint32_t seconds = load32(stamp);
@@ -151,10 +123,7 @@ int64_t stampToNs(const uint8_t *stamp)
            static_cast<int64_t>((fraction * 1000000000ull) >> 32);
 }
 
-/* 32-bit seconds since 1900 followed by a 32-bit binary fraction. The seconds
- * field wraps in 2036 and the era is implied -- that is the format, not an
- * oversight: a client and server that disagree about the era are already
- * 68 years apart and no 48-byte reply can fix it. */
+/* 32-bit seconds since 1900 and a 32-bit fraction; the era is implied. */
 void writeTimestamp(uint8_t *out, const struct timespec &ts)
 {
     const uint32_t seconds = static_cast<uint32_t>(static_cast<int64_t>(ts.tv_sec) +
@@ -172,10 +141,8 @@ void writeTimestamp(uint8_t *out, time_t when)
     writeTimestamp(out, ts);
 }
 
-/* 16.16 fixed point, which resolves about 15 us. A microsecond-accurate
- * reference therefore rounds *up* to one least significant bit rather than
- * claiming zero uncertainty -- the field cannot say 10 us, and 15 is closer to
- * the truth than 0. */
+/* 16.16 fixed point (about 15 us per bit), rounded up so a small figure is
+ * never sent as zero. */
 uint32_t toFixed(double seconds)
 {
     const double fixed = std::ceil(seconds * 65536.0);
@@ -185,12 +152,8 @@ uint32_t toFixed(double seconds)
     return fixed >= 65535.0 ? 0xFFFFu : static_cast<uint32_t>(fixed);
 }
 
-/* Root delay and dispersion, before the 16.16 field rounds them: what the
- * reference states about itself if it can, the generic LAN guesses if it
- * cannot. The difference is the point -- the GPS measures microseconds and says
- * so, the upstream SNTP server has no way to measure the round trip and says
- * 1 ms rather than pretend, and a holdover grows the GPS's number until a
- * client can see it degrade. */
+/* The reference's own figures when it states them (GPS), otherwise the
+ * upstream defaults above. */
 struct RootUncertainty {
     double delayS      = 0.0;
     double dispersionS = 0.0;
@@ -203,10 +166,6 @@ RootUncertainty rootUncertainty(const TimeReference &ref, time_t now)
                 static_cast<double>(ref.dispersionNs) * 1e-9};
     }
 
-    /* Ageing at the rate of a cheap crystal: after an hour without the
-     * reference this is 54 ms of claimed uncertainty, which is what a client
-     * needs in order to demote this server instead of trusting a clock nobody
-     * is correcting. */
     const double    lanS = static_cast<double>(kRootDelay) / 65536.0;
     RootUncertainty figures{lanS, lanS};
     if (ref.lastSync != 0 && now > ref.lastSync) {
@@ -215,9 +174,8 @@ RootUncertainty rootUncertainty(const TimeReference &ref, time_t now)
     return figures;
 }
 
-/* Rate limiting is per address, so a v4 client arriving over the dual-stack
- * socket (AF_INET6, v4-mapped) and one arriving over a v4-only build are keyed
- * differently -- harmless, and cheaper than normalising. */
+/* The source address as a 16-byte key; v4-mapped addresses are not
+ * normalised. */
 void addressKey(const sockaddr_storage &src, uint8_t out[kAddressKeySize])
 {
     std::memset(out, 0, kAddressKeySize);
@@ -245,8 +203,6 @@ std::string sourceText(const sockaddr_storage &src)
         const auto *v6 = reinterpret_cast<const sockaddr_in6 *>(&src);
         ip6_addr_t  lwip{};
         std::memcpy(lwip.addr, &v6->sin6_addr, sizeof(lwip.addr));
-        /* ip6addr_ntoa_r is lwIP's own formatter and wants an array, so this one
-         * keeps its buffer; everything around it does not need one. */
         char addr[IP6ADDR_STRLEN_MAX] = {};
         ip6addr_ntoa_r(&lwip, addr, sizeof(addr));
         return std::format("[{}]:{}", addr, ntohs(v6->sin6_port));
@@ -257,23 +213,10 @@ std::string sourceText(const sockaddr_storage &src)
 
 /* ---- Interleaved mode (RFC 9769) --------------------------------------
  *
- * A client that can is asking for the transmit timestamp of the *previous*
- * reply rather than a prediction of this one, which is the only way a server
- * with a software transmit stamp can hand out a timestamp it did not have to
- * guess. The negotiation is implicit and rides in the timestamp fields: an
- * interleaved request carries, as its origin timestamp, the receive timestamp
- * of the reply before it, and the reply then carries the saved transmit
- * timestamp of that same exchange.
- *
- * The RFC requires a fixed-length queue of receive/transmit pairs, keyed by IP
- * and not by port (clients move ports), with old entries dropped, and receive
- * timestamps that are unique across the queue. The queue is small on purpose: it
- * only has to outlive one round trip, and a client that falls further behind
- * than this simply gets a basic reply, which every client understands.
- *
- * Timestamps are kept as the eight wire octets. Nothing here needs to interpret
- * them, and echoing the exact bytes is what makes the client's match work.
- */
+ * An interleaved request carries, as its origin, the receive timestamp of our
+ * previous reply; the answer carries that reply's measured transmit timestamp.
+ * Pairs are kept per IP address (not port), as wire octets, for one round trip;
+ * a client that misses gets a basic reply. */
 constexpr size_t   kPairSlots    = 24;
 constexpr uint32_t kPairMaxAgeMs = 120000; /* a client polling slower than this starts again */
 constexpr size_t   kPairBytes    = 8;
@@ -291,8 +234,7 @@ bool isZeroStamp(const uint8_t stamp[kPairBytes])
     return std::all_of(stamp, stamp + kPairBytes, [](uint8_t b) { return b == 0; });
 }
 
-/* One fraction unit, about a quarter of a nanosecond: enough to make a
- * timestamp differ without moving it by anything measurable. */
+/* Add one fraction unit (~0.23 ns). */
 void bumpFraction(uint8_t stamp[kPairBytes])
 {
     for (int i = static_cast<int>(kPairBytes) - 1; i >= 4; --i) {
@@ -302,16 +244,12 @@ void bumpFraction(uint8_t stamp[kPairBytes])
     }
 }
 
-/* The queue is keyed by the receive timestamp a reply carried, because that is
- * what an interleaved client echoes as its origin (RFC 9769 section 2). The
- * transmit timestamp is what a *basic* client echoes, so keying on it answers
- * every RFC 5905 client in a mode it did not ask for, with an origin it then
- * rejects as bogus -- and never matches a client that did ask. */
+/* Keyed by the receive timestamp, which an interleaved client echoes; a basic
+ * client echoes the transmit timestamp. */
 class Interleaved {
 public:
-    /* Does `origin` name a reply this address was sent? The RFC forbids
-     * answering in the mode unless it does, and forbids answering twice to the
-     * same receive timestamp, so a match is consumed here. */
+    /* True if `origin` names a reply sent to this address; a match is used
+     * once, as the RFC requires. */
     bool take(const sockaddr_storage &from, const uint8_t origin[kPairBytes],
               uint8_t transmitOut[kPairBytes], uint32_t nowMs)
     {
@@ -334,8 +272,7 @@ public:
         return false;
     }
 
-    /* Every answered request saves its pair, interleaved or not: a client has
-     * to be able to become interleaved, and that needs one saved reply. */
+    /* Every answered request saves its pair, so a client can switch modes. */
     void save(const sockaddr_storage &from, const uint8_t receive[kPairBytes],
               const uint8_t transmit[kPairBytes], uint32_t nowMs)
     {
@@ -382,8 +319,6 @@ public:
         }
         slot->lastSeenMs = nowMs;
 
-        /* Refill one token per interval, never more than the burst depth: a
-         * client that has been quiet does not bank credit for a flood. */
         const uint32_t elapsed = nowMs - slot->lastRefillMs;
         if (elapsed >= kRefillEveryMs) {
             const uint32_t gained = elapsed / kRefillEveryMs;
@@ -395,9 +330,7 @@ public:
             --slot->tokens;
             return Action::Answer;
         }
-        /* Over the limit: say why once a second, then say nothing. A responder
-         * that keeps answering KoDs as fast as it is asked has not limited
-         * anything. */
+        /* Over the limit: one KoD a second, otherwise silence. */
         if (slot->lastKodMs == 0 || (nowMs - slot->lastKodMs) >= kKodIntervalMs) {
             slot->lastKodMs = nowMs;
             return Action::Kod;
@@ -425,8 +358,7 @@ private:
         return nullptr;
     }
 
-    /* Oldest first: on a LAN the working set is small, and dropping the source
-     * that has been quiet longest is the least wrong thing to do. */
+    /* An unused slot, else the least recently seen. */
     Bucket *recycle()
     {
         Bucket *oldest = &m_slots[0];
@@ -454,12 +386,9 @@ struct Request {
     uint8_t transmit[kStampBytes] = {};
 };
 
-/* Worth answering as a data request? Long enough to hold a header, a version
- * both ends speak, and in client mode. Replying to a mode 4 packet is how you
- * build an infinite conversation between two servers, so mode 4 is silence --
- * as is mode 7, the remote facility, which has nothing here to configure. Mode
- * 6 never reaches this: it is read-only control traffic and ntp_control.cpp
- * answers it. Extension fields past byte 48 are ignored and never echoed. */
+/* A client-mode (3) request of version 3 or 4 and at least 48 bytes. Other
+ * modes are not answered (mode 6 is handled before this). Extension fields are
+ * ignored. */
 bool parseRequest(const uint8_t *packet, int len, Request &req)
 {
     if (len < static_cast<int>(kPacketBytes)) {
@@ -475,8 +404,7 @@ bool parseRequest(const uint8_t *packet, int len, Request &req)
         return false;
     }
 
-    /* Echoed verbatim, as RFC 5905 requires: a client uses its own poll back
-     * to decide what it asked for, and v4 clients check it on a KoD. */
+    /* Echoed, as RFC 5905 requires. */
     req.poll = packet[2];
     std::memcpy(req.origin, packet + kOriginOffset, kStampBytes);
     std::memcpy(req.receive, packet + kReceiveOffset, kStampBytes);
@@ -484,20 +412,15 @@ bool parseRequest(const uint8_t *packet, int len, Request &req)
     return true;
 }
 
-/* The reply is always exactly 48 bytes, whatever arrived: an NTP server that
- * sends more than it receives is a reflector, and 48 is all a client needs to
- * compute offset and delay. */
-/* `savedTransmit` is the eight wire octets of the previous reply's measured
- * transmit timestamp, and makes the reply an interleaved one; null is a basic
- * reply, stamped with `transmitted`. */
+/* Always 48 bytes, never more than the request. A non-null `savedTransmit`
+ * (the previous reply's measured transmit, as wire octets) makes it an
+ * interleaved reply. */
 void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool kod,
                 const struct timespec &received, const struct timespec &transmitted,
                 const uint8_t *savedTransmit = nullptr)
 {
     const uint8_t stratum = kod ? 0 : ref.stratum;
-    /* The reference's own leap indicator while it is locked, "not
-     * synchronised" when it is not, and no warning attached to a KoD: a client
-     * told to slow down has not been told anything about leap seconds. */
+    /* Leap 3 when not locked; 0 on a KoD. */
     const uint8_t  leap  = kod ? kLeapNoWarning : (ref.locked ? ref.leap : kLeapAlarm);
     const uint32_t refId = kod ? kRefIdRate : ref.refId;
 
@@ -505,8 +428,7 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
     const uint32_t        delay       = toFixed(uncertainty.delayS);
     const uint32_t        dispersion  = toFixed(uncertainty.dispersionS);
 
-    /* The version echoes the request's: that is what ntpd does and what RFC 5905
-     * asks for, and a v3-only client is entitled to reject a v4 reply. */
+    /* The request's version, as RFC 5905 asks. */
     out[0] = static_cast<uint8_t>((leap << 6) | ((req.version & 0x07) << 3) | kModeServer);
     out[1] = stratum;
     out[2] = req.poll;
@@ -515,24 +437,17 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
     store32(out + 8, dispersion);
     store32(out + 12, refId);
 
-    /* Never synchronised means a zero reference timestamp (RFC 5905 7.3), not
-     * the Unix epoch dressed up in NTP seconds: a client that sees stratum 16
-     * also expects to see nothing claimed here. */
+    /* Zero reference timestamp when never synchronised (RFC 5905 7.3). */
     if (ref.lastSync != 0) {
         writeTimestamp(out + 16, ref.lastSync);
     } else {
         store32(out + 16, 0);
         store32(out + 20, 0);
     }
-    /* The origin timestamp exists to let the client match the reply to its own
-     * request, so it goes back byte for byte -- even if the client sent zero,
-     * which some do on the first packet. An interleaved reply echoes the
-     * request's *receive* field instead, which is what tells the client the
-     * reply is in that mode. */
+    /* Origin: the request's transmit, byte for byte (even zero); an
+     * interleaved reply echoes its receive field instead. */
     std::memcpy(out + kOriginOffset, savedTransmit != nullptr ? req.receive : req.transmit,
                 kStampBytes);
-    /* This request's arrival in both modes. The client pairs it with the
-     * request that carried it, one exchange later. */
     writeTimestamp(out + kReceiveOffset, received);
     if (savedTransmit != nullptr) {
         std::memcpy(out + kTransmitOffset, savedTransmit, kStampBytes);
@@ -541,7 +456,7 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
     }
 }
 
-/* The upstream SNTP clock, dressed as a TimeRef. */
+/* The upstream SNTP clock as a TimeRef. */
 class UpstreamTimeRef : public TimeRef {
 public:
     TimeReference reference() const override
@@ -550,14 +465,9 @@ public:
 
         TimeReference ref;
         ref.lastSync = ntp.lastSync();
-        /* "Synced" only records ever having been set, so the freshness window
-         * is what makes this a lock: an upstream that went away an hour ago
-         * leaves a clock that is drifting with no one correcting it. The
-         * window lives in ClockSource because the arbiter needs the same
-         * answer, and two definitions of "still good" would be one too many.
-         * The client's own reach register is deliberately not consulted -- it
-         * flaps on a single lost poll, and it is empty for a clock set by
-         * POST /ntp/sync while timeSource is off. */
+        /* Locked means a recent sync (ClockSource holds the window, shared with
+         * the arbiter). The SNTP reach register is not used: it flaps on one
+         * lost poll, and is empty after POST /ntp/sync. */
         ref.locked = ClockSource::instance().upstreamLocked();
         if (!ref.locked) {
             ref.stratum = kStratumUnlocked;
@@ -571,10 +481,7 @@ public:
 
     void now(struct timespec &ts) const override
     {
-        /* The clock NtpTime stepped. Whatever disciplines the clock later --
-         * GPS/PPS, or the EMAC's 1588 timestamp unit -- the responder still
-         * reads the system clock; discipline is somebody else's job, which is
-         * exactly what this interface is for. */
+        /* The system clock, which SNTP sets. */
         clock_gettime(CLOCK_REALTIME, &ts);
     }
 
@@ -588,8 +495,7 @@ private:
     static bool parseDottedQuad(const std::string &text, uint32_t &out)
     {
         unsigned a = 0, b = 0, c = 0, d = 0;
-        /* Exactly four fields: from_chars rejects the trailing character that
-         * sscanf's %c was there to catch, and rejects "1.2.3.4.5" too. */
+        /* Exactly four fields. */
         if (!text::getList(text, '.', a, b, c, d)) {
             return false;
         }
@@ -600,12 +506,9 @@ private:
         return true;
     }
 
-    /* RFC 5905 puts the upstream's IPv4 address in refid above stratum 1, or
-     * the first four bytes of its MD5 hash when it was named rather than
-     * addressed. lwIP keeps the resolved address to itself, so a hostname gets
-     * a stable FNV-1a of the name instead: above stratum 1 this field is
-     * informational (it is how ntpd spots a loop), and FNV-1a keeps it stable
-     * across reboots without dragging a hash implementation into the image. */
+    /* Above stratum 1 the refid is the upstream's IPv4 address. lwIP does not
+     * expose the resolved address of a hostname, so a stable FNV-1a of the name
+     * is used instead; the field is only used for loop detection. */
     static uint32_t upstreamRefId()
     {
         const std::optional<std::string> name = NtpTime::instance().upstreamName();
@@ -629,14 +532,8 @@ private:
 
 }  // namespace
 
-/* Is the upstream the one serving? One predicate, because the reply and the
- * control view must not be able to disagree about who the reference is.
- *
- * Under "auto" the receiver is served for as long as it still claims something
- * worth serving -- locked, or holding over on its fitted rate, which is what its
- * own reference reports -- and the upstream takes the reply only once the client
- * has actually synced. While neither holds, the receiver answers stratum 16,
- * which is honest and is the same reply it gives with no upstream at all. */
+/* Whether the upstream is the reference served, for replies and mode 6 alike.
+ * Under "auto" it is only once ClockSource has handed over to it. */
 bool servingUpstream()
 {
     switch (Settings::instance().timeSource()) {
@@ -649,11 +546,8 @@ bool servingUpstream()
     return true;
 }
 
-/* Which reference is served is a setting, and a setting can change while the
- * responder is running (POST /config); swapping the TimeRef the serving task is
- * using would hand it a dangling pointer. So the object it holds never changes:
- * it asks Settings on every call and forwards to one of two stateless wrappers,
- * which is also what keeps `serveNtp` and the clock source independent. */
+/* Forwards each call to the TimeRef currently selected, so a settings change
+ * never swaps the object the responder holds. */
 class SelectedTimeRef : public TimeRef {
 public:
     TimeReference reference() const override { return active().reference(); }
@@ -698,13 +592,12 @@ esp_err_t NtpServer::begin()
         return ESP_OK;
     }
     if (m_task != nullptr) {
-        /* Still shutting down after serveNtp went off: starting a second task
-         * here is how two of them end up on one socket. The next lease retries. */
+        /* Still stopping; the next lease retries. */
         ESP_LOGW(TAG, "responder task is still stopping");
         return ESP_ERR_INVALID_STATE;
     }
     if (m_sock >= 0) {
-        /* Left over from a stop that timed out: nothing owns it now. */
+        /* Left by a stop that timed out. */
         close(m_sock);
         m_sock = -1;
     }
@@ -714,9 +607,7 @@ esp_err_t NtpServer::begin()
     }
 
 #if CONFIG_LWIP_IPV6
-    /* One socket for both families: an AF_INET6 socket bound to :: with
-     * v6only off takes IPv4 clients too, as v4-mapped addresses. Same trick
-     * the HTTP server uses, and it keeps /healthz's two-address promise. */
+    /* One AF_INET6 socket with v6only off takes IPv4 as v4-mapped addresses. */
     const int family = AF_INET6;
 #else
     const int family = AF_INET;
@@ -728,8 +619,7 @@ esp_err_t NtpServer::begin()
         return ESP_FAIL;
     }
 
-    /* The task must wake up regularly enough to notice serveNtp going off and
-     * to print its report; a blocking recv would do neither. */
+    /* Wake regularly to notice serveNtp going off and to report. */
     struct timeval timeout = {};
     timeout.tv_sec         = kReceiveTimeoutMs / 1000;
     timeout.tv_usec        = static_cast<long>(kReceiveTimeoutMs % 1000) * 1000;
@@ -740,8 +630,7 @@ esp_err_t NtpServer::begin()
 #if CONFIG_LWIP_IPV6
     const int v6only = 0;
     if (setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only)) != 0) {
-        /* Not fatal: if dual-stack is compiled out, this socket answers IPv6
-         * only, and the log is the only way to find out. */
+        /* Not fatal, but IPv4 clients will not be answered. */
         ESP_LOGW(TAG, "IPV6_V6ONLY=0 failed (errno %d): no IPv4 clients", errno);
     }
     sockaddr_in6 addr = {};
@@ -777,8 +666,7 @@ esp_err_t NtpServer::begin()
         return ESP_ERR_NO_MEM;
     }
 
-    /* Measured, not assumed: see tx_lag.cpp. Failing to start it only costs the
-     * correction, so it is logged and not fatal. */
+    /* Not fatal: only the sendto() path's correction is lost. */
     if (TxLag::instance().begin() != ESP_OK) {
         ESP_LOGW(TAG, "no transmit-lag probe: reply stamps stay uncorrected");
     }
@@ -805,17 +693,13 @@ esp_err_t NtpServer::applySettings()
         return ESP_OK;
     }
     ESP_LOGW(TAG, "serveNtp is off: stopping the responder");
-    /* The task is asleep in recvfrom() for at most a second; wait for it so a
-     * quick off/on toggle cannot end up with two of them. The socket is this
-     * side's to close -- the task only ever reads it -- so closing it here
-     * cannot pull the descriptor out from under a task that is still running. */
+    /* Wait for the task (it wakes every second) before closing the socket. */
     const int sock = m_sock;
     for (int i = 0; i < 30 && m_task != nullptr; ++i) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     if (m_task != nullptr) {
-        /* Still inside recvfrom(): leave the socket alone and let the next
-         * begin() clean it up rather than closing a descriptor in use. */
+        /* Leave the socket for the next begin() to close. */
         ESP_LOGW(TAG, "responder task has not stopped yet");
         return ESP_ERR_TIMEOUT;
     }
@@ -860,8 +744,7 @@ void NtpServer::fillControlFacts(ControlFacts &facts, const TimeReference &ref) 
             facts.peer = *name;
         }
     } else {
-        /* The address a reference clock has in ntpd. ntpq prints it as the
-         * remote, and sys.peeradr names it. */
+        /* ntpd's address for a GPS reference clock. */
         facts.peer = "127.127.20.0";
     }
     facts.leap     = ref.leap;
@@ -870,8 +753,7 @@ void NtpServer::fillControlFacts(ControlFacts &facts, const TimeReference &ref) 
     facts.refId    = ref.refId;
     facts.lastSync = ref.lastSync;
 
-    /* The same two figures the reply carries, so a client reading either gets
-     * one answer rather than two. */
+    /* The same figures as the reply. */
     const RootUncertainty uncertainty = rootUncertainty(ref, std::time(nullptr));
     facts.rootDelayNs                 = static_cast<int64_t>(uncertainty.delayS * 1e9);
     facts.dispersionNs                = static_cast<int64_t>(uncertainty.dispersionS * 1e9);
@@ -977,11 +859,8 @@ void NtpServer::reportServePath(int64_t nowUs)
              static_cast<unsigned>(m_serveWhy[0]), static_cast<unsigned>(m_serveWhy[1]),
              static_cast<unsigned>(m_serveWhy[2]), static_cast<unsigned>(m_serveWhy[3]));
     m_serveWhy[0] = m_serveWhy[1] = m_serveWhy[2] = m_serveWhy[3] = 0;
-    /* One claim for the minute, from the median client rather than the widest.
-     * The range a client reports says as much about that client as about us: a
-     * slow poller, a busy machine or a stepping clock can double it, and with
-     * the maximum they all set the claim for everyone. The median keeps the
-     * honest majority. */
+    /* The median client's half-range, so one noisy client does not set the
+     * claim. */
     int64_t  halves[kServeSlots] = {};
     int      clients             = 0;
     uint32_t samples             = 0;
@@ -1010,17 +889,13 @@ void NtpServer::reportServePath(int64_t nowUs)
         }
         halves[j] = v;
     }
-    /* The lower middle when the count is even: with two clients the upper one
-     * is simply the worse of the pair, which is the maximum this was written to
-     * avoid. */
+    /* Lower middle for an even count. */
     ServePath::instance().observe(halves[(clients - 1) / 2], samples);
 }
 
 void NtpServer::serveLoop()
 {
-    /* This task's socket, taken by value: the member may be replaced by a
-     * restart, and a task that closed "m_sock" on the way out would then close
-     * its successor's socket. */
+    /* By value: m_sock may belong to a successor by the time this exits. */
     const int   sock = m_sock;
     RateLimiter limiter;
     Interleaved pairs;
@@ -1029,10 +904,8 @@ void NtpServer::serveLoop()
     uint32_t    reportAt  = pdTICKS_TO_MS(xTaskGetTickCount()) + kReportEveryMs;
     bool        firstSeen = false;
 
-    /* Distinct sources, over the last kRecentSources answered requests. The
-     * address only: a client's port changes with every query, so including it
-     * would count one poller as many. This answers "is anything else using
-     * this", which is otherwise invisible. */
+    /* Distinct source addresses (not ports) over the last kRecentSources
+     * answers. */
     const auto recordSource = [this](const sockaddr_storage &addr) {
         uint32_t   h   = 2166136261u; /* FNV-1a */
         const auto mix = [&h](const uint8_t *p, std::size_t n) {
@@ -1072,20 +945,14 @@ void NtpServer::serveLoop()
         sockaddr_storage from    = {};
         socklen_t        fromLen = sizeof(from);
 
-        /* Room for extension fields, so a long request is still parsed from its
-         * first 48 bytes instead of being dropped as unrecognised -- and for a
-         * whole control request, which is a header plus up to 468 octets of
-         * variable names. Truncating one of those makes its last name partial,
-         * and a partial name is an unknown variable. */
+        /* Big enough for a full mode 6 request (header plus up to 468 octets
+         * of names) and for requests with extension fields. */
         uint8_t   packet[12 + kControlChunk + 3] = {};
         const int len                            = recvfrom(sock, packet, sizeof(packet), 0,
                                                             reinterpret_cast<sockaddr *>(&from), &fromLen);
 
-        /* The arrival stamp the MAC took, if it took one. This is the receive
-         * timestamp: the frame was stamped before the driver task was woken, so
-         * neither the scheduler nor the stack is in it. Without one -- the PHC
-         * off, or an entry aged out -- this falls back to a read after the
-         * syscall, which is the old behaviour and carries both. */
+        /* The MAC's arrival stamp if there is one; otherwise the time is read
+         * after recvfrom(), which includes the stack and scheduling delay. */
         uint8_t  peer[16] = {};
         size_t   peerLen  = 0;
         uint16_t peerPort = 0;
@@ -1094,10 +961,7 @@ void NtpServer::serveLoop()
             peerLen  = 4;
             peerPort = ntohs(reinterpret_cast<const sockaddr_in *>(&from)->sin_port);
         } else if (from.ss_family == AF_INET6) {
-            /* The socket is dual-stack, so an IPv4 client arrives as a mapped
-             * address (::ffff:a.b.c.d) on an AF_INET6 sockaddr. The ring holds
-             * the address the frame actually carried, so the mapped form has to
-             * be unwrapped or the lookup compares four bytes with sixteen. */
+            /* Unwrap ::ffff:a.b.c.d to match the address the frame carried. */
             const auto    *v6     = reinterpret_cast<const sockaddr_in6 *>(&from);
             const uint8_t *a      = reinterpret_cast<const uint8_t *>(&v6->sin6_addr);
             bool           mapped = true;
@@ -1130,12 +994,7 @@ void NtpServer::serveLoop()
         }
 
         struct timespec received = {};
-        /* The stamp is in the 1588 counter's base; the reply has to be in the
-         * reference's. In the GPS case those are the same clock and the
-         * conversion is a few ns; with an upstream the counter is a free-running
-         * copy set once at boot, and the difference is whatever the upstream
-         * has stepped the system clock by. Reading both around the same instant
-         * makes it a subtraction either way. */
+        /* Convert the counter stamp to served time by reading both now. */
         int64_t toServed = 0;
         if (hardware) {
             struct timespec servedNow = {};
@@ -1152,30 +1011,24 @@ void NtpServer::serveLoop()
         const uint32_t nowMs = pdTICKS_TO_MS(xTaskGetTickCount());
 
         if (len < 0) {
-            /* The 1 s timeout is the normal way round this loop. */
+            /* A timeout is normal. */
             if (errno != EAGAIN && errno != EWOULDBLOCK) {
                 ESP_LOGW(TAG, "recvfrom: errno %d", errno);
             }
         } else if ((packet[0] & 0x07) == kModeControl &&
                    limiter.check(from, nowMs) != Action::Answer) {
-            /* Over the limit: silence, because a KoD is not a shape ntpq
-             * expects. Control queries used to sit outside the limiter on the
-             * grounds that they are read-only -- but a 12-byte READVAR is
-             * answered with 480, to a source address nobody has verified. The
-             * sixteen-packet burst still covers several ntpq -p runs. */
+            /* Mode 6 is rate limited too (a small request gets a large answer);
+             * over the limit it is dropped, since ntpq does not expect a KoD. */
             ++dropped;
             ++winDropped;
             m_dropped.store(dropped, std::memory_order_relaxed);
         } else if ((packet[0] & 0x07) == kModeControl) {
-            /* Control messages share the socket but not the protocol, and are
-             * answered ahead of the client path. */
             const TimeReference ref = m_ref->reference();
             ControlFacts        facts;
             fillControlFacts(facts, ref);
             m_control.fetch_add(1, std::memory_order_relaxed);
 
-            /* A long variable list is split; the client reassembles by offset
-             * and gives up on holes, so the fragments go out back to back. */
+            /* Fragments are sent back to back; ntpq gives up on holes. */
             uint8_t  control[kControlReplyBytes] = {};
             uint16_t total                       = 0;
             uint16_t offset                      = 0;
@@ -1212,33 +1065,18 @@ void NtpServer::serveLoop()
                 } else {
                     const bool kod = action == Action::Kod;
 
-                    /* How the served time is moving, seen from a client. Its
-                     * own send stamp is in the transmit field of the request --
-                     * the origin field is empty on a plain client and only
-                     * carries an echo from an interleaved one. The difference
-                     * between that stamp and ours is the client's clock offset
-                     * plus the path, so over a minute the constant cancels and
-                     * the range left is drift, measured on answers that went
-                     * out rather than guessed by a probe. */
+                    /* For ServePath: the client's send time is the request's
+                     * transmit field. */
                     if (!kod) {
                         recordServePath(from, received, req.transmit);
                     }
 
-                    /* Take both stamps around the reply build, which is as
-                     * close to the wire as a software timestamp gets. */
                     const TimeReference ref         = m_ref->reference();
                     struct timespec     transmitted = {};
                     m_ref->now(transmitted);
-                    /* Whatever the transmit path costs, the stamp is early by
-                     * it. Correcting for it is the mirror of the receive lag
-                     * the dispersion already admits, and it is what keeps a
-                     * client's offset from carrying the difference.
-                     *
-                     * Not on the raw path: the estimator is calibrated against
-                     * a socket sendto(), and a frame handed straight to the DMA
-                     * descriptor is on the wire in a fraction of that. Applying
-                     * the socket figure there over-corrects by its own size,
-                     * which is the whole 300 us arriving as a 150 us offset. */
+                    /* On the sendto() path, move the transmit stamp later by
+                     * the measured send delay. Not on the raw path, which is
+                     * much faster than sendto(). */
                     if (!hardware) {
                         m_txCorrected.fetch_add(1, std::memory_order_relaxed);
                         transmitted.tv_nsec += TxLag::instance().lagNs();
@@ -1253,16 +1091,10 @@ void NtpServer::serveLoop()
                     writeTimestamp(receiveStamp, received);
                     writeTimestamp(liveStamp, transmitted);
 
-                    /* Interleaved mode, if this client is asking for it and we
-                     * still hold the exchange it names. RFC 9769 forbids
-                     * answering in the mode unless both hold, and forbids
-                     * reusing a receive timestamp, so the lookup consumes it. */
                     uint8_t savedTransmit[kStampBytes] = {};
                     bool    interleavedMode            = false;
-                    /* A zero origin is a first request and an equal receive and
-                     * transmit is a basic one by definition, so neither is an
-                     * attempt: counting them made the figure read as demand
-                     * from clients that had asked for nothing. */
+                    /* A zero origin, or receive equal to transmit, is a basic
+                     * request. */
                     const bool mayInterleave =
                         !kod && !isZeroStamp(req.origin) &&
                         std::memcmp(req.receive, req.transmit, kStampBytes) != 0;
@@ -1280,26 +1112,18 @@ void NtpServer::serveLoop()
                     }
                     buildReply(reply, req, ref, kod, received, transmitted,
                                interleavedMode ? savedTransmit : nullptr);
-                    /* The receive timestamp handed out must never equal the
-                     * transmit one in the same reply, or the client cannot tell
-                     * the modes apart (RFC 9769 section 2). An interleaved
-                     * reply's transmit is older than its receive, so only a
-                     * basic one can collide. Before the send: this used to run
-                     * after it, and corrected a frame that had already left. */
+                    /* Receive and transmit must differ in a basic reply, or the
+                     * client cannot tell the modes apart (RFC 9769 section 2). */
                     if (!interleavedMode &&
                         std::memcmp(receiveStamp, liveStamp, kStampBytes) == 0) {
                         bumpFraction(liveStamp);
                         std::memcpy(reply + kTransmitOffset, liveStamp, kStampBytes);
                     }
 
-                    /* Off the wire with a hardware stamp when one is available.
-                     * The stamp this frame gets is what an interleaved client's
-                     * *next* request is answered with, so it is measured rather
-                     * than corrected -- which is the whole point of the saved
-                     * pair. The frame's own transmit field still has to be
-                     * written before the send, so it stays the software stamp
-                     * plus the estimator; a 1588 one-step unit would fix that
-                     * and this one cannot. */
+                    /* Raw frame when the request was hardware stamped. Its own
+                     * transmit field is the software stamp taken before the
+                     * send (uncorrected on this path); the hardware stamp is
+                     * saved for an interleaved client's next request. */
                     int64_t       measuredTx                 = 0;
                     uint8_t       measuredStamp[kStampBytes] = {};
                     const int64_t replySent                  = esp_timer_get_time();
@@ -1320,7 +1144,6 @@ void NtpServer::serveLoop()
                         ++winKod;
                         m_kod.store(kodSent, std::memory_order_relaxed);
                     } else {
-                        /* Saved for the client's *next* request. */
                         if (measuredTx != 0) {
                             const int64_t   servedTx = measuredTx + toServed;
                             struct timespec measured = {};
@@ -1350,14 +1173,9 @@ void NtpServer::serveLoop()
         }
 
         if (static_cast<int32_t>(nowMs - reportAt) >= 0) {
-            /* The rate is published before the window is cleared, so a reader
-             * sampling at any point sees the last completed window rather than
-             * a count that silently restarts underneath it. */
+            /* Publish the completed window's rate before clearing it. */
             m_ratePerMin.store((winAnswered * 60000u) / kReportEveryMs, std::memory_order_relaxed);
             if (winAnswered != 0 || winKod != 0 || winDropped != 0) {
-                /* One line a minute at most: the serial console is the only
-                 * local debug there is, and a LAN polling at minpoll would
-                 * otherwise bury everything else in the log. */
                 ESP_LOGI(TAG, "answered %u, KoD %u, dropped %u in the last %u s", winAnswered,
                          winKod, winDropped, kReportEveryMs / 1000);
             }
@@ -1368,8 +1186,7 @@ void NtpServer::serveLoop()
         }
     }
 
-    /* The socket belongs to the owner (applySettings), which closes it once this
-     * handle is gone; only the handle is cleared here. */
+    /* applySettings() closes the socket once the handle is cleared. */
     m_task = nullptr;
     ESP_LOGI(TAG, "responder stopped");
     vTaskDelete(nullptr);
