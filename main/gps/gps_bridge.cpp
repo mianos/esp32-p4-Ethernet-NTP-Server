@@ -1,7 +1,5 @@
-/*
- * The u-center bridge on tcp/3333: one client-facing task that owns the UART
- * while a session is attached and forwards both ways.
- */
+/* The u-center bridge on tcp/3333: owns the UART while a client is attached
+ * and forwards both ways. */
 #include "gps/gps_internal.h"
 
 using namespace gps_detail;
@@ -13,23 +11,12 @@ void GpsTime::bridgeTaskEntry(void *arg)
 
 void GpsTime::bridgeTask()
 {
-    /* Four clients, and the listening socket stays open. u-center taking the
-     * port must not lock out a shell, and the single-client version did. Four
-     * rather than two because a socket that was closed without the peer saying
-     * so keeps its slot until the next select sees it readable, and u-center
-     * dead against a bridge with both slots full looks exactly like u-center
-     * dead against a bridge that is ignoring it. */
+    /* A closed peer keeps its slot until select() sees it, so there is room
+     * for more than one live client. */
     constexpr int kMaxClients = 4;
 
-    /* What a session sets, in the CFG-MSG shape configureModule() uses: the
-     * message class, its id, then one rate per port -- DDC, UART1, UART2, USB,
-     * SPI. UART1 only, because it is the only port wired to anything.
-     *
-     * NAV-SAT is here because the sky view and the C/N0 bars are drawn from it;
-     * it is what a bench session exists for. NAV-PVT and NAV-TIMELS are because
-     * a session can set every rate to zero -- u-center's revert-to-defaults does
-     * exactly that -- and without them a session stops the clock as well as
-     * drawing nothing. Three frames and three ACKs, once, at attach. */
+    /* CFG-MSG sent at attach (UART1). NAV-PVT and NAV-TIMELS keep the clock
+     * running if u-center zeroes every rate; NAV-SAT feeds its sky view. */
     static constexpr uint8_t kSessionPvt[8]    = {0x01, 0x07, 0, 1, 0, 0, 0, 0};
     static constexpr uint8_t kSessionTimels[8] = {0x01, 0x26, 0, 1, 0, 0, 0, 0};
     static constexpr uint8_t kSessionSat[8]    = {0x01, 0x35, 0, 1, 0, 0, 0, 0};
@@ -57,26 +44,20 @@ void GpsTime::bridgeTask()
 
         int  clients[kMaxClients] = {-1, -1, -1, -1};
         bool quieted              = false;
-        /* u-center opens a TCP port by polling MON-COMMS, and this receiver
-         * ignores it. A synthetic reply goes out if the module stays silent --
-         * 400 ms, because the module's silence is a property of the message and
-         * not of the line, and a client waiting on it is waiting on us. */
+        /* u-center polls MON-COMMS on connect and this receiver ignores it, so
+         * the bridge answers after 400 ms of silence. */
         int     commsClient   = -1;
         int64_t commsDeadline = 0;
-        /* An armed rate change: what was asked for, whether the receiver has
-         * acknowledged it, and when to stop waiting. */
+        /* A client's pending CFG-PRT rate change. */
         uint32_t baudWanted = 0;
         bool     baudAcked  = false;
         int64_t  baudAtUs   = 0;
 
-        /* The two directions are decoded separately because they interleave and
-         * must not share parse state: the client's session and the receiver's
-         * message set are different streams that happen to cross one socket. */
+        /* One decoder per direction; the streams interleave. */
         ubx::Decoder clientDecoder;
         ubx::Decoder moduleDecoder;
 
-        /* What the bridge wants to notice in the client's traffic: a request to
-         * move the port's rate, and a MON-COMMS poll that will need answering. */
+        /* Client side: watch for CFG-PRT and MON-COMMS polls. */
         struct ClientSniffer : ubx::Listener {
             uint32_t *wanted;
             bool     *acked;
@@ -103,10 +84,7 @@ void GpsTime::bridgeTask()
             void onFrame(const ubx::Frame &f) override
             {
                 if (f.cls == 0x06 && f.id == 0x00) {
-                    /* CFG-PRT is 20 bytes and the decoder has already enforced
-                     * it. baudRate is a four-byte field at offset 8; reading two
-                     * of those bytes, as this used to, turns 115200 into 49664
-                     * and 460800 into 2048. */
+                    /* baudRate is u4 at offset 8. */
                     const uint8_t  port = f.u8(0);
                     const uint32_t baud = f.u4(8);
                     if (port != 1) {
@@ -130,8 +108,7 @@ void GpsTime::bridgeTask()
         } clientSniffer(&baudWanted, &baudAcked, &baudAtUs, &commsClient, &commsDeadline,
                         &m_bridgeDroppedCrc);
 
-        /* ...and in the receiver's: the answer to that request, and a MON-COMMS
-         * reply it bothered to send itself. */
+        /* Receiver side: the ACK for that change, or a real MON-COMMS reply. */
         struct ModuleSniffer : ubx::Listener {
             uint32_t *wanted;
             bool     *acked;
@@ -150,9 +127,7 @@ void GpsTime::bridgeTask()
             {
                 if (f.cls == 0x05 && (f.id == 0x00 || f.id == 0x01) && *wanted != 0 && f.len >= 2 &&
                     f.u8(0) == 0x06 && f.u8(1) == 0x00) {
-                    /* 0x01 is ACK-ACK and 0x00 the NAK. They were the other
-                     * way round here, so an accepted rate change was dropped
-                     * and a refused one followed. */
+                    /* 0x01 is ACK-ACK, 0x00 ACK-NAK. */
                     if (f.id == 0x01) {
                         *acked = true;
                         *atUs  = esp_timer_get_time();
@@ -170,12 +145,8 @@ void GpsTime::bridgeTask()
         clientDecoder.listen(&clientSniffer);
         moduleDecoder.listen(&moduleSniffer);
 
-        /* Every way a client ends goes through here, so the detached state --
-         * port handed back, own configuration restored -- cannot be forgotten
-         * on one of the exits. It was forgotten on all of them before: the flag
-         * that stops the GPS task reading was only ever cleared when the
-         * listening socket itself failed, so after the first session the task
-         * never read the port again and the receiver kept a session's rates. */
+        /* Every client exit comes through here: hand the port back and schedule
+         * our configuration to be restored. */
         auto dropClient = [&](int i, const char *why) {
             text::put(m_bridgeEnd, "{}", why);
             ESP_LOGW(TAG, "client gone: %s", why);
@@ -189,14 +160,8 @@ void GpsTime::bridgeTask()
             if (!any) {
                 quieted        = false;
                 m_bridgeActive = false;
-                /* Two seconds, not one, and it is a debounce rather than a
-                 * delay: a client that is unhappy reconnects about once a
-                 * second, and configureModule() takes roughly three of them
-                 * because it waits out an ACK on every message. Restoring on
-                 * the first detach therefore never finishes before the next
-                 * attach stands it aside again, and a bouncing client would
-                 * thrash the receiver without either side settling. A pending
-                 * reconfigure is stood aside on attach anyway. */
+                /* Debounced: a client that reconnects every second would
+                 * otherwise restart a ~3 s configureModule() each time. */
                 m_reconfigAtUs = esp_timer_get_time() + 2000000;
             }
         };
@@ -232,10 +197,8 @@ void GpsTime::bridgeTask()
                         }
                     }
                     if (slot < 0) {
-                        /* Both slots full. Worth reporting: a client that is
-                         * accepted and immediately closed looks identical from
-                         * the outside to one that attaches and is ignored, and
-                         * telling those apart has cost a round already. */
+                        /* All slots full; reported, since from outside it looks
+                         * like being ignored. */
                         m_bridgeRefused = m_bridgeRefused + 1;
                         text::put(m_bridgeEnd, "refused: both slots taken");
                         ESP_LOGW(TAG, "client refused from %s: both slots taken",
@@ -251,11 +214,7 @@ void GpsTime::bridgeTask()
                         m_bridgeSessions = m_bridgeSessions + 1;
                         m_bridgeClients  = m_bridgeClients + 1;
                         if (!quieted) {
-                            /* Claim the port and put the session's message set
-                             * on it. No delay first: u-center's polls are
-                             * already in the socket by the time we get here, so
-                             * waiting only moves our frames into the middle of
-                             * the handshake it is trying to run. */
+                            /* At once: u-center's polls are already queued. */
                             quieted        = true;
                             m_bridgeActive = true;
                             sendUbx(0x06, 0x01, kSessionPvt, sizeof(kSessionPvt));
@@ -283,10 +242,8 @@ void GpsTime::bridgeTask()
                 }
                 m_bridgeRx = m_bridgeRx + static_cast<uint32_t>(n);
 
-                /* Built up as text and then cut to the buffer: snprintf returns
-                 * the length it *wanted*, so accumulating its return value into
-                 * an offset lets the offset pass the end of the array on a long
-                 * frame and `sizeof - offset` underflow to something huge. */
+                /* Built as a string and then truncated: summing snprintf's
+                 * return values can run past the buffer. */
                 std::string hex;
                 for (int k = 0; k < n && k < 40; ++k) {
                     hex += std::format("{:02x} ", static_cast<unsigned>(in[k]));
@@ -299,23 +256,13 @@ void GpsTime::bridgeTask()
             }
 
             uint8_t out[256];
-            /* Only while a client holds the port. With nobody attached the GPS
-             * task is the reader, and a second one here took whatever sat in
-             * the ring between its reads -- 7280 bytes with no session ever
-             * opened, each theft a frame with a hole in it for the clock's
-             * decoder. */
+            /* Only with a client attached; otherwise the GPS task reads. */
             const int got = m_bridgeActive ? uart_read_bytes(kUart, out, sizeof(out), 0) : 0;
             moduleDecoder.feed(std::span(out, static_cast<std::size_t>(got > 0 ? got : 0)));
 
-            /* The rate change, if one is armed. The old code switched the baud
-             * the instant it found the request in the client's bytes -- which is
-             * when uart_write_bytes() returns, not when the bytes have gone --
-             * so the tail of the very frame asking for the change could leave at
-             * the new rate while its head left at the old one. It now waits for
-             * the module's ACK, drains the transmitter, and switches. A NAK
-             * cancels; an ACK that never comes does not, because u-blox sends it
-             * on whichever side of the change it likes and a client left at the
-             * wrong rate is worse than a rate change the receiver grumbled at. */
+            /* Switch the host rate after the ACK and a TX drain, or at the
+             * deadline without one (the ACK may come at either rate). A NAK
+             * cancels. */
             if (baudWanted != 0 && esp_timer_get_time() >= baudAtUs) {
                 const uint32_t want = baudWanted;
                 baudWanted          = 0;
@@ -329,25 +276,13 @@ void GpsTime::bridgeTask()
                 uart_wait_tx_done(kUart, pdMS_TO_TICKS(50));
                 uart_set_baudrate(kUart, want);
                 m_baud = want;
-                /* The receiver has almost certainly been asked to change too, so
-                 * the next PPS pairing is not comparable with the last. */
+
                 m_frameSeen = false;
                 moduleDecoder.reset();
             }
             if (commsClient >= 0 && esp_timer_get_time() > commsDeadline) {
-                /* The receiver ignores MON-COMMS outright -- MON-VER, CFG-PRT and
-                 * NAV-SAT polls all get answers on the same line, this one gets
-                 * nothing -- and u-center opens a TCP port by polling it. So the
-                 * bridge answers for the module.
-                 *
-                 * Built as a real reply for one port: version 0, nPorts 1, port 1
-                 * (UART1, the only port here), every counter zero. The first
-                 * version of this sent nPorts 0 in a 12-byte payload when a
-                 * zero-port payload is 8, so a client that enumerates ports to
-                 * decide what it is talking to had a length it could not walk
-                 * and nothing in the list. The counters stay honest zeros: the
-                 * module does not report them here and inventing figures would
-                 * be worse than a blank. */
+                /* MON-COMMS reply for the silent module: version 0, one port
+                 * (UART1), all counters zero. */
                 constexpr int kLen        = 8 + 34;
                 uint8_t       reply[kLen] = {0xB5, 0x62, 0x0A, 0x36, 34, 0x00};
                 reply[6 + 4]              = 1; /* nPorts */

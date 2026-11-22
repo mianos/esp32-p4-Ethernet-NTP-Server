@@ -1,35 +1,8 @@
-/* UBX framing: one decoder, two readers.
- *
- * There are two byte streams in this tree and both are UBX: the receiver's own
- * output, and whatever a u-center session on tcp/3333 sends or is answered. The
- * receiver's side has always been framed properly -- byte state machine,
- * Fletcher checksum accumulated as the frame arrives, resync on a repeated
- * sync byte, a length latch for payloads too big for the buffer. The bridge side
- * was three sliding-window `B5 62 xx yy` scans with no checksum and no length
- * check, and they got it wrong: a CFG-PRT split across a `recv()`, or a
- * `B5 62 06 00` occurring inside a payload, produced either a missed frame or a
- * port and a baud read out of whatever bytes happened to follow.
- *
- * So the framing lives here, once, and both readers feed the same object. The
- * bridge inherits the checksum gate and the straddling for nothing.
- *
- * The checksum is the whole reason a frame is worth believing: without it a byte
- * of 0xB5 lost at the wrong moment slides every field by one and the firmware
- * anchors the clock to a second that never happened. A frame that fails it is
- * dropped, never repaired.
- *
- * Definitions are a table, not memory. Each entry names the message, the lengths
- * it may claim, and the handler; a frame outside its own range is dropped before
- * a handler sees it, so "is this long enough for the field I am about to read"
- * is answered once, here, instead of by a guard at the top of every handler that
- * someone has to remember to keep in step with the offsets below it.
- *
- * Field offsets and lengths are transcribed from the u-blox 8 / M8 receiver
- * description (the TIM 1.10 dialect for NAV-TIMELS and TIM-SVIN). Where a
- * message is variable the range is 8 + the per-repeat size, so a receiver that
- * reports more satellites than the buffer holds is caught here rather than
- * walking off it.
- */
+/* UBX framing, used for the receiver's stream and for both directions of the
+ * u-center bridge. Frames failing the checksum are dropped. Messages listed in
+ * kDefs are also dropped when their length is outside the listed range, so
+ * their handlers need no length checks; other messages are delivered
+ * unchecked. Lengths are from the u-blox 8 / M8 protocol description. */
 #pragma once
 
 #include <cstdint>
@@ -42,8 +15,7 @@ namespace ubx {
 
 constexpr uint8_t kSync1 = 0xB5;
 constexpr uint8_t kSync2 = 0x62;
-/* Largest payload accepted. NAV-SAT with 42 satellites is 512; the buffer is
- * sized from this so the two cannot drift. */
+/* Largest payload accepted: NAV-SAT with 42 satellites. */
 constexpr std::size_t kMaxPayload = 512;
 
 struct Frame {
@@ -52,15 +24,12 @@ struct Frame {
     uint16_t                 len = 0;
     std::span<const uint8_t> payload;
 
-    /* Field reads. The caller has already been guaranteed Frame::len is inside
-     * the definition's range, so `at` is known to be in the payload by
-     * construction -- these do not re-check, they name the type and the
-     * little-endianness that the protocol floor assumes. */
+    /* Little-endian field reads, unchecked: see kDefs. */
     uint8_t  u8(std::size_t at) const { return text::getLe<uint8_t>(payload.data() + at); }
     uint16_t u2(std::size_t at) const { return text::getLe<uint16_t>(payload.data() + at); }
     uint32_t u4(std::size_t at) const { return text::getLe<uint32_t>(payload.data() + at); }
     int32_t  i4(std::size_t at) const { return text::getLe<int32_t>(payload.data() + at); }
-    /* A NUL-terminated string field, which MON-VER is made of. */
+    /* For MON-VER's NUL-terminated strings. */
     std::span<const uint8_t> from(std::size_t at) const { return payload.subspan(at); }
 };
 
@@ -72,9 +41,7 @@ struct Def {
     const char *name;
 };
 
-/* Every message the firmware decodes, plus the two the bridge inspects. Messages
- * outside the table are still delivered -- MON-* and CFG-* arrive from u-center
- * that this firmware has no interest in -- with no length gate. */
+/* Length-checked messages. Others are delivered without a length check. */
 inline constexpr Def kDefs[] = {
     {0x01, 0x07, 92, 92, "NAV-PVT"},
     {0x01, 0x26, 24, 24, "NAV-TIMELS"},
@@ -94,8 +61,7 @@ inline constexpr Def kDefs[] = {
     {0x0A, 0x36, 8, 512, "MON-COMMS"}, /* 8 + 40n */
 };
 
-/* The definition for a class and id, or nullptr if this firmware has no opinion
- * about the message's length. */
+/* nullptr when the message has no length rule. */
 inline const Def *definition(uint8_t cls, uint8_t id)
 {
     for (const Def &d : kDefs) {
@@ -106,9 +72,7 @@ inline const Def *definition(uint8_t cls, uint8_t id)
     return nullptr;
 }
 
-/* Why a frame did not reach a listener. Counted, because "the receiver went
- * quiet" and "every frame is failing its checksum" look identical from the
- * outside and mean different things. */
+/* Why a frame did not reach a listener; each is counted. */
 enum class Drop : uint8_t { Checksum, Length };
 
 class Listener {
@@ -122,26 +86,19 @@ class Decoder {
 public:
     void listen(Listener *listener) { m_listener = listener; }
 
-    /* One byte in, at most one frame out. Everything the decoder needs between
-     * calls is a member, so a frame split anywhere -- between the sync bytes,
-     * across the length, halfway through the payload -- is assembled the same as
-     * one that arrives whole. */
+    /* One byte in, at most one frame out; frames may be split anywhere. */
     void feed(uint8_t byte);
 
-    /* A run of bytes. */
     void feed(std::span<const uint8_t> bytes);
 
-    /* Bytes currently half-assembled, so a caller can tell "mid-frame" from
-     * "idle". */
+    /* Bytes of a half-assembled frame, 0 when idle. */
     std::size_t pending() const { return m_state == State::Idle ? 0 : m_frame.len + 6; }
 
     uint32_t frames() const { return m_frames; }
     uint32_t droppedChecksum() const { return m_badChecksum; }
     uint32_t droppedLength() const { return m_badLength; }
 
-    /* Back to hunting for sync. For a caller that knows the stream broke under
-     * the decoder -- a rate change -- so half a frame at the old rate is not
-     * finished with bytes at the new one. */
+    /* Discard any partial frame, e.g. after a baud change. */
     void reset();
 
 private:

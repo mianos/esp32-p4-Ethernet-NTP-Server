@@ -1,78 +1,24 @@
 /*
- * The stratum-1 reference: a u-blox LEA-8 on UART1, disciplined by its PPS.
+ * The stratum-1 reference: a u-blox LEA-M8T on UART1, disciplined by its PPS.
  *
- * Wiring, in the board header's GPIO numbers:
+ *   module TX  -> GPIO16   UART1 RX
+ *   module RX  -> GPIO15   UART1 TX
+ *   module PPS -> GPIO14   rising edge
  *
- *   module TX  -> GPIO16   UART1 RX   (time of day)
- *   module RX  -> GPIO15   UART1 TX   (configuration, sent once)
- *   module PPS -> GPIO14   rising edge, interrupt (when the second starts)
+ * NAV-PVT names the second; the PPS edge says when it starts. Each paired edge
+ * is an anchor (UTC second, local instant), and served time is the anchor plus
+ * elapsed time on the 1588 counter, or on esp_timer when that is not running.
+ * The system clock is slewed to the same anchor for logs and HTTP but is not
+ * what replies are built from.
  *
- * The split between those two wires is the whole accuracy story:
+ * Lock needs an edge within 3 s, or within 10 minutes once the rate is known,
+ * with dispersion growing 1 ppm per second of holdover; otherwise this reference
+ * answers stratum 16 (under timeSource=auto, ClockSource may hand over to
+ * upstream SNTP). Leap seconds come from NAV-TIMELS and are announced, not
+ * smeared.
  *
- *  - the UART carries UBX-NAV-PVT once a second: UTC date and time, fix type,
- *    satellite count. It arrives tens of milliseconds late, and that does not
- *    matter, because it only says *which* second it is;
- *  - the PPS edge says *when* that second starts. The interrupt handler stamps
- *    esp_timer_get_time() as it fires -- microseconds of latency, not the
- *    milliseconds a 92-byte frame takes to dribble out of a 9600-baud port --
- *    and the NAV-PVT that follows names the second that edge began.
- *
- * Together they give an anchor: (UTC second, monotonic instant). Timestamps
- * come from the anchor plus elapsed monotonic time, so what the LAN is served
- * is not the system clock at all. The system clock is still slewed towards the
- * same anchor with adjtime(), because the log lines, /healthz and the HTTP Date
- * headers all read it -- but a correction in flight there never reaches a reply.
- *
- * What this refuses to do, because the alternative is lying to clients:
- *
- *  - serve without the PPS. The UART alone dates the second but cannot say
- *    where in it we are: that is a tens-of-milliseconds server, i.e. worse than
- *    the upstream SNTP clock it would be replacing. Lock needs an edge from the
- *    last 3 s -- or, once the servo below knows the crystal's rate, from the
- *    last 10 minutes, with root dispersion growing the whole time so a client
- *    can see the holdover decay instead of having to trust it;
- *  - fall back to SNTP when the fix goes away. A reference that silently turns
- *    into a different reference is one whose stratum means nothing. Settings
- *    says which source is authoritative; if that source is not healthy, the
- *    honest answer is "do not use me";
- *  - pretend to interpolate leap seconds. The u-blox UTC fields already include
- *    them, so the epoch this builds is the same one lwIP's SNTP client sets: at
- *    the end of a leap day the second after 23:59:59 is served twice, which is
- *    what an NTP server is supposed to do. What the module adds is *notice* --
- *    UBX-NAV-TIMELS says a leap is pending and how far off it is, and the leap
- *    indicator goes to 1 (or 2) for the last minute, so a client is told rather
- *    than surprised. Nothing here smooths a second away.
- *
- * Two measurements run on top of the anchor, and they are the difference
- * between a clock that is right and a clock that stays right:
- *
- *  - the servo. Every anchor is a sample of esp_timer against the GPS, so the
- *    slope of those samples is the crystal's rate error, fitted over the last
- *    five minutes. Served time is corrected by it, which removes the sawtooth
- *    between edges and, far more importantly, turns a holdover from "3 seconds
- *    then demote" into minutes of microsecond-level time;
- *  - the error budget. Locked, the dispersion this reference states is what it
- *    has measured about its own stamping -- the receiver's stated pulse
- *    quantisation and the observed spread between edges -- plus one ppm for
- *    every second since the last edge: not the fit's own confidence (which is
- *    parts per billion and would be a boast) but a cheap crystal's wander over
- *    temperature, which is the term that actually decides how long a holdover is
- *    worth serving.
- *
- * The receiver is configured over UART on every boot -- NAV-PVT at 1 Hz for the
- * date, NAV-TIM-TP at 1 Hz for the pulse's own qualities, NAV-TIMELS at 1 Hz for
- * the leap-second notice, NMEA off -- and deliberately not saved to its flash.
- * (This unit rejects the TIM-TP enable, so that half of it is dormant here; the
- * jitter the message would have described is measured from the servo instead.) It is
- * the module keeps its own defaults, so it can still be plugged into u-center
- * afterwards. The timepulse is asserted with CFG-TP5 rather than assumed: 1 Hz,
- * UTC-aligned, rising edge, 100 ms wide. A pulse somebody moved in u-center is
- * the one fault that makes this server confidently wrong, and a 32-byte frame
- * per boot is cheaper than a README telling the reader to go and look.
- *
- * Without a module on the pins (or with the wires crossed) nothing here fails:
- * no UBX frames arrive, the baud scan says so once, and the reference answers
- * stratum 16 like any other reference that cannot vouch for its clock.
+ * The receiver is configured on every boot; only its IO section is saved.
+ * CFG-TP5 is always sent so a pulse changed in u-center cannot go unnoticed.
  */
 #pragma once
 
@@ -92,16 +38,9 @@
 
 class GpsTime : private ubx::Listener {
 public:
-    /* One satellite out of UBX-NAV-SAT, for the sky view. Field names follow
-     * the message: gnssId and svId identify it, cno/elev/azim are what a
-     * polar plot needs, and flags carry quality, svUsed, health and ephAvail
-     * in the receiver's own bit order so nothing has to be inferred twice.
-     *
-     * 32 is a ceiling, not an expectation: the payload holds 42 at 12 bytes
-     * each, but a sky that big means everything marginal is included and the
-     * extra rows tell a plot nothing. Multiband receivers put one satellite in
-     * here several times, once per band, which is why this is not deduplicated
-     * by svId. */
+    /* One UBX-NAV-SAT satellite for the sky view; flags are the receiver's own
+     * bits. Multiband receivers list a satellite once per band, so rows are not
+     * deduplicated by svId. */
     static constexpr uint8_t kMaxSats = 32;
     struct Sat {
         uint8_t  gnss  = 0;
@@ -110,18 +49,13 @@ public:
         int8_t   elev  = 0;
         int16_t  azim  = 0;
         uint32_t flags = 0;
-        /* UBX-NAV-SAT pseudorange residual, centimetres. The receiver's own
-         * statement of how far this satellite's measurement sits from a
-         * consistent solution, which is what multipath actually looks like --
-         * C/N0 only proxies it, and a strong reflection is loud and wrong.
-         * 0x8000 is the message's "not available". */
+        /* Pseudorange residual, cm: a better multipath indicator than C/N0.
+         * 0x8000 in the message means not available. */
         int16_t prRes      = 0;
         bool    prResValid = false;
     };
 
-    /* What /healthz reports about the receiver, and what the reference is
-     * allowed to claim. Plain data, because it is published as a snapshot: see
-     * publishStatus() and status(). */
+    /* Published once a second as a snapshot; see publishStatus() and status(). */
     struct StatusData {
         bool     timeValid   = false; /* the NAV-PVT date and time fields are good */
         uint8_t  fixType     = 0;     /* u-blox fix type: 0 none, 2 2D, 3 3D */
@@ -129,25 +63,19 @@ public:
         uint32_t ppsCount    = 0;
         int64_t  ppsAgeUs    = -1; /* since the last edge; -1 means never */
         int64_t  anchorAgeUs = -1; /* since the last edge that was paired and trusted */
-        /* The last edge in the 1588 counter's base, which is where a hardware
-         * timestamp would come from. Zero until the first edge after the PHC
-         * runs; the two are compared to see the counter track the reference. */
+        /* The last edge on the 1588 counter; zero before the counter runs. */
         int64_t ppsPtpNs = 0;
-        /* Served-time difference between the 1588 anchor and the monotonic one,
-         * both measured from the same edge: zero means the two agree, and
-         * anything else is the hardware path being fitted wrongly. */
+        /* Served time from the 1588 anchor minus served time from the esp_timer
+         * anchor, for the same edge. Should be near zero. */
         int64_t phcMonoDeltaNs = 0;
         bool    anchored       = false; /* an edge and a NAV-PVT have been paired */
         time_t  lastFix        = 0;     /* UTC second of the last accepted anchor */
         int64_t offsetUs       = 0;     /* GPS minus the system clock, last measured */
-        /* The same offset in nanoseconds. Microseconds hide the one step a cable
-         * delay change makes -- a few metres of lead is a few tens of ns -- and
-         * that step is the only way to check the correction went the right way
-         * without a reference the box does not have. */
+        /* The same in ns, fine enough to see a cable delay change. */
         int64_t offsetNs = 0;
 
-        /* The counter against the second at the last anchored edge: what every
-         * PTP stamp is off by. And how often it has been stepped back. */
+        /* 1588 counter minus the edge's second at the last anchor, which every
+         * PTP stamp carries, and how often it has been stepped. */
         int64_t  phcPhaseNs = 0;
         uint32_t phcSteps   = 0;
 
@@ -159,34 +87,23 @@ public:
         uint32_t bridgeDroppedCrc = 0;
         bool     locked           = false; /* a stratum-1 reference right now */
 
-        /* The servo: esp_timer's rate error against the GPS in parts per
-         * billion (positive means the counter runs fast), how many anchors the
-         * fit is based on, and how stale an edge may be and still count as a
-         * lock -- 3 s before the rate is known, 10 minutes after. */
+        /* esp_timer's rate error against GPS in ppb (positive is fast), the
+         * anchors in the fit, and the current lock window. */
         int32_t  ratePpb      = 0;
         uint16_t rateSamples  = 0;
         int64_t  lockWindowUs = 0;
 
-        /* The error budget this reference states for itself, in nanoseconds:
-         * the anchor's own accuracy while fresh, plus wander since the edge.
-         * rootDelayNs is the half of it that sits in the measurement path --
-         * the interrupt's latency and the receiver's own pulse quantisation --
-         * and dispersionNs is that plus the edge-to-edge jitter actually seen
-         * plus wander since the edge. Neither is a constant any more: see
-         * onNavTimTp() for what is measured and what stays named. */
+        /* rootDelayNs is 0 (a local refclock has no path). dispersionNs is the
+         * stamping allowance, half the pulse quantisation, the served-path
+         * bound, fit jitter and wander since the edge. */
         int64_t rootDelayNs  = 0;
         int64_t dispersionNs = 0;
-        /* The part of dispersion that exists because TIM-TP has gone silent and
-         * the pulse position is therefore unobserved. Published on its own so
-         * the term is deniable in public rather than buried in a total. */
+        /* The part of dispersion added while TIM-TP is silent. */
         int64_t pulseUnobservedNs = 0;
 
-        /* What UBX-NAV-TIM-TP says about the pulse itself: the receiver's
-         * stated quantisation error (how well it knows where the edge truly
-         * is, picoseconds on the wire, ns here), the measured spread of our own
-         * stamping, and whether the pulse is where the top of the second puts
-         * it. timTpCount is a plain "is it flowing" counter, so a module that
-         * ignores the message is distinguishable from a quiet one. */
+        /* From UBX-TIM-TP: the receiver's quantisation error (ps on the wire,
+         * ns here), our measured stamping spread, and whether the pulse is on
+         * the second. timTpCount shows whether the message is arriving. */
         int32_t  qErrNs        = 0;
         bool     qErrValid     = false;
         int64_t  jitterNs      = 0;
@@ -196,8 +113,7 @@ public:
         int32_t  pvtNanoNs     = 0; /* NAV-PVT's offset into its own second */
         uint32_t pvtItowMs     = 0; /* the same instant, on the GPS time base */
         uint8_t  timTpFlags    = 0; /* timeBase and qErrInvalid live here */
-        /* TIM-TOS: the pulse against the UTC top of second, with an
-         * uncertainty, and whether it is locked at all. */
+        /* UBX-TIM-TOS, when the receiver supports it. */
         uint32_t tosFlags       = 0;
         int32_t  tosUtcOffsetNs = 0;
         uint32_t tosUtcUncNs    = 0;
@@ -212,12 +128,11 @@ public:
         uint32_t tp5PeriodUs    = 0;
         uint32_t tp5Ratio       = 0;
 
-        /* The bias switch, driven by the ESP because the module will not. */
+        /* Antenna bias, switched by the ESP. */
         bool antBiasOn  = false;
         bool antShort   = false;
         bool antLatched = false;
-        /* What the receiver has been told the lead delays the signal by, so the
-         * installed figure can be read back rather than remembered. */
+        /* Delays as configured in settings. */
         double antDelayNs  = 0;
         double userDelayNs = 0; /* as stored, not as the module echoes it */
 
@@ -225,14 +140,8 @@ public:
         bool timTpRejected = false;
         bool timTpAcked    = false;
 
-        /* The antenna, from UBX-MON-HW, and the signal quality behind it, from
-         * UBX-NAV-SAT. Comparing antennas needs C/N0 and the AGC/noise/jammer
-         * figures, not satellite counts: a high-gain antenna on a preamp can
-         * push this receiver into overload, and the two numbers that show it are
-         * a falling agcCnt and a jamming state above "ok". antPower is what the
-         * bias tee is actually doing -- OFF, ON, or DONTKNOW when the firmware
-         * has no supervisor -- and antStatus reports the fault the supervisor
-         * found: SHORT, OPEN, or OK. */
+        /* Antenna and front end from UBX-MON-HW, signal from UBX-NAV-SAT. A
+         * falling agcCnt with jamState above ok indicates front-end overload. */
         uint8_t  antStatus      = 0; /* MON-HW aStatus: 0 init, 1 dontknow, 2 ok, 3 short, 4 open */
         uint8_t  antPower       = 0; /* MON-HW aPower: 0 off, 1 on, 2 dontknow */
         uint16_t noisePerMs     = 0;
@@ -249,13 +158,7 @@ public:
         int64_t  monHwAgeUs     = -1;
         int64_t  fitUs          = 0; /* how long the last rate fit took */
 
-        /* Geometry and clock quality: UBX-NAV-DOP, UBX-NAV-CLOCK and
-         * UBX-NAV-STATUS. DOP is the one that separates "the sky is blocked"
-         * from "the visible constellation is strung out in a bad line" -- with
-         * C/N0 alone those look identical, and only one of them is fixed by
-         * moving the antenna. tAcc is the receiver's own statement of how well
-         * it can place the pulse, which no derived figure here can replace.
-         * ttff and the status flags tell a cold start from a loss of lock. */
+        /* UBX-NAV-DOP, UBX-NAV-CLOCK and UBX-NAV-STATUS. */
         float    gDop            = 0;
         float    pDop            = 0;
         float    hDop            = 0;
@@ -271,9 +174,7 @@ public:
         int64_t  clockAgeUs      = -1;
         int64_t  navStatusAgeUs  = -1;
 
-        /* UBX-MON-RF: the same front-end story as MON-HW but per band, so the
-         * L1 and L2 halves can disagree. Kept as the worst case over the bands
-         * rather than an array, since the status struct is copied by value. */
+        /* UBX-MON-RF, worst case over the bands. */
         uint8_t  rfBands    = 0;
         uint8_t  rfJamWorst = 0;
         uint8_t  rfAntWorst = 0;
@@ -281,29 +182,18 @@ public:
         bool     rfSeen     = false;
         int64_t  rfAgeUs    = -1;
         uint8_t  rfCfg      = 0;
-        /* Worst and RMS phase excursion in the fit window, nanoseconds. */
-        /* How long after the edge the frame that dated it arrived, at the last
-         * accepted pair, and the high-water since boot. This is the margin the
-         * pairing window is actually spending; pairAgeMaxUs is the figure,
-         * because a mean hides the tail that decides whether a sentence could
-         * pair with the wrong edge. pairAgeS is how old the measurement is. */
+        /* Edge-to-NAV-PVT delay at the last pair and its maximum since boot,
+         * against kPairWindowUs; pairAgeS is how old that pair is. */
         int64_t pairAgeUs    = 0;
         int64_t pairAgeMaxUs = 0;
         double  pairAgeS     = -1;
+        /* Worst and RMS phase excursion in the fit window. */
         double  tieMaxNs     = 0;
         double  tieRmsNs     = 0;
-        /* Overlapping Allan deviation in ppb (nanoseconds per second), octave
-         * k at 2^k seconds. Zero where the window is too short to reach it, and
-         * the count below says how many samples stand behind the numbers. */
         uint32_t ticksPerUs  = 0; /* systimer ticks in a microsecond, as IDF converts it */
 
-        /* Link health, which was the one thing with no observation at all. At
-         * 9600 baud the wire is the scarcest resource here, and until now a
-         * saturated or mistimed line showed up only as CRC and length drops
-         * with nothing behind them. MON-IO is the port counters (parity,
-         * framing, overrun, bytes), the buffer messages are the module's own
-         * queue depths, and MSGPP is how many of each class it actually sent --
-         * which is also how a silently-ignored enable becomes visible. */
+        /* UART link health: MON-IO port counters, MON-RXBUF/TXBUF queue depths,
+         * and MON-MSGPP message counts (which also show an ignored enable). */
         uint32_t ioRxBytes   = 0;
         uint32_t ioTxBytes   = 0;
         uint16_t ioParity    = 0;
@@ -318,103 +208,69 @@ public:
         uint32_t msgSkipped  = 0;
         bool     ioSeen      = false;
         int64_t  ioAgeUs     = -1;
-        /* The host's current rate, so utilisation can be computed against it. */
+
         uint32_t baud = 0;
 
-        /* The servo's own work counters. A mean offset hides a servo fighting
-         * the oscillator: these three show it happening. Steps are corrections
-         * past the slew threshold, clamps are fits that hit the rate limit (a
-         * bad fit, not a bad crystal), and edgeSpikes counts edges that landed
-         * more than 1 ms from where the last one predicted -- the signature of
-         * a pulse that is being corrupted rather than merely late. */
+        /* Servo counters: steps past kStepThresholdNs, fits clamped at
+         * kRateLimitPpb, and edges beyond kEdgeSpikeNs of the prediction. */
         uint32_t servoSteps  = 0;
         uint32_t servoClamps = 0;
         uint32_t edgeSpikes  = 0;
-        /* Edges refused for landing more than 20 us from the fit: a late
-         * interrupt, or the first seconds of a real step. */
+        /* Edges refused for landing beyond kEdgeOutlierNs from the fit. */
         uint32_t edgeOutliers = 0;
-        /* Which published snapshot this is and how old it was when read. The
-         * status is a copy the GPS task publishes once a second, so these say
-         * how fresh the copy is rather than leaving it to be assumed. */
+        /* Which snapshot this is, and its age when read. */
         uint32_t snapshotSeq   = 0;
         int64_t  snapshotAgeUs = -1;
-        /* The trust test's verdict on the newest edge, and how many edges in a
-         * row it has refused. Spikes are edges that arrived where nothing
-         * predicted; rejects are edges that failed the spacing or the
-         * second-continuity test and were therefore never used at all. A count
-         * climbing towards the re-acquire threshold is the pulse failing
-         * slowly, which no single offset figure shows. */
+        /* Whether the newest edge passed the spacing and continuity tests, and
+         * the consecutive refusals (re-acquire at kRejectStreakReacquire). */
         bool     lastEdgeTrusted = true;
         uint32_t edgeRejects     = 0;
         uint32_t bridgeSessions  = 0;
         uint32_t bridgeRefused   = 0;
-        /* Whether a client holds the port right now, and how many. The point of
-         * saying so is that "u-center does nothing" and "u-center is not
-         * attached at all" are different faults and used to look the same from
-         * here. */
+        /* u-center bridge clients and traffic. */
         bool     bridgeActive  = false;
         int      bridgeClients = 0;
         uint32_t bridgeRx      = 0;
         uint32_t bridgeTx      = 0;
-        /* Time mode: disabled, surveying, or fixed. With the survey's own
-         * numbers beside it, since "how far along is it and how good is it" is
-         * the whole question once one is running. */
+        /* Survey-in progress from UBX-TIM-SVIN. */
         double svinDurS   = 0;
         double svinAccMm  = 0;
         double svinVarMm2 = 0;
         double svinObs    = 0;
-        /* The mean the survey has so far, in ECEF centimetres, which is the
-         * unit the message carries and the unit CFG-TMODE2 takes. Published
-         * because "action":"fix" stores exactly this: without it the decision at
-         * the end of a survey is made blind, and a mean a few metres from the
-         * provisioned position would be locked over the top of it unremarked. */
+        /* Survey mean in ECEF cm, the unit CFG-TMODE2 takes; "action":"fix"
+         * stores exactly this. */
         int32_t svinMeanCm[3] = {};
-        /* What the survey was asked for, beside what it has. Without the pair
-         * there is no way to tell "nearly there" from "asked for six hours and
-         * the limit is unmet", which is the whole decision at the end. */
+        /* The survey's requested duration and accuracy limit. */
         double svinTargetS = 0;
         double svinLimitMm = 0;
         bool   svinValid   = false;
-        /* True only when the held fixed position came from a survey that had
-         * met its own accuracy limit. False is usable but unsignoff, and is
-         * what a lock taken from an abandoned survey looks like. */
+        /* The held position came from a survey that met its accuracy limit. */
         bool holdValidated = false;
-        /* Whether a hold is wanted and when it will next be asserted. A hold
-         * that is wanted but never sent is invisible otherwise, which is how one
-         * was restored and dropped on every boot. */
+        /* Whether a hold is wanted and when it is next asserted. */
         bool   holdWanted    = false;
         double holdAssertInS = -1;
-        /* The three terms the retry waits on, so a hold that never gets sent can
-         * be told from one that is simply not due. */
+        /* The conditions the hold retry waits on. */
         bool   holdReady     = false;
         double lastEdgeAgeMs = -1;
         double svinAgeS      = -1;
-        /* MON-HW's pin map: which module pins the receiver has assigned, their
-         * direction and level. The antenna supervisor is a pin pair, so this is
-         * where its numbers come from when CFG-ANT has to name them. */
+        /* MON-HW pin map, for naming the supervisor pins in CFG-ANT. */
         uint32_t pinSel = 0;
         uint32_t pinDir = 0;
         uint32_t pinVal = 0;
 
-        /* The last holdover, and what it cost: how long the edge was missing
-         * and what the servo's prediction was worth when it came back. The only
-         * number that can honestly justify serving through a gap -- and the one
-         * a README should quote instead of a promise. */
+        /* The last holdover's length and the prediction error when the edge
+         * came back. */
         int64_t lastHoldoverUs    = 0;
         int64_t lastHoldoverErrNs = 0;
 
-        /* Leap seconds, from UBX-NAV-TIMELS: the current GPS-UTC offset, the
-         * pending change (+1, -1, or 0 for none) and how far off it is. leapValid
-         * is false until the module has said anything, so a board whose module
-         * ignores the message reports nothing rather than a guess. */
+        /* From UBX-NAV-TIMELS: GPS-UTC offset, pending change (+1, -1, 0) and
+         * seconds until it. leapValid is false until the first message. */
         bool    leapValid   = false;
         int8_t  leapSeconds = 0;
         int8_t  leapChange  = 0;
         int32_t leapInS     = 0;
 
-        /* Time left on the POST /gps/pps hook, which swallows edges on purpose
-         * so a holdover can be watched with the PPS wire soldered on. Report
-         * it, so nobody mistakes an artificial state for a fault. */
+        /* Time left on the POST /gps/pps holdover test, which drops edges. */
         int64_t ppsSuppressUs = 0;
     };
 
@@ -489,21 +345,12 @@ public:
     size_t drainSamples(uint32_t since, Sample *out, size_t max, uint32_t &first, uint32_t &last,
                         uint32_t &lost) const;
 
-    /* The per-satellite sample behind status().cn0Mean, copied into a caller
-     * buffer, returning the count copied.
-     *
-     * Deliberately NOT a member of Status: the array is 256 bytes and Status is
-     * returned by value from every status() call, which happens on the NTP
-     * responder and on every /healthz. Folding it in grew each of those frames
-     * by the whole array and overflowed the 2304-byte sys_evt task, which
-     * panicked the board on boot. Here the caller decides where the bytes live
-     * and pays for them only on the one endpoint that wants them. */
+    /* The satellites behind status().cn0Mean, into a caller buffer. Kept out of
+     * Status, which is copied by value onto small task stacks. */
     uint8_t copySats(Sat *out, uint8_t max) const;
 
-    /* The scalars a reply needs and nothing else. status() assembles nine
-     * std::strings for the HTTP side; the responder was paying for all of them
-     * between its two stamps, which measured 250 us of allocation inside the
-     * T2..T3 window. Same gate logic, evaluated here rather than copied. */
+    /* What a reply needs, without status()'s string building, which cost the
+     * responder about 250 us between its receive and transmit stamps. */
     struct ReplyFacts {
         bool     locked       = false;
         uint8_t  stratum      = 16;
@@ -512,116 +359,70 @@ public:
         uint8_t  leap         = 0;
         uint32_t rootDelayNs  = 0;
         uint32_t dispersionNs = 0;
-        /* Held together, but the budget says it is past what a reply may claim:
-         * locked is then false and stratum 16, and this is only the reason. */
+        /* Locked apart from the error budget; locked is then false. */
         bool demoted = false;
     };
     ReplyFacts replyFacts() const;
 
-    /* The GPS-UTC offset as NAV-TIMELS last gave it, zero before it has. One
-     * byte, for a caller that has no use for the rest of status(). */
+    /* GPS-UTC from NAV-TIMELS; zero before the first message. */
     int8_t leapSeconds() const { return m_leapSeconds; }
 
-    /* The anchor plus elapsed monotonic time. False when no edge has been
-     * paired with a NAV-PVT yet, which is what the reference turns into
-     * "not locked". */
+    /* The anchor plus elapsed time on the 1588 counter (esp_timer when it is
+     * off). False before the first paired edge. */
     bool now(struct timespec &ts) const;
 
     /* "GPS/PPS, 3D fix, 9 satellites" or "GPS/PPS (no fix yet)". */
     std::string describe() const;
 
-    /* The leap indicator this reference would put in a reply: 1 for "the last
-     * minute has 61 seconds", 2 for 59, 0 the rest of the time. Only from the
-     * receiver's own TIMELS, and only in the minute before the event: a server
-     * that guessed "there might be a leap" would be warning about nothing. */
+    /* NTP leap indicator: 1 or 2 in the minute before a leap NAV-TIMELS
+     * announced, otherwise 0. */
     uint8_t leapIndicator() const;
 
-    /* Test hook for POST /gps/pps: stop counting PPS edges for this many
-     * seconds, so a holdover can be measured on a board whose PPS line is
-     * soldered on. Not a way to run without the PPS -- the anchor stops
-     * advancing and the reference demotes itself exactly as it would if the
-     * wire had come off. Returns the number of seconds now in force. */
+    /* POST /gps/pps: ignore PPS edges for this long, to exercise holdover with
+     * the wire attached. Returns the seconds now in force. */
     uint32_t suppressPps(uint32_t seconds);
 
-    /* Bench hooks for an antenna that is being swapped. setAntennaBias() sends
-     * CFG-ANT with supply control on or off, so a preamp can be powered and
-     * unpowered without a reflash and the C/N0 either side compared; the
-     * automatic case never turns it off, so this only ever describes a
-     * deliberate experiment. resetReceiver() is a controlled hot start: it
-     * restarts the navigation engine without touching the almanac, for a module
-     * that has been reconfigured into a corner. Both return false if the module
-     * refused. */
+    /* Bench requests, carried out by the GPS task: antenna bias on or off, a
+     * receiver reset (hot by default), and factory defaults. */
     void requestAntennaBias(bool on);
     void requestReset(bool cold = false, bool hardware = false, bool powerCycle = false);
     void requestDefaults();
-    /* Replace the constellation mask and re-apply it. Bits are gnssId: GPS 0,
-     * SBAS 1, Galileo 2, BeiDou 3, IMES 4, QZSS 5, GLONASS 6. A mask the
-     * receiver refuses is reported rather than retried, because which
-     * combinations it takes is the receiver's business -- BeiDou and GLONASS
-     * cannot both be set on this one. */
+    /* Constellation mask by gnssId: GPS 0, SBAS 1, Galileo 2, BeiDou 3, IMES 4,
+     * QZSS 5, GLONASS 6. A mask the receiver refuses is reported, not retried. */
     void requestGnss(uint8_t mask);
-    /* Survey-in of the antenna position, and locking it as a fixed one. A fixed
-     * position is what a timing receiver wants: the position stops being solved
-     * from the clock, so the pulse stops moving with it. Only worth doing
-     * because position error is cheap in time -- 3.3 ns per metre, averaged
-     * over the constellation -- so a survey that lands metres is still better
-     * than none. */
+    /* Survey-in, then hold the position fixed so it is no longer solved
+     * together with the clock. */
     void requestSurvey(bool start, uint32_t durS = 86400, uint32_t accMm = 30000);
     void requestFixPosition();
-    /* Re-send the pulse frame with a new antenna cable delay, in nanoseconds.
-     * Persisted by the caller: this only queues the frame for the task. */
+    /* Queue CFG-TP5 with the delays from settings; the caller saves them. */
     void requestAntDelay();
     void requestPulseMs(uint32_t ms);
     void requestPeriodUs(uint32_t us);
-    /* Set the host side's rate on its own, without telling the receiver. That
-     * is how a line that has been desynchronised by something other than this
-     * firmware -- or deliberately, to watch the scan -- is put back. */
+    /* Change the host baud rate, and the module's too when moduleToo is set. */
     void   requestBaud(uint32_t baud, bool moduleToo);
     int8_t sendCfgPrt(uint32_t baud);
 
-    /* The same port configuration as an NMEA sentence, for a receiver whose UBX
-     * input has been switched off. */
+    /* CFG-PRT as a PUBX sentence, for a receiver with UBX input turned off. */
     void   sendPubxPortConfig(uint32_t baud);
     int8_t saveCfgIo();
-    /* Learn the time mode from the receiver, and put a known position hold back
-     * after something has cleared it. */
+    /* Read the time mode from the receiver, and restore a known hold. */
     void adoptTimeMode();
     void reassertFix();
     bool startSurveyFromSettings();
     void restoreTimeMode();
     void saveTimeMode();
-    /* Tell the receiver to hold the adopted position. Separate from adopting it:
-     * the two used to be the same act and only one of them was happening at
-     * boot. */
+    /* Send CFG-TMODE2 for the adopted position. */
     bool sendFixedPosition();
 
-    /* A transparent TCP<->UART1 bridge for u-center, on kBridgePort.
-     *
-     * UBX has no arbitration: on one UART, whoever writes while another writes
-     * collides and whoever reads takes the bytes. There are two ways to have a
-     * bench tool and this firmware on the same receiver, and only one of them is
-     * available here.
-     *
-     * The one that is: the client is the single master for the duration, the
-     * firmware stops writing anything the client did not cause, and the bridge
-     * is the single reader, tapping what it reads into the same parser the
-     * clock is driven from. u-center configures the receiver; the firmware
-     * consumes the result rather than competing with it. That is why pump()
-     * waits instead of reading while a client is attached, and why
-     * configureModule() stands aside until the last client has gone.
-     *
-     * The one that is not: port separation. UBX keeps a separate output rate
-     * per port, so a monitor on UART2 could ask for its own messages without
-     * disturbing UART1 -- this carrier wires only UART1, so it would need a
-     * second pair to the module. If that is ever added, the session's CFG-MSG
-     * in bridgeTask() wants to name port 2 rather than port 1. */
+    /* TCP<->UART1 bridge for u-center. One UART has no arbitration, so while a
+     * client is attached it is the only writer and the bridge the only reader;
+     * the bridge feeds what it reads to the parser, pump() stops reading, and
+     * configureModule() waits for the client to leave. */
     static constexpr int kBridgePort = 3333;
 
-    /* The antenna switch, on the ESP side: AADET_N is pulled low to power the
-     * preamp, SCS1_N reports a short. The module's own supervisor does not
-     * exist on this firmware (CFG-ANT is refused for every flag and pin
-     * combination tried), so the firmware does the job -- including cutting the
-     * bias on a short, which is the one part of it that protects hardware. */
+    /* Antenna bias on the ESP side: AADET_N low powers the preamp, SCS1_N
+     * reports a short. The pin does the switching and cuts the bias on a short;
+     * CFG-ANT is sent as well. */
     static constexpr int kAntDrivePin = 17;
     static constexpr int kAntSensePin = 18;
 
@@ -633,11 +434,8 @@ private:
     static void           ppsIsr(void *arg);
     static bool IRAM_ATTR ppsCapIsr(mcpwm_cap_channel_handle_t        channel,
                                     const mcpwm_capture_event_data_t *edge, void *arg);
-    /* Both edge paths end here: one from a plain interrupt stamp, one from the
-     * capture's latched tick. The gates are shared so the suppression hook and
-     * the spacing rule cannot be bypassed by one of them. The PHC half of the
-     * anchor is passed in because the stamping handler has to take it before
-     * any lock. */
+    /* Both edge paths end here, so the suppression hook and spacing rule apply
+     * to each. The PHC reading is taken by the handler before any lock. */
     void        recordEdge(int64_t edgeNs, int64_t edgePhcNs);
     esp_err_t   beginCapture();
     esp_err_t   beginInterruptEdge();
@@ -652,15 +450,9 @@ private:
     void configureModule();
     void sendUbx(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len);
 
-    /* One configuration message at a time, waiting for its own ACK or NAK
-     * before the next is sent. The reply's payload names the class and id of
-     * the message it answers, so a single outstanding message is unambiguous --
-     * and it has to be, because this receiver does not answer everything (it
-     * answers MON-VER but ignores MON-COMMS) and an order-based guess drifts
-     * apart within one boot. pump() keeps parsing while it waits; the GPS task
-     * would otherwise be blind for the duration -- and while a client holds the
-     * port, pump() only parses what the bridge feeds it, because a second
-     * reader would take the client's bytes. */
+    /* Send one configuration message and wait for its ACK or NAK. One at a
+     * time, because the receiver does not answer every message and matching by
+     * order goes wrong. pump() keeps parsing while it waits. */
     int8_t  sendAndWait(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len,
                         uint32_t timeoutUs = 250000);
     int8_t  sendTp5();
@@ -671,8 +463,7 @@ private:
 
     void logLockChange();
 
-    /* UBX framing, one byte at a time. NMEA sentences and rubbish are skipped
-     * by the same loop: the parser only ever looks for 0xB5 0x62. */
+    /* Decoded UBX frames; anything not starting 0xB5 0x62 is skipped. */
     void onFrame(const ubx::Frame &frame) override;
     void onDrop(ubx::Drop why, const ubx::Frame &frame) override;
     void onFrame(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t len);
@@ -696,15 +487,11 @@ private:
     void onCfgTmode(const ubx::Frame &f);
     void anchor(time_t second);
 
-    /* The servo. Each anchor is one sample of esp_timer against the GPS; the
-     * slope of the last five minutes of them is the crystal's rate error, and
-     * that is what lets a holdover last minutes instead of seconds. */
+    /* The servo: the slope of esp_timer against GPS over kRateWindow anchors is
+     * the crystal's rate error. */
     struct RateSample {
-        /* The PPS edge in nanoseconds: esp_timer's microseconds plus the
-         * sub-microsecond part from the CPU cycle counter. Nanoseconds because
-         * the fit's residual is the jitter being measured, and esp_timer alone
-         * quantises each stamp to +/-0.5 us -- 289 ns RMS, which is larger than
-         * the jitter itself. */
+        /* The edge on esp_timer in ns, with the interrupt wait taken out by
+         * pps_latency. */
         int64_t monoNs = 0;
         int64_t utcNs  = 0; /* the UTC second that edge began */
     };
@@ -713,10 +500,8 @@ private:
     /* Drop the rate fit and seed it again from the next edge. */
     void resetRateWindow();
 
-    /* Everything the lock decision depends on, so that status() and
-     * replyFacts() can share one implementation of it -- including the
-     * per-edge debounce, which must advance once per edge whichever caller
-     * arrives first. */
+    /* Inputs to the lock decision, shared by status() and replyFacts(). The
+     * per-edge debounce advances once per edge whichever calls first. */
     struct LockInputs {
         bool     anchored     = false;
         bool     timeValid    = false;
@@ -732,79 +517,60 @@ private:
     };
     bool evaluateLock(const LockInputs &in) const;
 
-    /* The stated error budget, in ns. rootDelayNs() is the measurement path --
-     * the named interrupt latency plus half the receiver's own pulse
-     * quantisation. dispersionNs() is that plus the jitter the fit measures
-     * plus the wander of ageUs, and carries the unobserved-pulse term its
-     * caller computed. One implementation, used by status() and by
-     * recordSample(), so the served figure and the recorded one cannot drift
-     * apart. */
+    /* The error budget in ns, shared by status() and recordSample().
+     * sampleErrorNs(): kIsrLatencyNs plus half the pulse quantisation.
+     * dispersionNs(): that plus the ServePath bound, fit jitter, wander over
+     * ageUs and the unobserved-pulse term. rootDelayNs() is 0. */
     int64_t rootDelayNs() const;
-    /* What our own stamping is worth: capture latency, receive lag, quantisation.
-     * Dispersion material, not delay -- see rootDelayNs(). */
+
     int64_t sampleErrorNs() const;
     int64_t unobservedNs() const;
     int64_t dispersionNs(int64_t ageUs, int64_t unobservedNs) const;
 
-    /* Correct the realtime clock by adjtime() rather than by a set. */
     void slew(int64_t offsetNs);
-    /* Appends one epoch, filling in any epochs missed since the last one. Runs
-     * on the servo task with the same lock discipline as the rate ring. */
+    /* Append one epoch, filling any missed since the last. */
     void   recordSample(uint32_t epoch, int64_t offsetNs);
     Sample m_samples[kSampleRing];
-    /* Atomic because /gps/samples reads them with no lock: a record is whole
-     * once the sequence has moved past it. */
+    /* /gps/samples reads without a lock: a record is complete once the
+     * sequence has passed it. */
     std::atomic<uint32_t> m_sampleSeq{1}; /* seq 0 is the "from the oldest" sentinel */
     std::atomic<uint32_t> m_sampleOldest{1};
     uint32_t              m_lastSampleEpoch = 0;
     bool                  m_lastSampleSet   = false;
     void                  fitRate();
 
-    /* Measure the offset against the anchor, then slew or step the system clock
-     * towards it if this source owns CLOCK_REALTIME. The measurement happens
-     * whether it owns it or not, so a fallback's divergence stays visible;
-     * ownership is ClockSource's to decide, and under timeSource=gps it is
-     * always ours. */
+    /* Measure the system clock against the anchor, and slew or step it when
+     * ClockSource says this reference owns it. */
     void steer();
 
-    /* The edge, written by the interrupt and read by the task and the responder.
-     * A spinlock rather than atomic<int64_t>: 64-bit atomics on this core go
-     * through libatomic, and the section is a handful of instructions. Mutable
-     * because status() and now() are const and still have to take it. */
+    /* Guards the edge and anchor. A spinlock rather than atomic<int64_t>, which
+     * on RV32 goes through libatomic. */
     mutable portMUX_TYPE m_mux = portMUX_INITIALIZER_UNLOCKED;
-    /* The capture timer's own counter, and when this handler last ran. The
-     * latter separates a real edge from the echo of our own software catch,
-     * which is how "now" is read in the same counter. */
+    /* Capture path state. m_lastEdgeUs also tells a real edge from the echo of
+     * the software catch. */
     mcpwm_cap_timer_handle_t   m_capTimer   = nullptr;
     mcpwm_cap_channel_handle_t m_capChannel = nullptr;
     int64_t                    m_lastEdgeUs = -1;
-    /* The capture timer's clock, in Hz, as reported by the driver. The APB
-     * is not the same speed on every part, so this is measured rather than
-     * assumed -- 80 MHz was assumed once and the clock stayed on time only
-     * because the servo absorbed a factor of two. */
+    /* Capture timer clock as the driver reports it; it differs between parts. */
     uint32_t m_capHz = 0;
-    /* The capture timer cannot be read, so a second free-running count in the
-     * same group supplies "now" with one register access. */
+
     bool m_capNowValid = false;
 
     int64_t m_ppsMonoUs = 0;
-    /* The same edge with the sub-microsecond part resolved from the cycle
-     * counter. Only the rate fit reads it; everything that sets the clock or
-     * measures age keeps the microsecond field. */
+    /* The same edge in ns, latency-corrected; only the rate fit reads it. */
     int64_t m_ppsMonoNs = 0;
-    /* When the silent-baud reset sweep last ran, so it cannot run every pass. */
+    /* Last silent-baud reset sweep, to rate-limit it. */
     int64_t  m_lastSweepUs  = 0;
     int64_t  m_ppsPtpNs     = 0;
     uint32_t m_ppsCount     = 0;
     int64_t  m_anchorUtcNs  = 0;
     int64_t  m_anchorMonoUs = 0;
-    /* The anchor in the 1588 counter, and the counter is the served base while
-     * it runs. Zero when the PHC is off. */
+    /* The anchor on the 1588 counter, which served time runs from; zero when
+     * the counter is off. */
     int64_t  m_anchorPhcNs = 0;
 
-    /* The counter at the last anchored edge less that edge's second, the edges
-     * in a row it has been out, the steps taken, and what a step's own set
-     * loses, learned from the edge after it. Servo task only. */
+    /* PHC phase step state, servo task only. m_phcStepLagNs is what a step's
+     * read-to-set gap loses, learned from the edge after each step. */
     int64_t  m_phcPhaseNs     = 0;
     int      m_phcOffEdges    = 0;
     uint32_t m_phcSteps       = 0;
@@ -829,11 +595,8 @@ private:
     int64_t m_lastHoldoverUs     = 0;
     int64_t m_lastHoldoverErrNs  = 0;
 
-    /* What TIM-TP has said, when the receiver has it at all, plus the spread
-     * our own stamps show. The spread comes from the servo's residuals rather
-     * than from TIM-TP, because this module refuses TIM-TP: the fit already
-     * computes how far each edge sits from the line through all of them, and
-     * that is the same jitter the message would have described. */
+    /* From TIM-TP, plus m_jitterNs, the stamping spread taken from the fit's
+     * residuals. */
     uint32_t m_timTpCount    = 0;
     int32_t  m_qErrNs        = 0;
     bool     m_qErrValid     = false;
@@ -841,7 +604,7 @@ private:
     int64_t  m_jitterNs      = 0;
     int64_t  m_fitUs         = 0;
 
-    /* The GPS task's own state; no other task reads it. */
+    /* GPS task only. */
     ubx::Decoder m_decoder;
     int64_t      m_lastFrameUs       = 0;
     uint32_t     m_rescans           = 0;
@@ -856,20 +619,18 @@ private:
     bool         m_ackLogged         = false;
     bool         m_noDataLogged      = false;
     int          m_baudIndex         = 0;
-    /* Rates tried since the pass began; a pass is kCount of them. */
+    /* Rates tried in the current pass. */
     int m_scanSteps    = 0;
     int m_silentPasses = 0; /* whole passes of the list with no frame */
-    /* Where the scan starts and where a wrap returns to: the rate the receiver
-     * was last heard on. Bounds-checked against kBauds at begin(). */
+    /* The rate the receiver was last heard on, where the scan starts. */
     int      m_preferredIndex = 0;
     uint32_t m_baud           = 0;
     bool     m_begun          = false;
     int64_t  m_nextScanUs     = 0;
     int64_t  m_nextCheckUs    = 0;
 
-    /* Five minutes of anchors: long enough that the fit's own confidence is
-     * parts per billion, short enough that the crystal's temperature wander is
-     * averaged rather than fitted as a curve. */
+    /* Five minutes: long enough for a ppb-level fit, short enough that
+     * temperature wander is not fitted as a line. */
     static constexpr int kRateWindow             = 300;
     static constexpr int kRateMinSamples         = 60;
     RateSample           m_rate[kRateWindow]     = {};
@@ -895,10 +656,7 @@ private:
     bool                 m_tp5Naked              = false;
     bool                 m_timTpNaked            = false;
     bool                 m_timTpAcked            = false;
-    /* MON-RF's fate, in the same three states the other optional messages use.
-     * It is a newer message than this module's protocol, so "rejected" and
-     * "accepted then silent" are both real answers and only this tells them
-     * apart -- otherwise the absent fields look like a firmware bug. */
+    /* MON-RF may be newer than the module's protocol version. */
     int8_t   m_rfCfg       = 0; /* 0 unanswered, 1 accepted, 2 rejected */
     uint32_t m_ioRxBytes   = 0;
     uint32_t m_ioTxBytes   = 0;
@@ -914,10 +672,8 @@ private:
     uint32_t m_msgSkipped  = 0;
     bool     m_ioSeen      = false;
     int64_t  m_ioAtUs      = -1;
-    /* Fixed storage: written per message, and as std::string each byte was a
-     * std::format -- 120 allocations per message, in the GPS task, forever. 241
-     * holds the 120-byte payload as 240 hex digits plus a terminator, and
-     * sizeof() on it is the real buffer, which is what the copies rely on. */
+    /* 120-byte payloads as hex plus a terminator, in fixed buffers to avoid
+     * allocating per message. */
     text::Buf<241> m_msgppHex;
     uint16_t       m_recentFrames[16] = {};
     uint8_t        m_recentAt         = 0;
@@ -936,16 +692,13 @@ private:
     uint32_t       m_pinsLogged  = 0;
     bool           m_monHwValid  = false;
     int64_t        m_nextHwUs    = 0;
-    /* Geometry, clock quality and per-band front end, from NAV-DOP, NAV-CLOCK,
-     * NAV-STATUS and MON-RF. Ages are stamped from esp_timer so a message that
-     * stops is visible as a growing age rather than as a stale number that
-     * still looks current. */
+    /* NAV-DOP, NAV-CLOCK, NAV-STATUS and MON-RF, with arrival times so a message
+     * that stops shows as a growing age. */
     float m_gDop = 0;
     float m_pDop = 0;
     float m_hDop = 0;
     float m_vDop = 0;
-    /* Whether the last reply was demoted by the dispersion gate, so the log
-     * says it once per episode rather than on every reply. */
+    /* Log the dispersion-gate demotion once per episode. */
     mutable bool m_gateLogged      = false;
     int64_t      m_clkBiasNs       = 0;
     int32_t      m_clkDriftNsPerS  = 0;
@@ -967,25 +720,22 @@ private:
     uint32_t     m_servoClamps     = 0;
     uint32_t     m_edgeSpikes      = 0;
     uint32_t     m_edgeOutliers    = 0;
-    /* The trust test's history: how many edges in a row it has refused, and
-     * the module's second at the previous edge (kept separately from m_lastFix,
-     * which only advances on an edge that was actually anchored). */
+    /* Edge trust test state. m_lastEdgeSecond is the module's second at the
+     * previous edge; m_lastFix only advances on anchored edges. */
     uint32_t m_edgeRejects       = 0;
     bool     m_lastEdgeTrusted   = true;
     time_t   m_lastEdgeSecond    = 0;
     bool     m_lastEdgeSecondSet = false;
     int64_t  m_lastEdgeMonoUs    = 0;
     bool     m_lastEdgeMonoSet   = false;
-    /* The lock gates' debounce, written from status(), which is const. */
-    /* The lock gate's debounce in one word: the edge count it last voted on in
-     * the low 24 bits, the run of bad votes above. */
+    /* Lock gate debounce, written from const status(): the edge count last
+     * voted on in the low 24 bits, the run of bad votes above. */
     mutable std::atomic<uint32_t> m_gate{0};
 
-    /* ---- The published status -----------------------------------------
-     *
-     * Everything status() needs beyond StatusData: raw timestamps the reader
-     * turns into ages, and the text as fixed buffers. Plain data, like the
-     * rest of a slot. */
+    /* ---- The published status ----------------------------------------- */
+
+    /* What status() needs beyond StatusData: raw times the reader turns into
+     * ages, and text in fixed buffers. */
     struct StatusExtras {
         int64_t  ppsMonoUs        = 0;
         int64_t  anchorMonoUs     = 0;
@@ -1028,8 +778,8 @@ private:
         StatusData            data;
         StatusExtras          extra;
     };
-    /* Few, on purpose: a reader needs one finished snapshot, and four means the
-     * one it is copying is left alone for three seconds. */
+    /* With four slots, the one a reader copies is not rewritten for three
+     * seconds. */
     static constexpr uint32_t kStatusSlots = 4;
     StatusSlot                m_statusRing[kStatusSlots];
     std::atomic<uint32_t>     m_statusHead{0}; /* the newest finished slot */
@@ -1038,8 +788,7 @@ private:
     bool                      m_statusDue         = false;
     void                      publishStatus();
 
-    /* What the PPS interrupt writes, and the counter it brackets the write
-     * with, so a task can read all four without taking the interrupt's lock. */
+    /* What the PPS interrupt writes, read under the m_edgeSeq sequence count. */
     struct EdgeWords {
         uint32_t count  = 0;
         int64_t  monoUs = 0;
@@ -1048,19 +797,10 @@ private:
     };
     std::atomic<uint32_t> m_edgeSeq{0};
     void                  readEdge(EdgeWords &out) const;
-    /* Phase relative to the fit's base sample, for the deviation below. The
-     * absolute offsets are ~1.8e18 ns and a double resolves only ~256 ns there,
-     * so a second difference taken on them cancels to exactly zero -- measured
-     * on the host before it was believed. Relative, the numbers are seconds and
-     * the arithmetic is exact. Static, because 300 doubles does not belong on
-     * the GPS task's stack. */
-    /* The first 120 payload bytes of a MON frame as hex, for the panel. Both
-     * MON-IO and MON-MSGPP carry their numbers past where the eye can follow,
-     * and the frame start is what says which message it was. */
+    /* The first 120 payload bytes of a MON frame as hex, for the web panel. */
     void hexPreview(const ubx::Frame &f, text::Buf<241> &out);
 
-    /* Take a position as the hold, validated or not. Two callers: restoring one
-     * from NVS, and adopting one the module reported. */
+    /* Take a position as the hold: restored from NVS or reported by the module. */
     void adoptFixedPosition(long long x, long long y, long long z, unsigned long acc,
                             bool validated);
 
@@ -1094,32 +834,26 @@ private:
     uint32_t m_secFrames     = 0; /* frames in the current second */
     int64_t  m_secStartUs    = 0;
     uint8_t  m_poorSecs      = 0; /* consecutive seconds under the floor */
-    /* configureModule() takes about three seconds and its own traffic is the
-     * only thing on the wire while it runs. Testing the rate underneath it
-     * cancels the configuration that would have raised the rate. */
+    /* Frame-rate checks pause while configureModule() runs, since its own
+     * traffic is all that is on the wire. */
     int64_t m_warmRetryAtUs = 0;
     uint8_t m_warmRetries   = 0;
-    /* Requests from the HTTP task, serviced by the GPS task on its next pass so
-     * that only one thread ever writes the UART or advances the parser. */
+    /* Requests from the HTTP task. The GPS task carries them out so only one
+     * task writes the UART or runs the parser. */
     volatile int8_t m_biasReq = -1; /* -1 none, 0 off, 1 on */
-    /* Constellation mask, and a flag saying one has been asked for. The mask is
-     * one bit per gnssId, which is also how CFG-GNSS orders its blocks: GPS 0,
-     * SBAS 1, Galileo 2, BeiDou 3, IMES 4, QZSS 5, GLONASS 6. */
+    /* Constellation mask, one bit per gnssId (see requestGnss()). */
     volatile uint8_t m_gnssReqMask = 0;
     volatile bool    m_gnssReq     = false;
     uint8_t          m_gnssMask    = 0x65; /* GPS | Galileo | QZSS | GLONASS */
     bool             m_gnssAcked   = false;
     bool             m_gnssNaked   = false;
-    /* Survey-in (CFG-TMODE3). 0 idle, 1 start, 2 stop, 3 lock the current mean
-     * position as a fixed one. The reported position is the receiver's own mean
-     * from NAV-SVIN, kept here so "lock it" does not have to invent one. */
+    /* Survey command: 0 idle, 1 start, 2 stop, 3 hold the current mean
+     * (CFG-TMODE2; the mean comes from TIM-SVIN). */
     volatile uint8_t  m_svinCmd = 0;
     volatile bool     m_tp5Cmd  = false;
     volatile uint32_t m_baudReq = 0;
-    /* Set when the request also writes CFG-PRT to the receiver. The revert is
-     * the safety net: a rate the module does not take leaves it talking into a
-     * host listening at the wrong speed, and nothing but the scan would bring
-     * it back. The old rate is held until frames resume, then written back. */
+    /* A baud change that also writes CFG-PRT keeps the old rate so it can be
+     * restored if the module stops talking at the new one. */
     volatile bool     m_baudReqModule     = false;
     uint32_t          m_baudPrev          = 0;
     uint32_t          m_baudRevertTo      = 0; /* non-zero: write this back when frames resume */
@@ -1136,28 +870,19 @@ private:
     bool              m_holdValidated     = false;
     bool              m_svinActive        = false;
     int64_t           m_svinAtUs          = 0;
-    /* A position hold lives in the module's RAM and this firmware's copy of it
-     * does not survive a reboot, so the receiver is asked what its time mode
-     * actually is rather than the firmware assuming. When it answers "fixed"
-     * the position is kept here, which is what lets a reconfigure put it back
-     * after a reset has taken it away. */
+    /* The hold the receiver reported, kept so it can be re-sent after a reset
+     * clears it. */
     int32_t  m_fixedMean[3] = {};
     uint32_t m_fixedAcc     = 0;
-    /* Two separate questions: is there a position worth putting back, and does
-     * anything want it held. Adoption inside configureModule() runs before a
-     * re-assert and would otherwise clear the first one by reading the "off"
-     * that the reset it is recovering from has just put there. */
+    /* Kept apart because adoption in configureModule() would otherwise read the
+     * "off" a reset left behind and drop the position before it is re-sent. */
     bool m_fixedValid = false;
     bool m_holdWanted = false;
-    /* Set around the reconfigure that follows a reset: the module is often
-     * still booting then, so its answer describes the state *before* the hold
-     * has been put back and reading it would undo the re-assert. */
+    /* Skip adoption in the reconfigure after a reset, when the module still
+     * reports its pre-hold state. */
     bool m_skipAdopt = false;
-    /* When the hold next gets asserted at the receiver, and the interval to wait
-     * after the last failure. A receiver still booting NAKs the frame, and a
-     * receiver left moving spends the survey the hold came from while the box
-     * still believes it is holding -- so the assertion is retried rather than
-     * attempted once and forgotten. */
+    /* Next hold assertion and the current retry interval; a booting receiver
+     * NAKs it. */
     int64_t               m_holdAssertAtUs = 0;
     int64_t               m_holdRetryUs    = 0;
     volatile bool         m_resetReq       = false;
@@ -1196,6 +921,5 @@ private:
     text::Buf<160>        m_moduleId       = {};
 };
 
-/* The GPS as the responder sees it: stratum 1 and refid "GPS" while the PPS is
- * fresh and the fix is valid, stratum 16 otherwise. */
+/* The GPS reference for the responder: stratum 1, refid "GPS" when locked. */
 std::unique_ptr<TimeRef> makeGpsTimeRef();

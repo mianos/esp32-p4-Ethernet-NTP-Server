@@ -1,12 +1,5 @@
-/* The framing itself; ubx.h explains why it is one decoder.
- *
- * The two sync states are the only place rubbish can be discarded cheaply, and
- * the test there is deliberately narrow: NMEA text is off at this receiver, but a
- * boot burst or a u-center session can still put anything on the line, and the
- * state has to be able to sit through it without inventing frames. A repeated
- * 0xB5 in the second sync state stays in it, because `B5 B5 62` is a real frame
- * with a byte of noise in front.
- */
+/* A repeated 0xB5 while waiting for 0x62 keeps waiting: B5 B5 62 is a frame
+ * with one byte of noise in front. */
 #include "gps/ubx.h"
 
 namespace ubx {
@@ -68,14 +61,9 @@ void Decoder::feed(uint8_t byte)
         m_frame.len |= static_cast<uint16_t>(byte) << 8;
         m_ckA = static_cast<uint8_t>(m_ckA + byte);
         m_ckB = static_cast<uint8_t>(m_ckB + m_ckA);
-        /* A length that cannot be right is refused here, not walked. Walking it
-         * trusts sixteen bits nothing has checked yet: a frame cut short on the
-         * line runs straight into the next one's sync pair, B5 62 reads as a
-         * length of 25269, and the decoder then sat through 25 KB of healthy
-         * stream waiting for a checksum -- five minutes of "silent receiver",
-         * a baud scan and a reset of a module that had never stopped talking.
-         * The two bytes go back through the hunt, because they may be exactly
-         * that sync pair. */
+        /* Refuse an impossible length rather than wait it out: a truncated frame
+         * reads the next sync pair as length 25269. The two length bytes are
+         * re-fed, since they may be that sync pair. */
         const Def *def = definition(m_frame.cls, m_frame.id);
         if (m_frame.len > kMaxPayload ||
             (def != nullptr && (m_frame.len < def->minLen || m_frame.len > def->maxLen))) {
@@ -103,9 +91,7 @@ void Decoder::feed(uint8_t byte)
 
     case State::CkA:
         if (byte != m_ckA) {
-            /* Counted as a checksum drop rather than a silent restart: the
-             * first byte already disagreed, and leaving it uncounted made "the
-             * line is corrupt" look like "the receiver is quiet". */
+
             ++m_badChecksum;
             m_frame.payload = std::span<const uint8_t>(m_payload, m_frame.len);
             warn(Drop::Checksum);
@@ -116,9 +102,7 @@ void Decoder::feed(uint8_t byte)
         return;
 
     case State::CkB:
-        /* The only gate that matters. A frame that fails it is dropped and the
-         * state goes back to hunting sync, because after a bad byte the length
-         * that was read may not have been a length at all. */
+
         if (byte != m_ckB) {
             ++m_badChecksum;
             if (m_listener != nullptr) {
@@ -136,8 +120,7 @@ void Decoder::feed(uint8_t byte)
 
 void Decoder::emit()
 {
-    /* The length was held to the buffer and to the definition when it was read,
-     * so what reaches here is a frame. */
+
     m_frame.payload = std::span<const uint8_t>(m_payload, m_frame.len);
     ++m_frames;
     if (m_listener != nullptr) {

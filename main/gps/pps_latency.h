@@ -1,16 +1,8 @@
-/* How long the PPS edge waited for its interrupt handler, and the stamps with
- * that wait taken back out.
+/* PPS interrupt latency, and the stamps with its variable part removed.
  *
- * The edge stamps itself when the handler starts, so a stamp can be late for
- * two unrelated reasons: the pulse was late, or the handler was. This tells
- * them apart by latching a timer in hardware at the edge and reading it in the
- * handler, both with no CPU in between. The difference is the interrupt
- * latency. Its floor, about 3.6 us, is the fixed path from the edge to the
- * read and cancels in the fit; what moves the time is the spread above it, and
- * that spread is what the handler subtracts.
- *
- * A GPIO event drives a GPTimer capture through the ETM, so neither the GPIO
- * driver nor a second ISR is involved. */
+ * A GPIO ETM event captures a GPTimer at the edge; the handler reads the same
+ * timer, and the difference is its latency. The floor (the fixed path) cancels
+ * in the fit; the excess over it is subtracted from the stamps. */
 #pragma once
 
 #include <cstdint>

@@ -1,17 +1,13 @@
-/*
- * What this reference says about itself: the lock decision, the status the
- * HTTP side reads, the facts a reply is built from, and the TimeRef adapter.
- */
+/* The lock decision, the published status, reply facts and the TimeRef
+ * adapter. */
 #include "gps/gps_internal.h"
 
 using namespace gps_detail;
 
 uint8_t GpsTime::copySats(Sat *out, uint8_t max) const
 {
-    /* The rows are rewritten by the GPS task on a 2 s message, bracketed by two
-     * bumps of m_satsSeq, so a copy taken while the count was odd or moving is
-     * a mix of two skies and is taken again. No lock: /gps/sats is the caller,
-     * and it has no business holding the PPS interrupt off. */
+    /* Retry while m_satsSeq is odd or changes; no lock, so the PPS interrupt
+     * is never held off. */
     uint8_t n = 0;
     for (int attempt = 0; attempt < 10; ++attempt) {
         const uint32_t before = m_satsSeq.load(std::memory_order_acquire);
@@ -31,53 +27,25 @@ uint8_t GpsTime::copySats(Sat *out, uint8_t max) const
 
 bool GpsTime::evaluateLock(const LockInputs &in) const
 {
-    /* Lock needs all three: a fix to trust the date, a valid NAV-PVT to know
-     * which second, and an edge recent enough that the clock is still being
-     * corrected. Fix type 2 is the floor -- "time-only" (5) dates the second but
-     * does not put the receiver anywhere, and this reference does not want to
-     * explain that difference in its stratum. */
+    /* Needs an anchor, a valid NAV-PVT date, fix type 2 or above (which
+     * includes 5, time only) and an edge inside the lock window. */
     if (!(in.anchored && in.timeValid && in.fixType >= 2 && in.ppsAgeUs >= 0 &&
           in.ppsAgeUs < in.lockWindowUs)) {
         return false;
     }
 
-    /* Age is not enough on its own: it says an edge arrived, not that the clock
-     * is being held where it belongs. Further tests, each of which demotes to
-     * stratum 16 rather than serving on a claim that has stopped being true:
-     *
-     *  - the newest edge passed the trust test. A pulse that was corrupt, or a
-     *    second that did not advance, means this second's anchor is a guess;
-     *  - the receiver is not reporting critical jamming. Not gated on freshness:
-     *    a jammed front end can hold a fix and keep emitting a pulse while the
-     *    solution underneath it drifts, so the pulse still looks regular. MON-HW
-     *    carries the state and this module does not send it, so on this board
-     *    the test is dormant -- taken from Baumart's server, which demotes on it
-     *    unconditionally;
-     *  - while the edge is fresh, the phase sits inside the band. A servo still
-     *    ringing out from a step has edges arriving perfectly and an offset in
-     *    the hundreds of milliseconds;
-     *  - while the edge is fresh and a rate is known, the fit's worst residual
-     *    is inside the jitter bound. That is the slope test: a window assembled
-     *    across a fault fits a line through noise, and the residual is what
-     *    gives it away. Skipped in a holdover, where the phase is not measured
-     *    at all and the residual is by definition the gap.
-     *
-     * The offset and residual tests wait until a rate exists, so the first
-     * minute still locks on a fresh, trusted edge as it always did. */
+    /* A bad vote is any of: the newest edge was refused; MON-HW reports
+     * critical jamming (a jammed receiver can keep a regular pulse); or, while
+     * the edge is fresh, the offset is outside kLockOffsetNs or, once a rate is
+     * known, the fit's worst residual is above kLockTieMaxNs. */
     const bool fresh = in.ppsAgeUs <= kLockWindowUs;
     const bool bad   = !in.trusted || in.jamState == 3 ||
                      (fresh && (in.offsetNs > kLockOffsetNs || in.offsetNs < -kLockOffsetNs)) ||
                      (fresh && in.rateKnown && in.tieMaxNs > kLockTieMaxNs);
 
-    /* Debounced per edge, not per call: this runs on every reply and every
-     * health poll, so a counter advanced per call would saturate inside a
-     * second. the count kept in m_gate makes it one vote per edge. A single glitched pulse,
-     * or one sample outside the band on its way back from a step, is then not
-     * worth a demotion and a relock line -- three consecutive seconds is. */
-    /* One word, so the vote needs no lock: the edge count in the low 24 bits
-     * and the streak above it. Only a count newer than the last one votes -- a
-     * status read working from a snapshot must not vote a second time for an
-     * edge a reply has already counted. */
+    /* One vote per edge, not per call, since replies and status reads both
+     * call this; kGateStreak bad edges in a row demote. m_gate holds the last
+     * voted edge count (low 24 bits) and the streak, so no lock is needed. */
     uint32_t badFor = 0;
     uint32_t cur    = m_gate.load(std::memory_order_relaxed);
     for (;;) {
@@ -99,10 +67,7 @@ bool GpsTime::evaluateLock(const LockInputs &in) const
 
 void GpsTime::readEdge(EdgeWords &out) const
 {
-    /* The interrupt is the only writer and brackets its update with two bumps
-     * of m_edgeSeq, so an odd value or a changed one means it ran meanwhile and
-     * the read is taken again. No lock: this is what lets the status be read
-     * without ever holding the interrupt off. */
+    /* Retry while m_edgeSeq is odd or changes; no lock. */
     for (;;) {
         const uint32_t before = m_edgeSeq.load(std::memory_order_acquire);
         if ((before & 1u) == 0) {
@@ -119,15 +84,8 @@ void GpsTime::readEdge(EdgeWords &out) const
 
 void GpsTime::publishStatus()
 {
-    /* One complete status, written into the next slot of a small ring and then
-     * named as the newest. A reader copies the slot that is named and never
-     * waits: the slot it is reading is not written again for kStatusSlots - 1
-     * seconds, and nothing here or there takes the PPS interrupt's lock.
-     *
-     * Called from the GPS task only, just after a NAV-PVT has been handled --
-     * a couple of hundred milliseconds past the edge, with the next one most
-     * of a second away. Nearly every field is this task's own; the few that are
-     * not are read by the two means below. */
+    /* Fill the next ring slot, then name it newest. GPS task only; the edge
+     * words and the suppress time are read lock-free below. */
     const uint32_t next = (m_statusHead.load(std::memory_order_relaxed) + 1) % kStatusSlots;
     StatusSlot    &slot = m_statusRing[next];
     const uint32_t seq  = slot.seq.load(std::memory_order_relaxed);
@@ -145,8 +103,7 @@ void GpsTime::publishStatus()
     st.ppsPtpNs   = edge.ptpNs;
     ex.ppsMonoUs  = edge.monoUs;
     ex.lastEdgeUs = edge.lastUs;
-    /* Written by whoever arms the holdover test, as two words: read until two
-     * reads agree rather than locked. */
+    /* 64-bit, written by another task: read until two reads agree. */
     do {
         ex.suppressUntil = m_ppsSuppressUntilUs;
     } while (ex.suppressUntil != m_ppsSuppressUntilUs);
@@ -266,9 +223,6 @@ void GpsTime::publishStatus()
     st.bridgeClients     = m_bridgeClients;
     st.bridgeRx          = m_bridgeRx;
     st.bridgeTx          = m_bridgeTx;
-    /* Named rather than numeric: the interesting thing is which constellations
-     * are being solved, and a reader should not have to hold the gnssId table
-     * in their head to find out. */
     ex.gnssMask       = m_gnssMask;
     ex.gnssNaked      = m_gnssNaked;
     ex.gnssAcked      = m_gnssAcked;
@@ -297,9 +251,8 @@ void GpsTime::publishStatus()
     ex.monHwAtUs      = m_monHwAtUs;
     ex.anchorMonoUs   = m_anchorMonoUs;
 
-    /* The two clocks against the anchor. The reads have to be adjacent, so the
-     * counter is read either side of the timer and the pair is kept only if
-     * nothing got in between. */
+    /* 1588 counter against esp_timer since the anchor; the counter is read
+     * either side of the timer and kept only if the reads are close. */
     if (st.anchored && ex.anchorPhcNs != 0 && ptp::hardware()) {
         for (int attempt = 0; attempt < 3; ++attempt) {
             const int64_t phcBefore = ptp::nowNs();
@@ -316,8 +269,8 @@ void GpsTime::publishStatus()
     for (int i = 0; i < 16; ++i) {
         ex.recentFrames[i] = m_recentFrames[i];
     }
-    /* The bridge task writes two of these; the worst a copy can be is a line
-     * caught mid-update, and each buffer keeps its terminator. */
+    /* The bridge task writes two of these unlocked; at worst a copy is torn
+     * text, still terminated. */
     std::memcpy(ex.msgpp, m_msgppHex.data(), sizeof(ex.msgpp));
     std::memcpy(ex.io, m_ioHex.data(), sizeof(ex.io));
     std::memcpy(ex.module, m_moduleId.data(), sizeof(ex.module));
@@ -339,9 +292,8 @@ GpsTime::Status GpsTime::status() const
     Status       st;
     StatusExtras ex;
 
-    /* The newest finished snapshot, copied with no lock. The check afterwards
-     * is for a reader descheduled for seconds in the middle of the copy, which
-     * is the only way the writer can come round to the same slot. */
+    /* Copy the newest slot without a lock; the check catches a reader stalled
+     * long enough for the writer to come round again. */
     for (int attempt = 0; attempt < 4; ++attempt) {
         const StatusSlot &slot        = m_statusRing[m_statusHead.load(std::memory_order_acquire)];
         const uint32_t    before      = slot.seq.load(std::memory_order_acquire);
@@ -352,9 +304,7 @@ GpsTime::Status GpsTime::status() const
         }
     }
 
-    /* The edge itself is read live, by the same lock-free means the snapshot
-     * used: the snapshot is up to a second old, and an edge that has arrived
-     * since should not read as a second of age. */
+    /* The edge is read live; the snapshot can be a second old. */
     EdgeWords edge;
     readEdge(edge);
     st.ppsCount   = edge.count;
@@ -413,8 +363,7 @@ GpsTime::Status GpsTime::status() const
     st.gnssCfg  = gnssNaked ? "rejected" : gnssAcked ? "accepted" : "silent";
     st.timeMode = tmode == 1 ? "survey" : tmode == 2 ? "fixed" : "moving";
 
-    /* Sixteen std::format calls are sixteen heap operations, so they happen
-     * here, on the reader's copy. */
+    /* Formatted on the reader's side, not in the GPS task. */
     st.recentFrames.clear();
     for (uint8_t i = 0; i < 16; ++i) {
         const uint8_t at = static_cast<uint8_t>((recentAt + 15 - i) % 16);
@@ -468,16 +417,10 @@ GpsTime::Status GpsTime::status() const
     st.pairAgeS          = pairAgeAtUs != 0 ? static_cast<double>(nowUs - pairAgeAtUs) / 1e6 : -1;
     const bool rateKnown = st.rateSamples >= kRateMinSamples;
 
-    /* Two windows, and the difference between them is the servo. Without a rate
-     * there is nothing to hold over with, so three missed edges demote; with one
-     * the crystal's known error is taken out of every timestamp and ten minutes
-     * of holdover is worth serving, with the claim decaying as it ages. */
+    /* Holdover window once a rate is known, otherwise the short one. */
     st.lockWindowUs =
         (rateKnown && st.timeValid && st.fixType >= 2) ? kHoldoverWindowUs : kLockWindowUs;
 
-    /* The gate itself, and why each test is there, lives in evaluateLock(); it
-     * carries the per-edge debounce too, which is why replyFacts() shares it
-     * rather than repeating the predicates. */
     LockInputs in;
     in.anchored     = st.anchored;
     in.timeValid    = st.timeValid;
@@ -493,36 +436,11 @@ GpsTime::Status GpsTime::status() const
     st.locked       = evaluateLock(in);
 
     if (st.locked) {
-        /* What this reference states about itself, and where each term comes
-         * from. The delay is the measurement path: the named interrupt latency
-         * plus half the receiver's own stated pulse quantisation, which is what
-         * it admits it does not know about where the edge is. The dispersion is
-         * that, plus the jitter the stamps actually show, plus one ppm of the
-         * anchor's age.
-         *
-         * Both used to be worse: delay was 0, which read as "the reference is
-         * wired, so there is no path" while quietly ignoring the interrupt, and
-         * dispersion was a flat ten microseconds no measurement stood behind.
-         * This module rejects NAV-TIM-TP, so the quantisation term is absent --
-         * but the jitter term is not, because it comes from the servo and not
-         * from the message. */
+        /* See dispersionNs() for the terms. */
         st.rootDelayNs = rootDelayNs();
 
-        /* A pulse nobody is watching. While TIM-TP is agreeing to be sent and
-         * has stopped arriving, the position of the edge against its own second
-         * is unobserved -- the servo cannot see it either, because the anchor is
-         * taken from the same edge and moves with it. Unobserved is not known:
-         * the 133 ms failure of 18:43 was exactly this state, on a clock quoting
-         * 2.4 us of dispersion, and chrony had to work it out for itself.
-         *
-         * So the stated uncertainty grows with how long the pulse has been
-         * unobserved. 10 us a second covers the measured growth (4.2 us/s to
-         * 133 ms) with margin, and the 30 s grace keeps a mode change from
-         * widening it. Capped at 200 ms, which is six times the worst error seen
-         * and still finite. */
         const int64_t lastTpUs = ex.qErrAtUs;
-        /* Published inside the budget below as well as on its own, so a wide
-         * bound can be told from a bad clock. */
+        /* Also published on its own; see unobservedNs(). */
         st.pulseUnobservedNs = unobservedNs();
         st.dispersionNs      = dispersionNs(st.anchorAgeUs, st.pulseUnobservedNs);
         if (m_timTpCfg == 1) {
@@ -557,10 +475,8 @@ uint8_t GpsTime::leapIndicator() const
     valid  = m_leapValid;
     portEXIT_CRITICAL(&m_mux);
 
-    /* RFC 5905 7.3: the indicator describes the last minute of the UTC day.
-     * TIMELS counts down to the event, so "0 < timeToLsEvent <= 60" is that
-     * minute, and a larger number means a leap is known about but is not yet
-     * the client's problem. */
+    /* RFC 5905: the indicator covers the last minute of the day, which is
+     * 0 < timeToLsEvent <= 60. */
     if (!valid || change == 0 || inS <= 0 || inS > 60) {
         return 0;
     }
@@ -573,8 +489,6 @@ std::string GpsTime::describe() const
 
     if (st.locked) {
         if (st.anchorAgeUs > kLockWindowUs) {
-            /* Still servable, and worth saying why in a line somebody reads
-             * later: this is the holdover the servo bought. */
             return std::format("GPS/PPS, {} fix, {} satellites, holding over {:.1f} s",
                                fixText(st.fixType), st.satellites,
                                static_cast<double>(st.anchorAgeUs) / 1e6);
@@ -582,12 +496,8 @@ std::string GpsTime::describe() const
         return std::format("GPS/PPS, {} fix, {} satellites", fixText(st.fixType), st.satellites);
     }
     if (st.fixType >= 2 && st.timeValid) {
-        /* A fix but no edge we can trust: the receiver is fine and the pulse is
-         * not, which is a different fault from "no fix" and worth saying
-         * differently in the boot log. The refused case is not the same as the
-         * missing one either -- edges are arriving, they just are not seconds --
-         * and reading "no fresh edge" on a box whose LED is blinking would send
-         * the reader to the wrong wire. */
+        /* A fix but no usable edge; refused edges and missing edges point at
+         * different faults. */
         if (!st.lastEdgeTrusted) {
             return std::format("GPS/PPS, {} fix, {} edges refused in a row (spacing or "
                                "second continuity)",
@@ -602,16 +512,9 @@ void GpsTime::logLockChange()
 {
     const Status st = status();
 
-    /* The fallback arbiter, once a second and from boot: a device whose antenna
-     * is missing has to be able to hand over without anybody asking it to.
-     *
-     * What it is told is "the pulse is back and trustworthy", which is
-     * deliberately *not* the lock. Lock also needs the phase inside
-     * kLockOffsetNs, and while a fallback holds the clock the phase is the
-     * distance between the upstream's clock and the receiver's -- it cannot come
-     * back into the band until this servo steers again, and the servo is gated
-     * off until the arbiter hands back. Judging the return on the lock alone
-     * therefore never returns: each waits for the other. */
+    /* ClockSource is told whether the pulse is good, not whether we are locked:
+     * while the upstream holds the clock the offset is outside the lock band,
+     * and it cannot return until this servo steers again. */
     const bool holding   = st.locked && st.anchorAgeUs > kLockWindowUs;
     const bool pulseGood = !holding && st.anchored && st.timeValid && st.fixType >= 2 &&
                            st.anchorAgeUs >= 0 && st.anchorAgeUs <= kLockWindowUs &&
@@ -627,8 +530,6 @@ void GpsTime::logLockChange()
             ESP_LOGW(TAG, "no PPS edges: is the module's timepulse wired to GPIO%d?",
                      static_cast<int>(kPpsPin));
         } else if (!st.lastEdgeTrusted) {
-            /* Edges arriving and being refused is the one PPS fault that looks
-             * healthy from a distance: the counter climbs and nothing works. */
             ESP_LOGW(TAG,
                      "not locked: %u PPS edges in a row refused (wrong spacing, or the "
                      "module's second did not advance with them)",
@@ -639,9 +540,7 @@ void GpsTime::logLockChange()
         }
     }
 
-    /* Inside a holdover nothing above changes for ten minutes, which would
-     * otherwise look like a healthy clock that has quietly lost its PPS. Say it
-     * when the edge goes stale, and say it again when it comes back. */
+    /* Holdover keeps the lock, so log its start and end separately. */
     if (holding != m_holdoverLogged) {
         m_holdoverLogged = holding;
         if (holding) {
@@ -655,9 +554,7 @@ void GpsTime::logLockChange()
         }
     }
 
-    /* A module that was narrating its pulse and has stopped. Not the same fault
-     * as one that never did, and nothing on the wire shows it: the quantisation
-     * term silently disappears from the budget. */
+    /* TIM-TP that was arriving and has stopped. */
     const int64_t nowUs = esp_timer_get_time();
     if (st.timTpCount != m_timTpLastCount) {
         m_timTpLastCount  = st.timTpCount;
@@ -665,11 +562,8 @@ void GpsTime::logLockChange()
         m_timTpGoneLogged = false;
     } else if (st.timTpCount != 0 && !m_timTpGoneLogged && nowUs - m_timTpLastUs > 10 * 1000000) {
         m_timTpGoneLogged = true;
-        /* The last qErr stays in the status for what it is worth, but stops
-         * being counted: a figure from a message that has stopped arriving is a
-         * stale claim. The delay drops back to the named latency; the jitter
-         * does not, because it is measured from the anchors themselves and the
-         * anchors are still coming. */
+        /* Stop using a stale qErr; dispersion keeps kIsrLatencyNs and the
+         * fit jitter. */
         portENTER_CRITICAL(&m_mux);
         m_qErrValid = false;
         portEXIT_CRITICAL(&m_mux);
@@ -680,22 +574,11 @@ void GpsTime::logLockChange()
     }
 }
 
-/* The most uncertainty this reference will serve through while still calling
- * itself locked.
- *
- * A healthy box states about 130 us of dispersion against a serve bound near
- * 40 us, so 400 us is ten times the bound and three times the healthy floor --
- * far enough out that only a real fault reaches it. Past it the reply becomes
- * stratum 16 / INIT / leap 3, which every client already reads as "ignore me".
- *
- * The alternative, which this box ran until now, is a stratum-1 badge held
- * through a 258 ms error with 19 ms of dispersion underneath it. chrony had to
- * work the falseticker out for itself; a client that trusts stratum alone would
- * have taken the 258 ms. */
+/* The most dispersion served as stratum 1; beyond it replies are stratum 16,
+ * refid INIT. A healthy box states about 40 us. */
 constexpr int64_t kServeHonestNs = 400000;
 
-/* What clients report about the path may widen the claim, never close the
- * gate: only the reference's own terms get to say it is no longer one. */
+/* The client-measured ServePath term alone must not be able to demote. */
 static_assert(ServePath::kCapNs <= kServeHonestNs / 2,
               "the client-measured path term must leave the gate to the reference");
 
@@ -708,11 +591,8 @@ GpsTime::ReplyFacts GpsTime::replyFacts() const
     in.anchored  = m_anchorValid;
     in.timeValid = m_timeValid;
     in.fixType   = m_fixType;
-    /* Since the last edge that became an anchor, not since the last edge. The
-     * interrupt stamps every pulse whether or not a frame ever dated it, so
-     * with the receiver's frames gone and its pulse still arriving the raw age
-     * stayed under a second: "locked", fresh, and no wander charged, on an
-     * anchor that was minutes old. */
+    /* Age of the anchor, not of the last edge: edges keep arriving when frames
+     * stop. */
     in.ppsAgeUs  = !m_anchorValid ? -1 : esp_timer_get_time() - m_anchorMonoUs;
     in.trusted   = m_lastEdgeTrusted;
     in.offsetNs  = m_offsetNs;
@@ -727,12 +607,7 @@ GpsTime::ReplyFacts GpsTime::replyFacts() const
         (in.rateKnown && in.timeValid && in.fixType >= 2) ? kHoldoverWindowUs : kLockWindowUs;
     rf.locked  = evaluateLock(in);
     rf.stratum = rf.locked ? 1 : 16;
-    /* "GPS" while it is a stratum-1 reference, "INIT" once it is not: a client
-     * reading stratum 16 needs the refid to look like a refusal, not a
-     * reference. */
     rf.refId = rf.locked ? kRefIdGps : kRefIdInit;
-    /* The receiver's own leap notice, straight into the packet: only it knows
-     * whether the end of the UTC day has 59, 60 or 61 seconds. */
     rf.leap = leapIndicator();
     if (rf.locked) {
         const int64_t budget = dispersionNs(in.ppsAgeUs, unobservedNs());
@@ -740,9 +615,7 @@ GpsTime::ReplyFacts GpsTime::replyFacts() const
             rf.rootDelayNs  = static_cast<uint32_t>(rootDelayNs());
             rf.dispersionNs = static_cast<uint32_t>(budget);
         }
-        /* The gate. Dispersion is the one term the client cannot check for
-         * itself, so it is also the one that decides whether this is a
-         * reference or a guess. */
+
         if (budget > kServeHonestNs) {
             rf.locked  = false;
             rf.stratum = 16;
@@ -767,15 +640,10 @@ GpsTime::ReplyFacts GpsTime::replyFacts() const
 
 namespace {
 
-/* The GPS as the responder sees it. Stateless -- everything it answers comes
- * from the GpsTime singleton, which is older than any responder task. */
+/* Stateless adapter over the GpsTime singleton. */
 class GpsTimeRef : public TimeRef {
 public:
-    /* replyFacts(), not status(): status() assembles nine std::strings for the
-     * HTTP side, and the responder was paying for every one of them between its
-     * two stamps -- 250 us of allocation, measured, inside the window that
-     * decides the T2/T3 pair. The budget's terms are the same ones status()
-     * uses. */
+    /* replyFacts(), which avoids status()'s string building. */
     TimeReference reference() const override
     {
         const GpsTime::ReplyFacts rf = GpsTime::instance().replyFacts();
@@ -794,9 +662,7 @@ public:
 
     void now(struct timespec &ts) const override
     {
-        /* The anchor, not CLOCK_REALTIME. The OS clock is slewed towards the
-         * same anchor so the log and the HTTP Date header agree with it, but a
-         * correction in flight there must never reach a reply. */
+        /* The anchor, not CLOCK_REALTIME, which may be mid-slew. */
         if (!GpsTime::instance().now(ts)) {
             clock_gettime(CLOCK_REALTIME, &ts);
         }
