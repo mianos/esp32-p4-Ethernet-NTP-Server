@@ -257,6 +257,8 @@ void GpsTime::publishStatus()
     st.baud              = m_baud;
     ex.ioAtUs            = m_ioAtUs;
     st.servoSteps        = m_servoSteps;
+    st.phcPhaseNs        = m_phcPhaseNs;
+    st.phcSteps          = m_phcSteps;
     st.servoClamps       = m_servoClamps;
     st.edgeSpikes        = m_edgeSpikes;
     st.edgeOutliers      = m_edgeOutliers;

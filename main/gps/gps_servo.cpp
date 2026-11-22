@@ -232,14 +232,39 @@ void GpsTime::anchor(time_t second)
     m_lastFix     = second;
     portEXIT_CRITICAL(&m_mux);
 
-    /* The counter is set from CLOCK_REALTIME at start-up, when that may still
-     * be 1970; the step to the first fix leaves the two milliseconds apart and
-     * every PTP stamp then carries the difference. Correct it here, and drop the
-     * PHC anchor when it moves so the served time falls back for one edge. */
-    if (ptp::correctPhc()) {
-        portENTER_CRITICAL(&m_mux);
-        m_anchorPhcNs = 0;
-        portEXIT_CRITICAL(&m_mux);
+    /* The counter is set from CLOCK_REALTIME, which leaves it wherever that
+     * clock was, and only its rate is steered after. The edge says where it
+     * really is. Drop the PHC anchor when it moves so the served time falls
+     * back for one edge. */
+    if (ppsPtpNs != 0) {
+        m_phcPhaseNs = ppsPtpNs - static_cast<int64_t>(second) * 1000000000;
+        /* The first edge after a step shows where the step really landed: the
+         * set loses the time since its read, about 16 us here, and the next
+         * step allows for it. A landing further out than any lag is a step
+         * that went wrong, and learning from it would carry it into the next. */
+        if (m_phcJustStepped) {
+            m_phcJustStepped = false;
+            if (m_phcPhaseNs > -kPhcStepLagMaxNs && m_phcPhaseNs < kPhcStepLagMaxNs) {
+                m_phcStepLagNs = std::clamp<int64_t>(m_phcStepLagNs + m_phcPhaseNs,
+                                                     -kPhcStepLagMaxNs, kPhcStepLagMaxNs);
+            }
+        }
+        m_phcOffEdges = m_phcPhaseNs > kPhcPhaseStepNs || m_phcPhaseNs < -kPhcPhaseStepNs
+                            ? m_phcOffEdges + 1
+                            : 0;
+        /* Not before the rate is pushed: an unsteered counter walks at the
+         * crystal's 30 ppm and would be stepped every few edges. */
+        const int64_t stepNs = -m_phcPhaseNs - m_phcStepLagNs;
+        if (m_phcOffEdges >= kPhcPhaseEdges && ptp::steered() && ptp::stepBy(stepNs) == ESP_OK) {
+            ESP_LOGI(TAG, "phc stepped %+lld ns onto the edge (%+lld ns of it the set's lag)",
+                     static_cast<long long>(stepNs), static_cast<long long>(-m_phcStepLagNs));
+            m_phcOffEdges    = 0;
+            m_phcJustStepped = true;
+            ++m_phcSteps;
+            portENTER_CRITICAL(&m_mux);
+            m_anchorPhcNs = 0;
+            portEXIT_CRITICAL(&m_mux);
+        }
     }
 
     if (gapUs >= kLockWindowUs) {

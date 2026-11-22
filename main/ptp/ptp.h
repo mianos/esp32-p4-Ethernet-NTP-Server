@@ -45,11 +45,10 @@ esp_err_t setRatePpb(int32_t ppb);
  * time knows not to do it twice. Cleared when the counter is re-initialised. */
 bool steered();
 
-/* Step the counter onto CLOCK_REALTIME when it has drifted more than a
- * millisecond from it. True when it stepped, in which case the caller's anchor
- * stamp is stale. The counter is set before the clock on a boot, so the first
- * lock can leave it milliseconds out and every PTP stamp carries that. */
-bool correctPhc();
+/* Move the counter by deltaNs, read and set back to back. The time between
+ * the two is lost, so the caller measures where it landed at the next edge
+ * rather than trusting it. */
+esp_err_t stepBy(int64_t deltaNs);
 
 esp_err_t stepToRealtime();
 

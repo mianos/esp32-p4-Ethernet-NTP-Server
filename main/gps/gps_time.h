@@ -145,6 +145,12 @@ public:
          * that step is the only way to check the correction went the right way
          * without a reference the box does not have. */
         int64_t offsetNs = 0;
+
+        /* The counter against the second at the last anchored edge: what every
+         * PTP stamp is off by. And how often it has been stepped back. */
+        int64_t  phcPhaseNs = 0;
+        uint32_t phcSteps   = 0;
+
         /* Framing counters, straight off the decoder. */
         uint32_t frames           = 0;
         uint32_t droppedChecksum  = 0;
@@ -796,6 +802,16 @@ private:
     /* The anchor in the 1588 counter, and the counter is the served base while
      * it runs. Zero when the PHC is off. */
     int64_t  m_anchorPhcNs = 0;
+
+    /* The counter at the last anchored edge less that edge's second, the edges
+     * in a row it has been out, the steps taken, and what a step's own set
+     * loses, learned from the edge after it. Servo task only. */
+    int64_t  m_phcPhaseNs     = 0;
+    int      m_phcOffEdges    = 0;
+    uint32_t m_phcSteps       = 0;
+    int64_t  m_phcStepLagNs   = 0;
+    bool     m_phcJustStepped = false;
+
     bool     m_anchorValid = false;
     time_t   m_lastFix     = 0;
     bool     m_timeValid   = false;

@@ -677,6 +677,8 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
     doc.AddItem("offset_ns", static_cast<double>(gps.offsetNs));
     doc.AddItem("pps_ptp_ns", static_cast<double>(gps.ppsPtpNs));
     doc.AddItem("phc_mono_delta_ns", static_cast<double>(gps.phcMonoDeltaNs));
+    doc.AddItem("phc_phase_ns", static_cast<double>(gps.phcPhaseNs));
+    doc.AddItem("phc_steps", static_cast<double>(gps.phcSteps));
     doc.AddItem("rate_ppm", static_cast<double>(gps.ratePpb) / 1000.0);
     doc.AddItem("rate_n", static_cast<double>(gps.rateSamples));
     doc.AddItem("fit_us", static_cast<double>(gps.fitUs));
@@ -957,6 +959,7 @@ static constexpr const char *kPolled[] = {
     "offset_ns",
     "pps_ptp_ns",
     "phc_mono_delta_ns",
+    "phc_phase_ns",
     "rate_ppm",
     "rate_n",
     "bridge_active",

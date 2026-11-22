@@ -280,6 +280,16 @@ constexpr int64_t kStepThresholdNs = 10000000; /* 10 ms */
  * describing the step, so it is left alone. */
 constexpr int64_t kPostStepSlewNs = 2000000; /* 2 ms */
 
+/* The 1588 counter's phase against the second, as PTP stamps carry it raw. The
+ * served time only ever uses counter differences, so nothing else notices a
+ * phase error: set once from CLOCK_REALTIME, it sat 0.65 ms out for good. A few
+ * edges in a row, because one edge read just before a step elsewhere would
+ * show the step as its phase. */
+constexpr int64_t kPhcPhaseStepNs = 10000; /* 10 us */
+constexpr int     kPhcPhaseEdges  = 3;
+/* A learned step lag beyond this is a bad edge, not the set path. */
+constexpr int64_t kPhcStepLagMaxNs = 200000;
+
 /* An edge landing further than this from where the last one put it is a
  * corrupted pulse rather than a slow crystal: the crystal's own worst case is
  * tens of microseconds a second, and the loop only ever sees the remainder. */

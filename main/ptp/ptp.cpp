@@ -764,20 +764,16 @@ bool steered()
     return gSteered;
 }
 
-bool correctPhc()
+esp_err_t stepBy(const int64_t deltaNs)
 {
     if (!s_enabled || s_mac == nullptr) {
-        return false;
+        return ESP_ERR_INVALID_STATE;
     }
-    struct timeval tv = {};
-    gettimeofday(&tv, nullptr);
-    const int64_t realtime = static_cast<int64_t>(tv.tv_sec) * 1000000000LL +
-                             static_cast<int64_t>(tv.tv_usec) * 1000;
-    const int64_t diff = realtime - nowNs();
-    if (diff <= 1000000LL && diff >= -1000000LL) {
-        return false;
-    }
-    return stepToRealtime() == ESP_OK;
+    const int64_t  target = nowNs() + deltaNs;
+    eth_mac_time_t to     = {};
+    to.seconds            = static_cast<uint32_t>(target / 1000000000LL);
+    to.nanoseconds        = static_cast<uint32_t>(target % 1000000000LL);
+    return esp_eth_mac_set_ptp_time(s_mac, &to);
 }
 
 esp_err_t stepToRealtime()
