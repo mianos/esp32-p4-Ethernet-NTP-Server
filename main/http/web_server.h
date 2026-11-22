@@ -1,35 +1,27 @@
-/*
- * The device's HTTP surface: a WebServer subclass (mianesp's webserver
- * component), so the wire contract is the shared one:
+/* The HTTP API, on mianesp's webserver component (no WiFi endpoints).
  *
- *   GET  /healthz        uptime, clock, build, heap, link, lease, time source
- *   GET  /config         the settings JSON as stored
- *   POST /config         apply any subset of the keys, persist, echo the result
- *   POST /config/reset   restore compiled-in defaults
- *   POST /ntp/sync       force a poll of the upstream time server (test mode)
- *   GET  /gps/info       what the receiver is, its pin map, and which of the
- *                        configuration messages it took -- static, so not health
- *   POST /gps/ant        {"bias":"on"|"off"} switch antenna bias for a bench test
- *   POST /gps/reset      controlled hot start of the receiver
- *   POST /gps/pps        make the PPS interrupt ignore edges for a while, so a
- *                        GPS holdover can be measured on a board whose PPS line
- *                        is soldered (test mode; /healthz reports the time left)
- *   GET  /firmware       build and slot info for the running image
- *   POST /firmware       stream the body into the inactive OTA slot, then reboot
- *                        (this is how the device is updated over Ethernet; it
- *                        has no other field interface)
+ *   GET  /healthz        health summary
+ *   GET  /config         settings as stored
+ *   POST /config         apply any subset of keys, persist, echo the result
+ *   POST /config/reset   restore defaults
+ *   POST /ntp/sync       poll the upstream now
+ *   POST /ntp/txlag      switch the sendto() transmit correction on or off
+ *   GET  /gps/info       receiver diagnostics, the polled subset
+ *   GET  /gps/bench      receiver diagnostics, everything
+ *   GET  /gps/sats       per-satellite sky view
+ *   GET  /gps/samples    the per-second sample ring, by cursor
+ *   POST /gps/ant        antenna bias, cable and user delay, pulse width, period
+ *   POST /gps/gnss       constellation set
+ *   POST /gps/survey     start or stop a survey, or hold its position
+ *   POST /gps/reset      receiver reset
+ *   POST /gps/baud       change the UART rate
+ *   POST /gps/pps        ignore PPS edges for a while (holdover test)
+ *   POST /eth/restart    restart the MAC
+ *   GET  /firmware       running image and slots
+ *   POST /firmware       write the body to the other OTA slot and reboot
  *
- * Success is 2xx with the resulting state as the body; failure is
- * {"error": "...", "statusCode": N} with the matching HTTP status. Unknown
- * paths and wrong methods get the same JSON shape rather than httpd's built-in
- * plain-text page.
- *
- * WebServer supplies /healthz (uptime + time, then populate_healthz_fields()),
- * the JSON/body/caller helpers and the async workers. This class registers the
- * endpoints above and adds the device's own health fields. The WiFi endpoints
- * (/reset, /set_hostname) are deliberately absent: the P4 has no radio, so it
- * uses the network-agnostic base rather than wifiwebserver.
- */
+ * Errors are {"error": "...", "statusCode": N} with that HTTP status, including
+ * for unknown paths and methods. */
 #pragma once
 
 #include <string>
@@ -68,15 +60,9 @@ private:
     static esp_err_t firmware_get_handler(httpd_req_t *req);
     static esp_err_t firmware_post_handler(httpd_req_t *req);
 
-    /* Read a JSON body with the component's size cap plus a deadline. The
-     * inherited readJsonBody() loops for ever on HTTPD_SOCK_ERR_TIMEOUT, so a
-     * client that opens a POST and then dribbles holds one of the server's
-     * seven handler slots until it gives up -- and nothing on this server
-     * times a peer out. Same checks, same 413s, but abandoned after
-     * kBodyIdleUs without progress or kBodyTotalUs overall. */
+    /* Read a JSON body like readJsonBody(), which loops for ever on a socket
+     * timeout, but give up after kBodyIdleUs without progress or kBodyTotalUs. */
     static bool readJsonBodyTimed(httpd_req_t *req, JsonWrapper &out);
-
-    /* Point the DHCP client's option-12 name at a renamed device. */
 
     bool m_started = false;
 };
