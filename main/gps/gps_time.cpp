@@ -105,13 +105,17 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
     const int64_t stampNs = mono::nowNs();
     pps_latency::afterStamp();
 
-    /* Read before taking m_mux, which the other core may be holding. */
+    /* Read before taking m_mux, which the other core may be holding, and
+     * timed: the 1588 counter is reached over MDIO, so the read itself
+     * takes microseconds and the counter latches inside it. */
+    const int64_t phcIn   = mono::nowNs();
     const int64_t edgePhcNs = ptp::hardware() ? ptp::nowNs() : 0;
+    const int64_t phcOut  = mono::nowNs();
     pps_latency::afterPhc();
 
     /* Core 1 is occasionally held off for 2-10 us. A wait before a read is
      * subtracted; a stall inside one cannot be placed, so the edge is dropped. */
-    const pps_latency::Edge edge = pps_latency::finish(stampNs);
+    const pps_latency::Edge edge = pps_latency::finish(stampNs, phcOut - phcIn);
     if (!edge.placed) {
         return;
     }

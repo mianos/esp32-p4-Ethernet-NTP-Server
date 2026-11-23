@@ -19,6 +19,16 @@ struct Stats {
     int64_t  lastNs;
     int64_t  minNs; /* the floor: the fixed path, which the fit absorbs */
     int64_t  maxNs;
+    /* The two floors the stamps are corrected against, and what the last
+     * edge had taken off each. Their difference is what the two anchors
+     * served time can be taken from can disagree by. */
+    int64_t  stampFloorNs;
+    int64_t  phcFloorNs;
+    int64_t  lastStampTrimNs;
+    int64_t  lastPhcLateNs;
+    /* How long this edge's PHC read took. The register is reached over
+     * MDIO and the counter latches inside that transaction. */
+    int64_t  lastPhcReadNs;
     uint32_t hist[6];
 };
 
@@ -44,7 +54,7 @@ void afterPhc();
 /* Publishes this edge's figures and returns its corrected stamps. Without a
  * running probe or a usable capture the stamps come back as taken. Safe with
  * the flash cache off. */
-Edge finish(int64_t stampNs);
+Edge finish(int64_t stampNs, int64_t phcReadNs);
 
 /* The last edge and its latency, for the anchor to compare with the fit error.
  * Keyed by the corrected stamp in us, as recorded. False when that stamp is not

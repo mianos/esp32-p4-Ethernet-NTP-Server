@@ -674,6 +674,13 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
         doc.AddItem("pps_latency_edges", static_cast<double>(latency.edges));
         doc.AddItem("pps_latency_unmatched", static_cast<double>(latency.unmatched));
         doc.AddItem("pps_latency_dropped", static_cast<double>(latency.dropped));
+        /* The two floors, and this edge's corrections, so the difference
+         * between the served-time anchors can be read off. */
+        doc.AddItem("pps_stamp_floor_ns", static_cast<double>(latency.stampFloorNs));
+        doc.AddItem("pps_phc_floor_ns", static_cast<double>(latency.phcFloorNs));
+        doc.AddItem("pps_stamp_trim_ns", static_cast<double>(latency.lastStampTrimNs));
+        doc.AddItem("pps_phc_late_ns", static_cast<double>(latency.lastPhcLateNs));
+        doc.AddItem("pps_phc_read_ns", static_cast<double>(latency.lastPhcReadNs));
         doc.AddItem("pps_latency_hist",
                     std::format("{}/{}/{}/{}/{}/{}", latency.hist[0], latency.hist[1],
                                 latency.hist[2], latency.hist[3], latency.hist[4],
@@ -833,6 +840,11 @@ static constexpr const char *kPolled[] = {
     "pps_latency_max_ns",
     "pps_latency_dropped",
     "pps_latency_hist",
+    "pps_stamp_floor_ns",
+    "pps_phc_floor_ns",
+    "pps_stamp_trim_ns",
+    "pps_phc_late_ns",
+    "pps_phc_read_ns",
     "pvt_nano_ns",
     "pulse_offset_ns",
     "pulse_on_second",

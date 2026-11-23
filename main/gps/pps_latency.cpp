@@ -64,6 +64,9 @@ int64_t  s_minStampAtNs   = INT64_MAX;
 int64_t  s_minPhcAtNs     = INT64_MAX;
 int64_t  s_minStampSpanNs = INT64_MAX;
 int64_t  s_minPhcSpanNs   = INT64_MAX;
+int64_t  s_lastStampTrimNs;
+int64_t  s_lastPhcLateNs;
+int64_t  s_lastPhcReadNs;
 uint32_t s_dropped;
 
 void teardown()
@@ -188,7 +191,7 @@ void IRAM_ATTR lower(int64_t &least, const int64_t value)
 
 }  // namespace
 
-Edge IRAM_ATTR finish(const int64_t stampNs)
+Edge IRAM_ATTR finish(const int64_t stampNs, const int64_t phcReadNs)
 {
     Edge edge = {stampNs, 0, true};
     if (!s_live.load(std::memory_order_acquire)) {
@@ -196,6 +199,10 @@ Edge IRAM_ATTR finish(const int64_t stampNs)
     }
     const int64_t ns      = ticksNs(s_read[2], s_cap);
     const bool    matched = ns >= 0 && ns <= kMaxPlausibleNs;
+
+    /* What this edge's stamps were corrected by, published below. */
+    int64_t stampTrim = 0;
+    int64_t phcLate   = 0;
 
     if (matched) {
         const int64_t stampAtNs   = ticksNs(s_read[0], s_cap);
@@ -211,13 +218,18 @@ Edge IRAM_ATTR finish(const int64_t stampNs)
          * read may be anywhere in it. */
         edge.placed =
             stampSpanNs - s_minStampSpanNs <= kStallNs && phcSpanNs - s_minPhcSpanNs <= kStallNs;
-        edge.edgeNs -= stampAtNs - s_minStampAtNs;
-        edge.phcLateNs = phcAtNs - s_minPhcAtNs;
+        stampTrim = stampAtNs - s_minStampAtNs;
+        phcLate   = phcAtNs - s_minPhcAtNs;
+        edge.edgeNs -= stampTrim;
+        edge.phcLateNs = phcLate;
     }
 
     const uint32_t seq = s_seq.load(std::memory_order_relaxed) + 1;
     s_seq.store(seq, std::memory_order_relaxed);
     s_lastStampUs = edge.edgeNs / 1000;
+    s_lastStampTrimNs = stampTrim;
+    s_lastPhcLateNs   = phcLate;
+    s_lastPhcReadNs   = phcReadNs;
     ++s_edges;
     if (!edge.placed) {
         ++s_dropped;
@@ -282,6 +294,11 @@ bool stats(Stats *out)
         copy.lastNs    = s_lastNs;
         copy.minNs     = s_minNs == INT64_MAX ? 0 : s_minNs;
         copy.maxNs     = s_maxNs;
+        copy.stampFloorNs    = s_minStampAtNs == INT64_MAX ? 0 : s_minStampAtNs;
+        copy.phcFloorNs      = s_minPhcAtNs == INT64_MAX ? 0 : s_minPhcAtNs;
+        copy.lastStampTrimNs = s_lastStampTrimNs;
+        copy.lastPhcLateNs   = s_lastPhcLateNs;
+        copy.lastPhcReadNs   = s_lastPhcReadNs;
         std::memcpy(copy.hist, s_hist, sizeof copy.hist);
         if (s_seq.load(std::memory_order_acquire) == before) {
             *out = copy;
