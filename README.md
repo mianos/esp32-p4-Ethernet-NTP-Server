@@ -773,6 +773,8 @@ long-term charts read from the box's own JSON. One process polls on a timer and
 every tab reads the same snapshot, so opening tabs does not change the load on
 the box. See `viewer/README.md`.
 
+![the page against a live box](viewer/preview.png)
+
 ## Troubleshooting
 
 - **`phy: MDIO read failed`, or no `MDIO addr N` line**: SMI pins wrong, or the

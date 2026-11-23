@@ -4,6 +4,8 @@ A local page for the P4 timing box: satellite sky plot, receiver health, signal
 and framing counters, and long-term charts. It reads the box's own JSON and draws
 it; it does not configure anything.
 
+![the page: sky plot, satellite table, and the logged charts](preview.png)
+
 It lives here rather than in its own repository because it reads this firmware's
 JSON: a field renamed in `web_server.cpp` breaks it.
 
@@ -80,6 +82,8 @@ positions.
 The sparkline keeps 300 s, which is what the firmware's own 300 s fit is over and
 therefore the most the live page can honestly draw. Anything longer needs
 storage.
+
+![the logged panels: min-max offset band, servo rate steps, and ADEV over the log](long-term.png)
 
 Two things are stored and they are not the same kind. `samples` is drained from
 the box's own 900-epoch ring by cursor: those rows carry the receiver's second
