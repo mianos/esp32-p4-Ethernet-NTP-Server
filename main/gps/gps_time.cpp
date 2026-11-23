@@ -1,5 +1,6 @@
 #include "gps/gps_internal.h"
 
+#include "gps/mono.h"
 #include "gps/pps_latency.h"
 
 using namespace gps_detail;
@@ -93,15 +94,15 @@ void IRAM_ATTR GpsTime::recordEdge(const int64_t edgeNs, const int64_t edgePhcNs
     m_edgeSeq.fetch_add(1, std::memory_order_release);
 }
 
-/* The GPIO edge handler, in use while kCaptureEdge is off. esp_timer stamps in
- * whole microseconds; pps_latency takes the interrupt wait back out. */
+/* The GPIO edge handler, in use while kCaptureEdge is off. The stamp is the
+ * systimer read at 62.5 ns; pps_latency takes the interrupt wait back out. */
 void IRAM_ATTR GpsTime::ppsIsr(void *arg)
 {
     auto *self = static_cast<GpsTime *>(arg);
-    /* esp_timer is in IRAM (CONFIG_ESP_TIMER_IN_IRAM), so this runs with the
-     * flash cache off during an OTA write. */
+    /* The systimer and the PHC are both register reads, so this runs with
+     * the flash cache off during an OTA write. */
     pps_latency::beforeStamp();
-    const int64_t stampUs = esp_timer_get_time();
+    const int64_t stampNs = mono::nowNs();
     pps_latency::afterStamp();
 
     /* Read before taking m_mux, which the other core may be holding. */
@@ -110,7 +111,7 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
 
     /* Core 1 is occasionally held off for 2-10 us. A wait before a read is
      * subtracted; a stall inside one cannot be placed, so the edge is dropped. */
-    const pps_latency::Edge edge = pps_latency::finish(stampUs);
+    const pps_latency::Edge edge = pps_latency::finish(stampNs);
     if (!edge.placed) {
         return;
     }
@@ -118,23 +119,24 @@ void IRAM_ATTR GpsTime::ppsIsr(void *arg)
 }
 
 /* The MCPWM capture handler (kCaptureEdge). The edge tick is latched by
- * hardware; the stamp is esp_timer now, less the ticks since the edge as read
- * from the group's PWM timer. */
+ * hardware; the stamp is mono now, less the ticks since the edge as read from
+ * the group's PWM timer. */
 bool IRAM_ATTR GpsTime::ppsCapIsr(mcpwm_cap_channel_handle_t,
                                   const mcpwm_capture_event_data_t *edge, void *arg)
 {
     auto         *self = static_cast<GpsTime *>(arg);
-    const int64_t atUs = esp_timer_get_time();
+    const int64_t atNs = mono::nowNs();
 
     /* See ppsIsr. */
     const int64_t edgePhcNs = ptp::hardware() ? ptp::nowNs() : 0;
 
     /* A software catch re-enters this handler moments after the edge. */
-    if (self->m_lastEdgeUs >= 0 && atUs - self->m_lastEdgeUs < kSoftCatchWindowUs) {
+    if (self->m_lastEdgeUs >= 0 && atNs / 1000 - self->m_lastEdgeUs <
+                                      kSoftCatchWindowUs) {
         return false;
     }
 
-    int64_t edgeNs = atUs * 1000;
+    int64_t edgeNs = atNs;
     if (self->m_capNowValid && self->m_capHz != 0) {
         /* Signed difference, so the counter may wrap. */
         const uint32_t now =
@@ -331,6 +333,9 @@ esp_err_t GpsTime::begin()
     if (m_begun) {
         return ESP_OK;
     }
+
+    /* Confirm the edge stamp's tick before the first one is taken. */
+    mono::begin();
 
     /* Start at the rate the receiver was last heard on; it keeps its saved rate
      * across a power cut. */

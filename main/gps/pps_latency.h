@@ -29,12 +29,12 @@ esp_err_t begin(int pin);
 
 /* The edge as the handler should record it. */
 struct Edge {
-    int64_t edgeNs;    /* the esp_timer stamp, less this edge's wait above the floor */
+    int64_t edgeNs;    /* the mono stamp, less this edge's wait above the floor */
     int64_t phcLateNs; /* the same for the PHC read, to subtract from it */
     bool    placed;    /* false: a read stalled between its brackets, so drop the edge */
 };
 
-/* The handler's three probe reads, around its esp_timer stamp and its PHC read.
+/* The handler's three probe reads, around its mono stamp and its PHC read.
  * A stall inside a bracket cannot be placed, so the brackets are what decide
  * whether the edge is used at all. */
 void beforeStamp();
@@ -44,7 +44,7 @@ void afterPhc();
 /* Publishes this edge's figures and returns its corrected stamps. Without a
  * running probe or a usable capture the stamps come back as taken. Safe with
  * the flash cache off. */
-Edge finish(int64_t stampUs);
+Edge finish(int64_t stampNs);
 
 /* The last edge and its latency, for the anchor to compare with the fit error.
  * Keyed by the corrected stamp in us, as recorded. False when that stamp is not

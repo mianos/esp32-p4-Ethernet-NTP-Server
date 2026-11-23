@@ -188,9 +188,9 @@ void IRAM_ATTR lower(int64_t &least, const int64_t value)
 
 }  // namespace
 
-Edge IRAM_ATTR finish(const int64_t stampUs)
+Edge IRAM_ATTR finish(const int64_t stampNs)
 {
-    Edge edge = {stampUs * 1000, 0, true};
+    Edge edge = {stampNs, 0, true};
     if (!s_live.load(std::memory_order_acquire)) {
         return edge;
     }
