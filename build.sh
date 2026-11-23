@@ -9,7 +9,11 @@
 # PORT=... ; both are guessed if unset.
 set -e
 set -o pipefail
-export IDF_PATH=${IDF_PATH:-$HOME/.espressif/v6.0.1/esp-idf}
+export IDF_PATH=${IDF_PATH:-$HOME/esp-idf}
+if [ ! -f "$IDF_PATH/export.sh" ]; then
+    echo "build.sh: no ESP-IDF at $IDF_PATH; set IDF_PATH=/path/to/esp-idf" >&2
+    exit 1
+fi
 . "$IDF_PATH/export.sh" >/dev/null 2>&1
 cd "$(dirname "$0")"
 # On macOS use the /dev/cu.* node: opening /dev/tty.* can report EBUSY.
