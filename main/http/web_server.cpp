@@ -643,8 +643,6 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
         doc.AddItem("tp_on_second", gps.pulseOnSecond);
         /* The pulse's offset in its second, per TIM-TP. */
         doc.AddItem("tp_offset_ns", static_cast<double>(gps.pulseOffsetNs));
-        /* NAV-PVT's offset into its second. */
-        doc.AddItem("pvt_nano_ns", static_cast<double>(gps.pvtNanoNs));
         /* The same epoch's milliseconds on the GPS time base; should agree with
          * pvt_nano_ns, since GPS and UTC differ by whole seconds. */
         doc.AddItem("pvt_itow_ms", static_cast<double>(gps.pvtItowMs % 1000));
@@ -679,6 +677,7 @@ static void emitGpsInfo(const GpsTime::Status &gps, JsonWrapper &doc)
                                 latency.hist[2], latency.hist[3], latency.hist[4],
                                 latency.hist[5]));
     }
+    /* NAV-PVT's offset into its second. */
     doc.AddItem("pvt_nano_ns", gps.pvtNanoNs);
     doc.AddItem("pulse_offset_ns", gps.pulseOffsetNs);
     doc.AddItem("pulse_on_second", gps.pulseOnSecond);
