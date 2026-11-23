@@ -1,10 +1,12 @@
 /* UBX framing, used for the receiver's stream and for both directions of the
  * u-center bridge. Frames failing the checksum are dropped. Messages listed in
  * kDefs are also dropped when their length is outside the listed range, so
- * their handlers need no length checks; other messages are delivered
- * unchecked. Lengths are from the u-blox 8 / M8 protocol description. */
+ * their handlers need no length checks. A message with no rule still cannot be
+ * read past its own payload: the readers below return zero there. Lengths are
+ * from the u-blox 8 / M8 protocol description. */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -24,13 +26,37 @@ struct Frame {
     uint16_t                 len = 0;
     std::span<const uint8_t> payload;
 
-    /* Little-endian field reads, unchecked: see kDefs. */
-    uint8_t  u8(std::size_t at) const { return text::getLe<uint8_t>(payload.data() + at); }
-    uint16_t u2(std::size_t at) const { return text::getLe<uint16_t>(payload.data() + at); }
-    uint32_t u4(std::size_t at) const { return text::getLe<uint32_t>(payload.data() + at); }
-    int32_t  i4(std::size_t at) const { return text::getLe<int32_t>(payload.data() + at); }
+    /* Whether `n` bytes at `at` are inside the payload. */
+    bool has(std::size_t at, std::size_t n) const
+    {
+        return at <= payload.size() && n <= payload.size() - at;
+    }
+
+    /* Little-endian field reads. The kDefs gate holds these in range for every
+     * message that has a handler; this check keeps a message with no length
+     * rule from reading whatever follows its payload as a field, which it
+     * otherwise would. It reads zero instead. */
+    uint8_t u8(std::size_t at) const
+    {
+        return has(at, sizeof(uint8_t)) ? text::getLe<uint8_t>(payload.data() + at) : 0;
+    }
+    uint16_t u2(std::size_t at) const
+    {
+        return has(at, sizeof(uint16_t)) ? text::getLe<uint16_t>(payload.data() + at) : 0;
+    }
+    uint32_t u4(std::size_t at) const
+    {
+        return has(at, sizeof(uint32_t)) ? text::getLe<uint32_t>(payload.data() + at) : 0;
+    }
+    int32_t i4(std::size_t at) const
+    {
+        return has(at, sizeof(int32_t)) ? text::getLe<int32_t>(payload.data() + at) : 0;
+    }
     /* For MON-VER's NUL-terminated strings. */
-    std::span<const uint8_t> from(std::size_t at) const { return payload.subspan(at); }
+    std::span<const uint8_t> from(std::size_t at) const
+    {
+        return has(at, 0) ? payload.subspan(at) : std::span<const uint8_t>{};
+    }
 };
 
 struct Def {

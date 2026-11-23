@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <cstdlib>
 /* Device settings, a SettingsBase subclass (mianesp's settingsbase). Stored as
  * one JSON blob in NVS under "settings"/"config"; each field's default is
  * what resetToDefaults() restores. */
@@ -11,6 +10,7 @@
 
 #include "JsonWrapper.h"
 #include "SettingsBase.h"
+#include "app/text.h"
 
 class Settings : public SettingsBase {
 public:
@@ -60,16 +60,17 @@ public:
 
     /* PTP mode (off, master, slave), domain and priority1. */
     const std::string &ptpMode() const { return m_ptpMode; }
-    /* Clamped rather than truncated, so "300" does not become 44. */
+    /* Clamped rather than truncated, so "300" does not become 44, and text
+     * that is not a number at all is the default rather than a wrap. */
     uint8_t ptpDomain() const
     {
-        return static_cast<uint8_t>(
-            std::min(std::strtoul(m_ptpDomain.c_str(), nullptr, 10), 127ul));
+        const auto stored = text::toNumber<unsigned>(m_ptpDomain);
+        return static_cast<uint8_t>(stored ? std::min(*stored, 127u) : 0u);
     }
     uint8_t ptpPriority1() const
     {
-        return static_cast<uint8_t>(
-            std::min(std::strtoul(m_ptpPriority1.c_str(), nullptr, 10), 255ul));
+        const auto stored = text::toNumber<unsigned>(m_ptpPriority1);
+        return static_cast<uint8_t>(stored ? std::min(*stored, 255u) : 0u);
     }
 
     /* The receiver's time mode, which it does not keep across a power cut:

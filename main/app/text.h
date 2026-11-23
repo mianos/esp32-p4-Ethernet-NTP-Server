@@ -1,7 +1,8 @@
-/* Bounded formatting into fixed buffers (put) and strict parsing (getList).
- * Fixed char buffers can be copied under a spinlock without allocating.
- * getList needs exactly the right number of fields, each followed by the
- * separator or the end, so "12x" is an error. */
+/* Bounded formatting into fixed buffers (put) and strict parsing (getList,
+ * toNumber). Fixed char buffers can be copied under a spinlock without
+ * allocating. getList needs exactly the right number of fields, each followed
+ * by the separator or the end, and toNumber needs every byte to be part of the
+ * number, so "12x" is an error in either. */
 #pragma once
 
 #include <array>
@@ -10,6 +11,7 @@
 #include <charconv>
 #include <cstddef>
 #include <format>
+#include <optional>
 #include <string_view>
 #include <system_error>
 #include <utility>
@@ -68,6 +70,19 @@ template <typename... Ts> bool getList(std::string_view text, char sep, Ts &...o
     };
     (one(out), ...);
     return ok;
+}
+
+/* The whole of `text` as one number, or nothing. strtoul would take "12x" as
+ * 12 and "-1" as a huge unsigned, and neither is a value worth storing. */
+template <typename T> std::optional<T> toNumber(std::string_view text)
+{
+    static_assert(std::is_integral_v<T>, "toNumber is for whole numbers");
+    T          value{};
+    const auto r = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (r.ec != std::errc{} || r.ptr != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
 }
 
 /* Little-endian field access (UBX and the target), sized by the type. */

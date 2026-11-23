@@ -4,6 +4,20 @@
 
 #include "gps/mono.h"
 
+namespace {
+
+/* The status ring holds fixed char arrays so a reader can take one with no
+ * lock, and the task holds a text::Buf of the same size next to it. Pairing
+ * them by hand had no check, so widening one side would have over-read the
+ * other silently; this makes the pair part of the type. */
+template <std::size_t N, std::size_t M> void copyBuf(char (&dst)[N], const text::Buf<M> &src)
+{
+    static_assert(N == M, "a status text field and its working copy differ in size");
+    std::memcpy(dst, src.data(), N);
+}
+
+}  // namespace
+
 using namespace gps_detail;
 
 uint8_t GpsTime::copySats(Sat *out, uint8_t max) const
@@ -276,11 +290,11 @@ void GpsTime::publishStatus()
     }
     /* The bridge task writes two of these unlocked; at worst a copy is torn
      * text, still terminated. */
-    std::memcpy(ex.msgpp, m_msgppHex.data(), sizeof(ex.msgpp));
-    std::memcpy(ex.io, m_ioHex.data(), sizeof(ex.io));
-    std::memcpy(ex.module, m_moduleId.data(), sizeof(ex.module));
-    std::memcpy(ex.bridgeEnd, m_bridgeEnd.data(), sizeof(ex.bridgeEnd));
-    std::memcpy(ex.bridgeLast, m_bridgeLast.data(), sizeof(ex.bridgeLast));
+    copyBuf(ex.msgpp, m_msgppHex);
+    copyBuf(ex.io, m_ioHex);
+    copyBuf(ex.module, m_moduleId);
+    copyBuf(ex.bridgeEnd, m_bridgeEnd);
+    copyBuf(ex.bridgeLast, m_bridgeLast);
 
     ex.qErrAtUs    = m_qErrAtUs;
     ex.publishedUs = esp_timer_get_time();

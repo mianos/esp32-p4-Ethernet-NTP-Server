@@ -71,7 +71,7 @@ void Settings::begin()
 {
     load();  // stored blob over the defaults (SettingsBase)
     /* Counted and saved first, so a boot that crashes is still counted. */
-    m_boots = std::to_string(std::strtoul(m_boots.c_str(), nullptr, 10) + 1);
+    m_boots = std::to_string(text::toNumber<unsigned>(m_boots).value_or(0) + 1);
     save();
     /* onChange only fires on a change, so seed the atomics from stored values. */
     m_timeSourceEnum.store(parseTimeSource(m_timeSource), std::memory_order_relaxed);

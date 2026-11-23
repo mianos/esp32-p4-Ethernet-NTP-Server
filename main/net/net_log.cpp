@@ -16,6 +16,7 @@
 #include "lwip/sockets.h"
 #include "app/settings.h"
 #include "app/cores.h"
+#include "app/text.h"
 
 namespace {
 
@@ -31,7 +32,7 @@ bool                 m_installed = false;
 vprintf_like_t       m_console   = nullptr;
 
 /* Forwards to the previous hook first, so the console always gets the line. */
-int hook(const char *fmt, va_list args)
+__attribute__((format(printf, 1, 0))) int hook(const char *fmt, va_list args)
 {
     char    line[kLineMax];
     va_list copy;
@@ -64,9 +65,9 @@ esp_err_t net_log::start()
 {
     const Settings    &settings = Settings::instance();
     const std::string &host     = settings.logHost();
-    unsigned long      port     = 0;
-    if (host.empty() || std::sscanf(settings.logPort().c_str(), "%lu", &port) != 1 || port == 0 ||
-        port > 65535) {
+    /* The whole setting or nothing: sscanf read "5514x" as 5514. */
+    const auto         port     = text::toNumber<unsigned>(settings.logPort());
+    if (host.empty() || !port || *port == 0 || *port > 65535) {
         /* Not configured: this also switches a running sink off. */
         m_to = {};
         return ESP_OK;
@@ -75,7 +76,7 @@ esp_err_t net_log::start()
     /* Dotted quads only; no resolver here. */
     m_to            = {};
     m_to.sin_family = AF_INET;
-    m_to.sin_port   = htons(static_cast<uint16_t>(port));
+    m_to.sin_port   = htons(static_cast<uint16_t>(*port));
     if (inet_pton(AF_INET, host.c_str(), &m_to.sin_addr) != 1) {
         ESP_LOGW(TAG, "log host '%s' is not a dotted quad: sink off", host.c_str());
         return ESP_OK;
@@ -83,7 +84,7 @@ esp_err_t net_log::start()
 
     /* A running sink only changes its address. */
     if (m_sock >= 0) {
-        ESP_LOGI(TAG, "console now also to udp %s:%lu", host.c_str(), port);
+        ESP_LOGI(TAG, "console now also to udp %s:%u", host.c_str(), *port);
         return ESP_OK;
     }
 
@@ -115,6 +116,6 @@ esp_err_t net_log::start()
         m_console   = esp_log_set_vprintf(&hook);
         m_installed = true;
     }
-    ESP_LOGI(TAG, "console also to udp %s:%lu", host.c_str(), port);
+    ESP_LOGI(TAG, "console also to udp %s:%u", host.c_str(), *port);
     return ESP_OK;
 }

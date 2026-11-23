@@ -165,7 +165,9 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
     const esp_partition_t *running = esp_ota_get_running_partition();
     json.AddItem("partition", running != nullptr ? running->label : "?");
     json.AddItem("reset_reason", resetReasonText());
-    json.AddItem("boots", std::strtoul(Settings::instance().boots().c_str(), nullptr, 10));
+    json.AddItem("boots",
+                 static_cast<double>(text::toNumber<unsigned>(Settings::instance().boots())
+                                         .value_or(0)));
     json.AddItem("heap_free", static_cast<double>(esp_get_free_heap_size()));
 
     const Settings &settings = Settings::instance();
@@ -509,12 +511,14 @@ esp_err_t NtpWebServer::gps_samples_get_handler(httpd_req_t *req)
         httpd_req_get_url_query_str(req, buf, sizeof(buf)) == ESP_OK) {
         char value[16];
         if (httpd_query_key_value(buf, "since", value, sizeof(value)) == ESP_OK) {
-            since = static_cast<uint32_t>(std::strtoul(value, nullptr, 10));
+            if (const auto asked = text::toNumber<uint32_t>(value)) {
+                since = *asked;
+            }
         }
         if (httpd_query_key_value(buf, "max", value, sizeof(value)) == ESP_OK) {
-            const unsigned long asked = std::strtoul(value, nullptr, 10);
-            if (asked > 0 && asked < 400) {
-                max = asked;
+            if (const auto asked = text::toNumber<unsigned>(value);
+                asked && *asked > 0 && *asked < 400) {
+                max = *asked;
             }
         }
     }

@@ -3,6 +3,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <inttypes.h>
 
 #include "clock/time_ref.h"
 
@@ -81,7 +82,9 @@ public:
         m_len = kHeaderLen;
     }
 
-    void pair(const char *name, const char *fmt, ...)
+    /* Checked against the literal at every call: this is what keeps a "%s"
+     * from being handed an integer, which nothing else in the file would. */
+    __attribute__((format(printf, 3, 4))) void pair(const char *name, const char *fmt, ...)
     {
         if (!wants(m_filter, m_filterLen, name)) {
             return;
@@ -147,7 +150,11 @@ void stamp(Writer &w, const char *name, time_t when)
     if (when == 0) {
         return;
     }
-    w.pair(name, "0x%08x.%08x", static_cast<uint32_t>(when) + kNtpUnixDelta, 0u);
+    /* PRIx32 rather than %x: uint32_t is `unsigned long` here, and %x takes
+     * an `unsigned int`, which only looked right because they are both 32
+     * bits. */
+    w.pair(name, "0x%08" PRIx32 ".%08" PRIx32, static_cast<uint32_t>(when) + kNtpUnixDelta,
+           static_cast<uint32_t>(0));
 }
 
 /* Every name the writers can emit. Anything else gets "unknown variable",
