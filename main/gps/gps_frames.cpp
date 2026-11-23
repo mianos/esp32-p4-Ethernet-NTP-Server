@@ -312,9 +312,14 @@ void GpsTime::onMonVer(const ubx::Frame &f)
         text += c == '\0' ? ' ' : (c >= 0x20 && c < 0x7F ? c : '.');
     }
 
-    /* put() truncates to the fixed buffer. */
+    /* put() truncates to the fixed buffer. Formatted here, not inside the
+     * section: it is the one the PPS interrupt waits on, and the section
+     * should hold nothing but the copy. */
+    text::Buf<sizeof(m_moduleId)> id = {};
+    text::put(id, "{}", text);
+
     portENTER_CRITICAL(&m_mux);
-    text::put(m_moduleId, "{}", text);
+    m_moduleId = id;
     portEXIT_CRITICAL(&m_mux);
 
     ESP_LOGI(TAG, "module: %.48s", text.c_str());
