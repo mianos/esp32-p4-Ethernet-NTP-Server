@@ -457,10 +457,12 @@ While a test is armed, `gps_pps_suppressed_s` is present.
 
 ### The servo
 
-Every anchor is one sample of `esp_timer` against the GPS, and a least-squares
-fit over the last five minutes gives the crystal's rate error in ppb: about
-−30 ppm on this board, wandering with temperature. Negative means the counter
-runs slow.
+Every anchor is one sample of the mono counter against the GPS, and a
+least-squares fit over the last five minutes gives the crystal's rate error in
+ppb: about −30 ppm on this board, wandering with temperature. Negative means
+the counter runs slow. The mono counter is the systimer `esp_timer` is built on,
+read at its own 16 MHz (62.5 ns) rather than in `esp_timer`'s whole
+microseconds: the same epoch and the same crystal, seen a step finer.
 
 The rate is pushed into the 1588 counter (`esp_eth_mac_adj_ptp_time()`), so the
 counter that served time and PTP stamps come from runs at GPS rate, and a
@@ -472,7 +474,11 @@ with `adjtime()`.
 ### Accuracy, and the parts that are not
 
 - The edge is stamped in the interrupt handler, with the variable part of the
-  interrupt latency measured and removed (below).
+  interrupt latency measured and removed (below). The stamp itself is the
+  systimer's count, 62.5 ns, not `esp_timer`'s microseconds: reading the same
+  counter a step finer took the fit residual from about 293 ns rms and 568 ns
+  max, which is what uniform truncation to a microsecond predicts, to 48–72 ns
+  rms and 139–176 ns max over four windows (2026-11-23).
 - That interrupt has core 1 to itself. Every task, and so every other driver
   interrupt, is on core 0, so a masked stretch in the network stack or the heap
   cannot hold the edge off. IDF's tick, idle task and flash-write parking still

@@ -116,6 +116,9 @@ transmit stall that a watchdog clears.
 
 - Done: the PHC is the served clock for NTP and PTP, rate-steered from the fit,
   with its phase stepped onto the PPS edge in 10 µs steps.
+- Done: the anchor stamp is the systimer's own count, 62.5 ns, rather than
+  `esp_timer`'s whole microseconds, so the fit residual is the pulse and not
+  the truncation: 48–72 ns rms against about 293 ns before (2026-11-23).
 - Open: steer the phase through the rate instead of stepping it.
 - Uncertainty becomes a published number: base (PPS quantisation from `qErr`,
   cable, position, PHY asymmetry) plus growth while unlocked. That is what
