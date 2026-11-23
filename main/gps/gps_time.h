@@ -67,9 +67,12 @@ public:
         int64_t ppsPtpNs = 0;
         /* The 1588 counter elapsed since the anchor minus esp_timer's. Polled
          * against the edge's age it does not grow with it -- 4200 to 5772 ns
-         * across 4 to 987 ms of age, no trend -- so it is a constant near the
-         * 5.9 us pps floor: the two anchors that served time can be taken from
-         * sit about that far apart. Which of the two is late is open. */
+         * across 4 to 987 ms of age, no trend -- so it is not a rate term. It
+         * is the two anchors that served time can be taken from sitting about
+         * 4 us apart: 1.9 us of that is the difference between their floors
+         * (pps_stamp_floor_ns, pps_phc_floor_ns), and the rest is inside
+         * ptp::nowNs(), which returns its first register read and so comes
+         * back early. */
         int64_t phcMonoDeltaNs = 0;
         bool    anchored       = false; /* an edge and a NAV-PVT have been paired */
         time_t  lastFix        = 0;     /* UTC second of the last accepted anchor */
