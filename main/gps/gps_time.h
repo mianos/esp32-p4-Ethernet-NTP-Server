@@ -65,11 +65,11 @@ public:
         int64_t  anchorAgeUs = -1; /* since the last edge that was paired and trusted */
         /* The last edge on the 1588 counter; zero before the counter runs. */
         int64_t ppsPtpNs = 0;
-        /* The 1588 counter elapsed since the anchor minus esp_timer's. The
-         * counter is rate-steered and esp_timer is not, so this grows at the
-         * rate difference -- about 30 ppm, which is 6 us 0.2 s after the edge,
-         * and the reading depends on where the poll lands in the second. What
-         * the two anchors' floors disagree by is the residue at zero. */
+        /* The 1588 counter elapsed since the anchor minus esp_timer's. Polled
+         * against the edge's age it does not grow with it -- 4200 to 5772 ns
+         * across 4 to 987 ms of age, no trend -- so it is a constant near the
+         * 5.9 us pps floor: the two anchors that served time can be taken from
+         * sit about that far apart. Which of the two is late is open. */
         int64_t phcMonoDeltaNs = 0;
         bool    anchored       = false; /* an edge and a NAV-PVT have been paired */
         time_t  lastFix        = 0;     /* UTC second of the last accepted anchor */
