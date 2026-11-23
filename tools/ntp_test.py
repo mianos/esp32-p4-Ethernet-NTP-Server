@@ -225,7 +225,7 @@ def interleaved_section(host):
               f"(must be True: basic)")
 
     print(f"  check /healthz ntp_interleaved_served increments, and "
-          f"ntp_tx_correction_us is a plausible few-microsecond figure")
+          f"ntp_tx_lag_us is a plausible few-microsecond figure")
 
 
 def control(host, opcode, associd=0, data=b"", sequence=None):

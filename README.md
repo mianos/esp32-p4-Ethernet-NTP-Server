@@ -552,12 +552,12 @@ origin, and the reply carries that exchange's transmit timestamp as the MAC
 measured it. Use it: a basic reply's transmit field is written before the frame
 leaves, and on a test client that showed as an 85 µs bias that `xleave` removed.
 
-Replies that fall back to `sendto()` (no hardware receive stamp) have their
-transmit stamp moved later by `ntp_tx_correction_us`, the median duration of a
+Replies that fall back to `sendto()` (no hardware transmit stamp) have their
+transmit stamp moved later by `ntp_tx_lag_us`, the median duration of a
 `sendto()` to the device's own address, probed every 5 s. It is a lower bound,
 since the driver and wire come after the call. `ntp_tx_corrected` counts the
-replies it was applied to; on the raw path it is 0. `POST /ntp/txlag
-{"enabled":false}` turns it off.
+replies it was added to: 0 while every frame gets a hardware stamp, which is
+the case on this board. `POST /ntp/txlag {"enabled":false}` turns it off.
 
 The saved-pair table is 24 entries, keyed by address, dropped after two minutes.
 A client further behind than that gets a basic reply.
@@ -645,7 +645,7 @@ the requester's MAC rather than multicast. A slave reports; it does not steer
 `CLOCK_REALTIME` — the receiver still owns the clock.
 
 The PHC starts from the system clock, is rate-steered by the servo, and has its
-phase stepped onto the PPS edge (`phc_phase_ns`, `phc_steps` in `/gps/bench`).
+phase stepped onto the PPS edge (`phc_phase_ns`, `phc_steps`).
 
 **Only frames whose stamp is used ask for a transmit stamp**: the Sync, a
 slave's Delay_Req, and NTP replies to clients that may be interleaved. The

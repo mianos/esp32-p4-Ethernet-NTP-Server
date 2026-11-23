@@ -317,8 +317,10 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("ntp_kod", static_cast<double>(counters.kod));
         json.AddItem("ntp_dropped", static_cast<double>(counters.dropped));
         json.AddItem("ntp_rate_per_min", counters.perMinute);
-        /* TxLag, and how many replies used it (only the sendto() path does). */
-        json.AddItem("ntp_tx_correction_us", server.txLagUs());
+        /* The software transmit lag, and how many replies it was added to. Only a
+         * reply sent through sendto() without a hardware stamp takes it, so the
+         * count stays 0 while every frame is stamped in hardware. */
+        json.AddItem("ntp_tx_lag_us", server.txLagUs());
         json.AddItem("ntp_tx_corrected", static_cast<double>(server.txCorrected()));
         json.AddItem("ntp_tx_scatter_us", server.txScatterUs());
         /* The ServePath term in dispersion. */
@@ -799,6 +801,7 @@ static constexpr const char *kPolled[] = {
     "pps_ptp_ns",
     "phc_mono_delta_ns",
     "phc_phase_ns",
+    "phc_steps",
     "rate_ppm",
     "rate_n",
     "bridge_active",
@@ -825,7 +828,11 @@ static constexpr const char *kPolled[] = {
     "status_age_ms",
     "tie_max_ns",
     "tie_rms_ns",
+    "pps_latency_last_ns",
+    "pps_latency_min_ns",
     "pps_latency_max_ns",
+    "pps_latency_dropped",
+    "pps_latency_hist",
     "pvt_nano_ns",
     "pulse_offset_ns",
     "pulse_on_second",
