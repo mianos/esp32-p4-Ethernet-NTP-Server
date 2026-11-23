@@ -65,8 +65,11 @@ public:
         int64_t  anchorAgeUs = -1; /* since the last edge that was paired and trusted */
         /* The last edge on the 1588 counter; zero before the counter runs. */
         int64_t ppsPtpNs = 0;
-        /* Served time from the 1588 anchor minus served time from the esp_timer
-         * anchor, for the same edge. Should be near zero. */
+        /* The 1588 counter elapsed since the anchor minus esp_timer's. The
+         * counter is rate-steered and esp_timer is not, so this grows at the
+         * rate difference -- about 30 ppm, which is 6 us 0.2 s after the edge,
+         * and the reading depends on where the poll lands in the second. What
+         * the two anchors' floors disagree by is the residue at zero. */
         int64_t phcMonoDeltaNs = 0;
         bool    anchored       = false; /* an edge and a NAV-PVT have been paired */
         time_t  lastFix        = 0;     /* UTC second of the last accepted anchor */
@@ -569,6 +572,10 @@ private:
     uint32_t m_ppsCount     = 0;
     int64_t  m_anchorUtcNs  = 0;
     int64_t  m_anchorMonoUs = 0;
+    /* The same anchor on the mono counter's own nanoseconds, so a reading
+     * that differences two counters does not carry a microsecond of its
+     * own. */
+    int64_t  m_anchorMonoNs = 0;
     /* The anchor on the 1588 counter, which served time runs from; zero when
      * the counter is off. */
     int64_t  m_anchorPhcNs = 0;
@@ -743,6 +750,7 @@ private:
     struct StatusExtras {
         int64_t  ppsMonoUs        = 0;
         int64_t  anchorMonoUs     = 0;
+        int64_t  anchorMonoNs     = 0;
         int64_t  anchorPhcNs      = 0;
         int64_t  suppressUntil    = 0;
         int64_t  navSatAtUs       = 0;

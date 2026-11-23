@@ -167,6 +167,7 @@ void GpsTime::anchor(time_t second)
     portENTER_CRITICAL(&m_mux);
     m_anchorUtcNs  = static_cast<int64_t>(second) * 1000000000;
     m_anchorMonoUs = ppsMonoUs;
+    m_anchorMonoNs = ppsMonoNs;
     /* The anchor on the 1588 counter, which receive stamps also use; zero when
      * it is off, and now() falls back to esp_timer. */
     m_anchorPhcNs = ppsPtpNs;

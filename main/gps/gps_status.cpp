@@ -2,6 +2,8 @@
  * adapter. */
 #include "gps/gps_internal.h"
 
+#include "gps/mono.h"
+
 using namespace gps_detail;
 
 uint8_t GpsTime::copySats(Sat *out, uint8_t max) const
@@ -250,17 +252,20 @@ void GpsTime::publishStatus()
     ex.navSatAtUs     = m_navSatAtUs;
     ex.monHwAtUs      = m_monHwAtUs;
     ex.anchorMonoUs   = m_anchorMonoUs;
+    ex.anchorMonoNs   = m_anchorMonoNs;
 
     /* 1588 counter against esp_timer since the anchor; the counter is read
      * either side of the timer and kept only if the reads are close. */
     if (st.anchored && ex.anchorPhcNs != 0 && ptp::hardware()) {
         for (int attempt = 0; attempt < 3; ++attempt) {
             const int64_t phcBefore = ptp::nowNs();
-            const int64_t monoNow   = esp_timer_get_time();
+            /* On the counter's own nanoseconds: the point of this reading is
+             * a residual well under the microsecond esp_timer reports. */
+            const int64_t monoNs    = mono::nowNs();
             const int64_t phcAfter  = ptp::nowNs();
             if (phcAfter - phcBefore < 2000) {
                 st.phcMonoDeltaNs = ((phcBefore + phcAfter) / 2 - ex.anchorPhcNs) -
-                                    (monoNow - ex.anchorMonoUs) * 1000;
+                                    (monoNs - ex.anchorMonoNs);
                 break;
             }
         }
