@@ -9,6 +9,7 @@
 #include "net/eth_link.h"
 #include "app/cores.h"
 #include "gps/gps_time.h"
+#include "gps/leap.h"
 
 #include "esp_attr.h"
 #include "esp_eth_mac_esp.h"
@@ -231,14 +232,11 @@ void putStamp(uint8_t *p, int64_t ns)
     }
 }
 
-/* TAI-UTC: NAV-TIMELS gives GPS-UTC, and TAI = GPS + 19 s. 18 s is assumed
- * until the receiver reports it. */
+/* TAI-UTC: NAV-TIMELS gives GPS-UTC, and TAI = GPS + 19 s (gps/leap.h). */
 uint8_t utcOffset()
 {
     /* leapSeconds(), not status(), which is too big for this task's stack. */
-    const int leap   = static_cast<int>(GpsTime::instance().leapSeconds());
-    const int offset = (leap > 0 ? leap : 18) + 19;
-    return static_cast<uint8_t>(offset > 127 ? 127 : offset);
+    return leap::taiMinusUtc(static_cast<int>(GpsTime::instance().leapSeconds()));
 }
 
 int64_t taiNs()

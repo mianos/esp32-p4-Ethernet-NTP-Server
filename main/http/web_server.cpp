@@ -23,6 +23,7 @@
 #include "app/config_apply.h"
 #include "net/eth_link.h"
 #include "gps/gps_time.h"
+#include "gps/leap.h"
 #include "gps/pps_latency.h"
 #include "net/net_log.h"
 #include "net/net_state.h"
@@ -303,8 +304,9 @@ void NtpWebServer::populate_healthz_fields(WebContext *, JsonWrapper &json)
         json.AddItem("ntp_stratum", static_cast<double>(ref.stratum));
         json.AddItem("ntp_refid", refIdText(ref.refId, ref.stratum));
         /* Leap indicator a reply would carry now: 1 or 2 before a leap, 3 when not
-         * locked, else 0. */
-        json.AddItem("ntp_leap", static_cast<double>(ref.locked ? ref.leap : 3));
+         * locked, else 0. The same call the reply builder makes. */
+        json.AddItem("ntp_leap",
+                     static_cast<double>(leap::forReply(ref.locked, ref.leap, false)));
         /* Locked but over the dispersion gate. */
         json.AddItem("ntp_demoted", ref.demoted);
         /* Root delay and dispersion a reply would carry, before 16.16 rounding. For

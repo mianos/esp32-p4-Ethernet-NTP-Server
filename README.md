@@ -100,6 +100,23 @@ change like that, `rm sdkconfig` or run `idf.py menuconfig` before building.
 USB is only needed the first time, or to recover. After that, updates go over the
 network — see [Updating over the network](#updating-over-the-network).
 
+### Host tests
+
+`test/` holds the tests that need no board. They put `main/` on the include path
+and call the firmware's own functions — not a twin of them — so a rule is tested
+where the firmware keeps it.
+
+```sh
+./test/run.sh
+```
+
+`leap_test.cpp` walks the leap path end to end: the UBX-NAV-TIMELS payload and
+its two independent valid bits, RFC 5905's last-minute window, what a reply says
+when the source is unlocked or the answer is a kiss-o'-death, the octet that
+carries the indicator, and the TAI-UTC offset PTP announces. 2026 has no leap
+pending, so the steady state is the case that runs for years and the rest would
+otherwise never run at all.
+
 ## First boot
 
 The console is UART0, which on this board is the USB-C port's CH343 bridge: the
@@ -858,6 +875,7 @@ the box. See `viewer/README.md`.
 | `gps_servo.cpp` | the anchor, the rate fit, the served time, the uncertainty budget, the slew |
 | `gps_status.cpp` | the lock decision, `status()`, the reply facts, the `TimeRef` adapter |
 | `gps_bridge.cpp` | the u-center bridge on tcp/3333 |
+| `leap.h` | the leap path: NAV-TIMELS fields, RFC 5905's minute, the reply's indicator |
 | `ubx.{cpp,h}` | UBX framing: byte state machine, checksum and length gates |
 | **`main/clock/`** | **who owns the clock** |
 | `time_ref.h` | what the responder may claim, and the interface both sources implement |
@@ -878,6 +896,7 @@ the box. See `viewer/README.md`.
 | **`main/http/`** | **the HTTP surface** |
 | `web_server.{cpp,h}` | the HTTP handlers |
 | **elsewhere** | |
+| `test/run.sh` | host tests: `leap_test.cpp` compiles `main/gps/leap.h` itself, no board |
 | `tools/ntp_test.py` | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
 | `tools/ubx.py`, `tools/ubx_test.py` | host twin of the decoder, and its tests |
 | `tools/serial_cap.py` | console capture that does not reset the board |

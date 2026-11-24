@@ -2,6 +2,7 @@
  * adapter. */
 #include "gps/gps_internal.h"
 
+#include "gps/leap.h"
 #include "gps/mono.h"
 
 namespace {
@@ -499,12 +500,15 @@ uint8_t GpsTime::leapIndicator() const
     valid  = m_leapValid;
     portEXIT_CRITICAL(&m_mux);
 
-    /* RFC 5905: the indicator covers the last minute of the day, which is
-     * 0 < timeToLsEvent <= 60. */
-    if (!valid || change == 0 || inS <= 0 || inS > 60) {
-        return 0;
-    }
-    return change > 0 ? 1 : 2;
+    /* The stored change is 0 when the receiver announced nothing, so it doubles
+     * as "an event is known". The window and the sign become the indicator in
+     * gps/leap.h, where they are tested. */
+    leap::Announcement announced;
+    announced.offsetKnown = valid;
+    announced.eventKnown  = change != 0;
+    announced.changeS     = change;
+    announced.inS         = inS;
+    return leap::indicator(announced);
 }
 
 std::string GpsTime::describe() const

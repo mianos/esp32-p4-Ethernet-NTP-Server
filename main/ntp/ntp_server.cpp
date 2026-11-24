@@ -29,6 +29,7 @@
 #include "sdkconfig.h"
 
 #include "gps/gps_time.h"
+#include "gps/leap.h"
 #include "clock/ntp_time.h"
 #include "ntp/serve_path.h"
 #include "ntp/tx_lag.h"
@@ -67,8 +68,6 @@ constexpr uint8_t kModeServer  = 4;
 constexpr uint8_t kModeControl = 6; /* ntpq: read-only, see ntp_control.cpp */
 
 constexpr uint8_t kStratumUnlocked = 16; /* "unsynchronised": ignore this server */
-constexpr uint8_t kLeapNoWarning   = 0;
-constexpr uint8_t kLeapAlarm       = 3; /* "clock not synchronised" */
 
 /* 2^-20 s, about 1 us. */
 constexpr uint8_t kPrecision = 0xEC;
@@ -424,8 +423,9 @@ void buildReply(uint8_t *out, const Request &req, const TimeReference &ref, bool
                 const uint8_t *savedTransmit = nullptr)
 {
     const uint8_t stratum = kod ? 0 : ref.stratum;
-    /* Leap 3 when not locked; 0 on a KoD. */
-    const uint8_t  leap  = kod ? kLeapNoWarning : (ref.locked ? ref.leap : kLeapAlarm);
+    /* Which of the four indicators this reply carries is decided in gps/leap.h,
+     * so the JSON on /healthz reports the same number by the same code. */
+    const uint8_t  leap  = leap::forReply(ref.locked, ref.leap, kod);
     const uint32_t refId = kod ? kRefIdRate : ref.refId;
 
     const RootUncertainty uncertainty = rootUncertainty(ref, received.tv_sec);

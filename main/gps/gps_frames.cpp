@@ -5,6 +5,7 @@
 /* One handler per UBX message, called once a frame has passed its checksum
  * and length checks. */
 #include "gps/gps_internal.h"
+#include "gps/leap.h"
 
 using namespace gps_detail;
 
@@ -582,26 +583,22 @@ void GpsTime::onTimTos(const ubx::Frame &f)
 
 void GpsTime::onNavTimels(const ubx::Frame &f)
 {
-    /* 24 bytes, version 0:
-     *   8  srcOfCurrLs (u1)   9  currLs (i1)
-     *   10 srcOfLsChange (u1) 11 lsChange (i1)
-     *   12 timeToLsEvent (i4) 16 dateOfLsGpsWn (u2) 18 dateOfLsGpsDn (u2)
-     *   23 valid (u1): bit 0 says currLs is known, bit 1 says the event time is */
-    const int8_t  current     = static_cast<int8_t>(f.u8(9));
-    const int8_t  change      = static_cast<int8_t>(f.u8(11));
-    const int32_t inS         = f.i4(12);
-    const uint8_t valid       = f.u8(23);
-    const bool    haveOffset  = (valid & 0x01) != 0;
-    const bool    haveEventAt = (valid & 0x02) != 0;
+    /* The 24-byte version 0 layout is in gps/leap.h, which also decides what the
+     * fields mean: the two valid bits are independent, and an event the receiver
+     * did not date is not an announcement. */
+    leap::Announcement announced;
+    if (!leap::parseTimels(f.payload.data(), f.payload.size(), announced)) {
+        return;
+    }
 
     portENTER_CRITICAL(&m_mux);
-    if (haveOffset) {
-        m_leapSeconds = current;
+    if (announced.offsetKnown) {
+        m_leapSeconds = announced.offsetS;
         m_leapValid   = true;
     }
     /* No announcement means nothing pending. */
-    m_leapChange = haveEventAt ? change : 0;
-    m_leapInS    = haveEventAt ? inS : 0;
+    m_leapChange = announced.eventKnown ? announced.changeS : 0;
+    m_leapInS    = announced.eventKnown ? announced.inS : 0;
     portEXIT_CRITICAL(&m_mux);
 
     /* Logged on change, not on every countdown tick. */
@@ -611,10 +608,13 @@ void GpsTime::onNavTimels(const ubx::Frame &f)
         if (m_leapChange == 0) {
             ESP_LOGI(TAG, "leap: GPS-UTC offset %+d s, nothing announced", m_leapSeconds);
         } else {
-            ESP_LOGW(
-                TAG,
-                "leap: GPS-UTC offset %+d s, and %+d s in %ld s (leap indicator 1 for that minute)",
-                m_leapSeconds, m_leapChange, static_cast<long>(m_leapInS));
+            /* The minute's length, not the indicator: -1 makes a 59-second
+             * minute, and "indicator 1" would be the wrong one for it. */
+            ESP_LOGW(TAG,
+                     "leap: GPS-UTC offset %+d s, and %+d s in %ld s (that minute has %d "
+                     "seconds)",
+                     m_leapSeconds, m_leapChange, static_cast<long>(m_leapInS),
+                     m_leapChange > 0 ? 61 : 59);
         }
     }
 }
