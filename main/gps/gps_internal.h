@@ -1,6 +1,7 @@
 /* Constants and helpers shared by the GpsTime implementation files. */
 #pragma once
 
+#include "gps/isqrt.h"
 #include "ptp/ptp.h"
 #include <cerrno>
 #include <cmath>
@@ -227,26 +228,6 @@ inline bool civilToEpoch(uint16_t year, uint8_t month, uint8_t day, uint8_t hour
                               static_cast<int64_t>(hour) * 3600 +
                               static_cast<int64_t>(minute) * 60 + second);
     return true;
-}
-
-/* Integer square root, for mm^2 variances. */
-inline uint32_t isqrt(uint32_t v)
-{
-    uint32_t r   = 0;
-    uint32_t bit = 1u << 30;
-    while (bit > v) {
-        bit >>= 2;
-    }
-    while (bit != 0) {
-        if (v >= r + bit) {
-            v -= r + bit;
-            r = (r >> 1) + bit;
-        } else {
-            r >>= 1;
-        }
-        bit >>= 2;
-    }
-    return r;
 }
 
 inline const char *fixText(uint8_t fix)

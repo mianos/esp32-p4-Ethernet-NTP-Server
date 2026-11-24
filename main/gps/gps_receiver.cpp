@@ -1,5 +1,6 @@
 /* Receiver configuration, the baud scan, time mode and position hold, and
  * send-and-wait. */
+#include "gps/fixpos.h"
 #include "gps/gps_internal.h"
 
 using namespace gps_detail;
@@ -102,18 +103,7 @@ void GpsTime::restoreTimeMode()
     const std::string &mode     = settings.gpsTimeMode();
 
     if (mode == "fixed") {
-        long long     x   = 0;
-        long long     y   = 0;
-        long long     z   = 0;
-        unsigned long acc = 0;
-        unsigned long val = 0;
-        /* x,y,z,acc[,validated]; the four-field form is unvalidated. (0,0,0) is
-         * not a position. */
-        const bool stored = (text::getList(settings.gpsFixedPos(), ',', x, y, z, acc, val) ||
-                             text::getList(settings.gpsFixedPos(), ',', x, y, z, acc)) &&
-                            !(x == 0 && y == 0 && z == 0);
-        if (stored) {
-            adoptFixedPosition(x, y, z, acc, val != 0);
+        if (adoptStoredFix()) {
             ESP_LOGW(TAG, "position hold restored from NVS%s",
                      m_holdValidated ? ", survey-validated" : "");
             /* The task loop sends the hold once the receiver has a fix: TMODE2
@@ -155,16 +145,7 @@ void GpsTime::reassertFix()
 {
     /* After a reset: put the stored hold back, or resume a survey if there is
      * none. Reads NVS, not m_fixedValid, which a reset leaves unknown. */
-    long long          x   = 0;
-    long long          y   = 0;
-    long long          z   = 0;
-    unsigned long      acc = 0;
-    unsigned long      val = 0;
-    const std::string &pos = Settings::instance().gpsFixedPos();
-    const bool         stored =
-        (text::getList(pos, ',', x, y, z, acc, val) || text::getList(pos, ',', x, y, z, acc)) &&
-        !(x == 0 && y == 0 && z == 0);
-    if (!stored) {
+    if (!adoptStoredFix()) {
         /* Restarting a survey loses its elapsed time. */
         const std::string &mode = Settings::instance().gpsTimeMode();
         if ((mode == "survey" || mode == "fixed") && startSurveyFromSettings()) {
@@ -172,8 +153,6 @@ void GpsTime::reassertFix()
         }
         return;
     }
-
-    adoptFixedPosition(x, y, z, acc, val != 0);
 
     if (sendFixedPosition()) {
         ESP_LOGW(TAG, "position hold put back after the reset%s",
@@ -560,6 +539,17 @@ void GpsTime::sendUbx(uint8_t cls, uint8_t id, const uint8_t *payload, uint16_t 
     frame[n++] = ckB;
 
     uart_write_bytes(kUart, frame, n);
+}
+
+bool GpsTime::adoptStoredFix()
+{
+    /* The record is text in NVS; fixpos.h is the one reader of it. */
+    fixpos::Hold hold;
+    if (!fixpos::parse(Settings::instance().gpsFixedPos(), hold)) {
+        return false;
+    }
+    adoptFixedPosition(hold.x, hold.y, hold.z, hold.accMm, hold.validated);
+    return true;
 }
 
 void GpsTime::adoptFixedPosition(long long x, long long y, long long z, unsigned long acc,

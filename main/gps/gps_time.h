@@ -426,6 +426,9 @@ public:
     void adoptTimeMode();
     void reassertFix();
     bool startSurveyFromSettings();
+    /* Take the NVS position record into the held members; false when there is
+     * none. */
+    bool adoptStoredFix();
     void restoreTimeMode();
     void saveTimeMode();
     /* Send CFG-TMODE2 for the adopted position. */

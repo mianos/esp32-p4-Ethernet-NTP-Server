@@ -218,8 +218,8 @@ secrets in it.
 | Command | Effect |
 |---|---|
 | `gps` | fix, satellites, survey progress, mode |
-| `gps survey stop` | back to a moving position; the last mean is kept for `fix` |
-| `gps survey fix` | lock the receiver's own mean as the held position |
+| `gps survey stop` | back to a moving position; the held position is kept in NVS for `fix` |
+| `gps survey fix` | lock the held position: the survey's mean while that is still in RAM, otherwise the record in NVS |
 | `gps reset [soft\|hard\|power\|cold]` | reset the receiver; `hard` re-initialises the front end, `cold` also drops the almanac |
 | `gps ant <on\|off>` | antenna bias, for swapping an antenna under the same settings |
 | `gps gnss <hex>` | constellation mask, `1`..`ff` |
@@ -260,7 +260,7 @@ in NVS and survives a reboot.
 | `ipGateway` | *(empty)* | Optional even in `static` mode: a box with an address and no route is still on the wire. |
 | `ipDns` | *(empty)* | Optional; empty clears the resolver. |
 | `gpsTimeMode` | `moving` | `moving`, `survey` or `fixed`. Prefer `POST /gps/survey`, which sets this with the parameters. |
-| `gpsFixedPos` | *(empty)* | `x,y,z,acc_mm` in centimetres and millimetres, for a surveyed or known antenna position. Re-sent at every boot. |
+| `gpsFixedPos` | *(empty)* | `x,y,z,acc_mm[,validated]` in centimetres and millimetres, for a surveyed or known antenna position. An accuracy above 60000 is read as a legacy variance (mm^2) and square-rooted. Re-sent at every boot. |
 | `gpsSurvey` | *(empty)* | `hours,acc_mm`, hours 2..48, acc_mm 50..60000. Read when a survey is armed from NVS. |
 | `antDelayNs` | `0` | Antenna lead delay in ns, up to 200000. Brings the pulse forward by the cable's delay. |
 | `gpsUserDelayNs` | `0` | Calibration term in ns, ±10 ms, kept separate from the lead so a measured correction stays distinguishable from a cable length. |
@@ -387,6 +387,12 @@ from `gps_svin_acc_mm` while the survey runs; 30 m works here, 3 m never did.
 
 A finished survey is logged with its accuracy, not held automatically. Changing the mode mid-survey
 does not restart it; `stop` then `start` does.
+
+`fix` locks what it has: the survey's mean while that is still in RAM, and
+otherwise the record in NVS, so it also works after a reboot and after `stop`.
+An older record stored the survey variance where the accuracy goes; that is
+converted on the way in and rewritten in mm. `stop` leaves the record alone, so
+the position outlives a move back to a moving position and `fix` can restore it.
 
 The mode and position are re-sent from NVS at boot. `CFG-TMODE2` restarts the
 pulse generator, so it is not sent until there is a fix, satellites and a live

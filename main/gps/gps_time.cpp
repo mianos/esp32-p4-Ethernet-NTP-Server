@@ -659,9 +659,14 @@ void GpsTime::task()
             uint32_t fixedAcc = 0;
             uint32_t minDur   = 0;
             uint32_t accLimit = 0;
-            /* Only a survey fills the mean. Without one, re-lock the held
-             * position; never send (0,0,0), which put the clock 10 ms out. */
+            /* Only a survey fills the mean, and that lives in RAM: a reboot
+             * empties it. The position last locked is in NVS, so adopt that
+             * rather than refuse -- refusing made "fix" a dead end after any
+             * reset, while the documented way back to a hold is exactly this. */
             const bool haveMean = !(m_svinMean[0] == 0 && m_svinMean[1] == 0 && m_svinMean[2] == 0);
+            if (cmd == 3 && !haveMean && !m_fixedValid && adoptStoredFix()) {
+                ESP_LOGW(TAG, "no survey mean: position hold re-adopted from NVS");
+            }
             if (cmd == 3 && !haveMean && !m_fixedValid) {
                 ESP_LOGW(TAG, "nothing to lock: no survey mean and no held position, "
                               "position left moving");
