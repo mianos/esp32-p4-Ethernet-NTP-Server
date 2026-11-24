@@ -57,6 +57,9 @@ volatile bool gHardwareOn = false;
 
 namespace {
 
+/* The receive-stamp ring. Only core 0 takes this, from the EMAC receive task
+ * and the NTP task; the PPS interrupt is alone on core 1 and never touches it,
+ * so a section held here cannot mask an edge. See app/cores.h. */
 portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 RxStamp      s_ring[kRing];
 size_t       s_next = 0;

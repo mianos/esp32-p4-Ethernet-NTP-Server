@@ -65,14 +65,15 @@ public:
         int64_t  anchorAgeUs = -1; /* since the last edge that was paired and trusted */
         /* The last edge on the 1588 counter; zero before the counter runs. */
         int64_t ppsPtpNs = 0;
-        /* The 1588 counter elapsed since the anchor minus esp_timer's. Polled
-         * against the edge's age it does not grow with it -- 4200 to 5772 ns
-         * across 4 to 987 ms of age, no trend -- so it is not a rate term. It
-         * is the two anchors that served time can be taken from sitting about
-         * 4 us apart: 1.9 us of that is the difference between their floors
-         * (pps_stamp_floor_ns, pps_phc_floor_ns), and the rest is inside
-         * ptp::nowNs(), which returns its first register read and so comes
-         * back early. */
+        /* The 1588 counter elapsed since the anchor minus the systimer's, taken
+         * in publishStatus() a fixed way into each second. Against the edge's
+         * age it does not move -- 3.0 to 4.9 us across 21 to 899 ms, slope 0.03
+         * ns/ms -- because it is read at a fixed phase, not at the age being
+         * varied. It is 1.9 us of floors difference (pps_stamp_floor_ns,
+         * pps_phc_floor_ns), at most the 0.9 us ptp::nowNs() spans
+         * (pps_phc_read_ns), and the 30 ppm between the raw systimer and the
+         * steered counter over the tens of ms from the edge to that publish.
+         * The last is the interval the comparison spans, not either anchor. */
         int64_t phcMonoDeltaNs = 0;
         bool    anchored       = false; /* an edge and a NAV-PVT have been paired */
         time_t  lastFix        = 0;     /* UTC second of the last accepted anchor */
@@ -309,6 +310,12 @@ public:
         std::string gnss;
         std::string gnssCfg;
         std::string timeMode;
+        /* The two times the anchor was taken from, as that edge recorded them:
+         * the systimer's nanoseconds and the 1588 counter's. Served time is
+         * extended from this pair, so phcMonoDeltaNs is the difference between
+         * these two readings and not between two taken now. */
+        int64_t anchorMonoNs = 0;
+        int64_t anchorPhcNs  = 0;
     };
 
     static GpsTime &instance();

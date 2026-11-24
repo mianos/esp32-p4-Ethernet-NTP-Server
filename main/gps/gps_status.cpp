@@ -323,6 +323,11 @@ GpsTime::Status GpsTime::status() const
         }
     }
 
+    /* The pair the anchor was taken from, so a reader can tell an anchor that
+     * is merely old from one whose two readings disagree. */
+    st.anchorMonoNs = ex.anchorMonoNs;
+    st.anchorPhcNs  = ex.anchorPhcNs;
+
     /* The edge is read live; the snapshot can be a second old. */
     EdgeWords edge;
     readEdge(edge);
