@@ -484,9 +484,12 @@ with `adjtime()`.
   cannot hold the edge off. IDF's tick, idle task and flash-write parking still
   run on core 1. `tasks` and `intr` on the console show who is where.
 - A GPTimer capture, latched by the edge through the ETM, is read beside each
-  clock read in the handler. The fixed path (`pps_latency_min_ns`, about 5.8 µs)
-  is absorbed by the fit; the excess over it is subtracted from the stamps, and
-  an edge whose clock read was itself stalled is dropped (`pps_latency_dropped`).
+  clock read in the handler. The fixed path to the systimer stamp
+  (`pps_stamp_floor_ns`, about 2.7 µs) is absorbed by the fit; the excess over it
+  is subtracted from the stamps, and an edge whose clock read was itself stalled
+  is dropped (`pps_latency_dropped`). The 1588 counter is reached over MDIO:
+  `pps_phc_floor_ns` is about 4.6 µs and the read about 0.9 µs, so the whole
+  handler floors at `pps_latency_min_ns`, about 7.4 µs.
   Late edges, 4–7 µs over the floor, landed within 0.2–1.2 µs of the fit with
   this, against 3–10 µs without it.
 - Between edges the anchor is extended on the rate-steered 1588 counter.
