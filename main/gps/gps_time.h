@@ -554,7 +554,8 @@ private:
     void steer();
 
     /* Guards the edge and anchor. A spinlock rather than atomic<int64_t>, which
-     * on RV32 goes through libatomic. */
+     * on RV32 goes through libatomic. The PPS interrupt takes this one, so a
+     * section holds stores and nothing else: no calls, no formatting. */
     mutable portMUX_TYPE m_mux = portMUX_INITIALIZER_UNLOCKED;
     /* Capture path state. m_lastEdgeUs also tells a real edge from the echo of
      * the software catch. */

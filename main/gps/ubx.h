@@ -27,7 +27,7 @@ struct Frame {
     std::span<const uint8_t> payload;
 
     /* Whether `n` bytes at `at` are inside the payload. */
-    bool has(std::size_t at, std::size_t n) const
+    __attribute__((always_inline)) bool has(std::size_t at, std::size_t n) const
     {
         return at <= payload.size() && n <= payload.size() - at;
     }
@@ -35,20 +35,24 @@ struct Frame {
     /* Little-endian field reads. The kDefs gate holds these in range for every
      * message that has a handler; this check keeps a message with no length
      * rule from reading whatever follows its payload as a field, which it
-     * otherwise would. It reads zero instead. */
-    uint8_t u8(std::size_t at) const
+     * otherwise would. It reads zero instead.
+     *
+     * Always inlined: the handlers read through these inside the section the
+     * PPS interrupt waits on, and at -Os GCC emits an out-of-line copy, which
+     * would run flash code with interrupts masked. */
+    __attribute__((always_inline)) uint8_t u8(std::size_t at) const
     {
         return has(at, sizeof(uint8_t)) ? text::getLe<uint8_t>(payload.data() + at) : 0;
     }
-    uint16_t u2(std::size_t at) const
+    __attribute__((always_inline)) uint16_t u2(std::size_t at) const
     {
         return has(at, sizeof(uint16_t)) ? text::getLe<uint16_t>(payload.data() + at) : 0;
     }
-    uint32_t u4(std::size_t at) const
+    __attribute__((always_inline)) uint32_t u4(std::size_t at) const
     {
         return has(at, sizeof(uint32_t)) ? text::getLe<uint32_t>(payload.data() + at) : 0;
     }
-    int32_t i4(std::size_t at) const
+    __attribute__((always_inline)) int32_t i4(std::size_t at) const
     {
         return has(at, sizeof(int32_t)) ? text::getLe<int32_t>(payload.data() + at) : 0;
     }

@@ -85,14 +85,17 @@ template <typename T> std::optional<T> toNumber(std::string_view text)
     return value;
 }
 
-/* Little-endian field access (UBX and the target), sized by the type. */
-template <typename T> void putLe(std::uint8_t *at, T v)
+/* Little-endian field access (UBX and the target), sized by the type.
+ * Always inlined: UBX field reads happen inside the critical section the PPS
+ * interrupt waits on, where a call would run flash code with interrupts
+ * masked. */
+template <typename T> __attribute__((always_inline)) inline void putLe(std::uint8_t *at, T v)
 {
     static_assert(std::is_integral_v<T> || std::is_enum_v<T>, "putLe is for whole numbers");
     std::memcpy(at, &v, sizeof v);
 }
 
-template <typename T> T getLe(const std::uint8_t *at)
+template <typename T> __attribute__((always_inline)) inline T getLe(const std::uint8_t *at)
 {
     static_assert(std::is_integral_v<T> || std::is_enum_v<T>, "getLe is for whole numbers");
     T v{};

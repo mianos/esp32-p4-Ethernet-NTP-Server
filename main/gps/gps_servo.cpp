@@ -73,15 +73,23 @@ void GpsTime::anchor(time_t second)
     int64_t gapUs       = 0;
     bool    hadAnchor   = false;
     bool    rateKnown   = false;
+    int64_t anchorUtcNs = 0;
+    int32_t ratePpb     = 0;
     {
         portENTER_CRITICAL(&m_mux);
         rateKnown = m_rateSamples >= kRateMinSamples;
         if (m_anchorValid && ppsMonoUs > m_anchorMonoUs) {
             hadAnchor   = true;
             gapUs       = ppsMonoUs - m_anchorMonoUs;
-            predictedNs = m_anchorUtcNs + gapUs * 1000 - gapUs * m_ratePpb / 1000000;
+            anchorUtcNs = m_anchorUtcNs;
+            ratePpb     = m_ratePpb;
         }
         portEXIT_CRITICAL(&m_mux);
+    }
+    /* The rate term divides 64 bits, which is a libgcc call (__divdi3):
+     * kept out of the section the PPS interrupt waits on. */
+    if (hadAnchor) {
+        predictedNs = anchorUtcNs + gapUs * 1000 - gapUs * ratePpb / 1000000;
     }
 
     /* An edge is used only if it is regular (about a second after the previous
@@ -518,8 +526,9 @@ void GpsTime::steer()
         (static_cast<int64_t>(gps.tv_sec) - static_cast<int64_t>(sys.tv_sec)) * 1000000000 +
         (gps.tv_nsec - sys.tv_nsec);
     {
+        const int64_t offsetUs = offsetNs / 1000;
         portENTER_CRITICAL(&m_mux);
-        m_offsetUs = offsetNs / 1000;
+        m_offsetUs = offsetUs;
         m_offsetNs = offsetNs;
         portEXIT_CRITICAL(&m_mux);
     }

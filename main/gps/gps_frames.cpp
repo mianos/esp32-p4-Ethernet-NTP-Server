@@ -222,12 +222,16 @@ void GpsTime::onNavDop(const ubx::Frame &f)
         const uint16_t raw = f.u2(at);
         return raw == 0xFFFF ? 0.0F : static_cast<float>(raw) / 100.0F;
     };
+    const float   gDop  = dop(4);
+    const float   pDop  = dop(6);
+    const float   vDop  = dop(10);
+    const float   hDop  = dop(12);
     const int64_t nowUs = esp_timer_get_time();
     portENTER_CRITICAL(&m_mux);
-    m_gDop    = dop(4);
-    m_pDop    = dop(6);
-    m_vDop    = dop(10);
-    m_hDop    = dop(12);
+    m_gDop    = gDop;
+    m_pDop    = pDop;
+    m_vDop    = vDop;
+    m_hDop    = hDop;
     m_dopAtUs = nowUs;
     portEXIT_CRITICAL(&m_mux);
 }
@@ -349,6 +353,7 @@ void GpsTime::onMonHw(const ubx::Frame &f)
     uint8_t beforePower = 0;
     uint8_t beforeJam   = 0;
 
+    const int64_t nowUs = esp_timer_get_time();
     portENTER_CRITICAL(&m_mux);
     before       = m_antStatus;
     beforePower  = m_antPower;
@@ -360,7 +365,7 @@ void GpsTime::onMonHw(const ubx::Frame &f)
     m_jamInd     = jam;
     m_jamState   = jstate;
     m_monHwValid = true;
-    m_monHwAtUs  = esp_timer_get_time();
+    m_monHwAtUs  = nowUs;
     m_pinSel     = pinSel;
     m_pinDir     = pinDir;
     m_pinVal     = pinVal;
@@ -442,12 +447,13 @@ void GpsTime::onNavSat(const ubx::Frame &f)
         ++used;
     }
 
+    const int64_t nowUs = esp_timer_get_time();
     portENTER_CRITICAL(&m_mux);
     m_cn0Max     = max;
     m_cn0Mean    = used != 0 ? static_cast<uint8_t>(sum / used) : 0;
     m_cn0Used    = used;
     m_satCount   = kept;
-    m_navSatAtUs = esp_timer_get_time();
+    m_navSatAtUs = nowUs;
     portEXIT_CRITICAL(&m_mux);
     m_satsSeq.fetch_add(1, std::memory_order_release);
 }
@@ -465,6 +471,7 @@ void GpsTime::onNavSvin(const ubx::Frame &f)
         mean[i] = f.i4(4 + 4 * i);
     }
 
+    const int64_t nowUs = esp_timer_get_time();
     portENTER_CRITICAL(&m_mux);
     for (int i = 0; i < 3; ++i) {
         m_svinMean[i] = mean[i];
@@ -474,7 +481,7 @@ void GpsTime::onNavSvin(const ubx::Frame &f)
     m_svinObs    = obs;
     m_svinValid  = f.u8(24) != 0;
     m_svinActive = f.u8(25) != 0;
-    m_svinAtUs   = esp_timer_get_time();
+    m_svinAtUs   = nowUs;
     if (m_svinActive) {
         /* Also catches a survey started from u-center. */
         m_tmode = 1;
@@ -647,6 +654,7 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     const int32_t qErrNs =
         static_cast<int32_t>(std::clamp<int64_t>(qErrPs / 1000, -kMaxQErrNs, kMaxQErrNs));
 
+    const int64_t nowUs = esp_timer_get_time();
     portENTER_CRITICAL(&m_mux);
     ++m_timTpCount;
     m_qErrNs        = qErrNs;
@@ -654,7 +662,7 @@ void GpsTime::onNavTimTp(const ubx::Frame &f)
     m_pulseOnSecond = onSecond;
     m_pulseOffsetNs = offsetNs;
     m_timTpFlags    = flags;
-    m_qErrAtUs      = esp_timer_get_time();
+    m_qErrAtUs      = nowUs;
     portEXIT_CRITICAL(&m_mux);
 
     /* Logged once. */

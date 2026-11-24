@@ -71,7 +71,9 @@ void fail(uint8_t reason)
     }
 }
 
-uint16_t be16(const uint8_t *p)
+/* Always inlined: see get16(); a call here would run flash code with
+ * interrupts masked in the delay-request section. */
+__attribute__((always_inline)) inline uint16_t be16(const uint8_t *p)
 {
     return static_cast<uint16_t>((p[0] << 8) | p[1]);
 }
@@ -206,7 +208,9 @@ void put16(uint8_t *p, uint16_t v)
     p[1] = static_cast<uint8_t>(v & 0xff);
 }
 
-uint16_t get16(const uint8_t *p)
+/* Always inlined: the delay-request slot is filled under gDelayMux, where a
+ * call would run flash code with interrupts masked. */
+__attribute__((always_inline)) inline uint16_t get16(const uint8_t *p)
 {
     return be16(p);
 }
