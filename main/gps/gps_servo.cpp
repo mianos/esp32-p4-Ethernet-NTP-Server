@@ -6,6 +6,7 @@
  * slew. */
 #include "gps/gps_internal.h"
 
+#include "gps/phcslew.h"
 #include "gps/pps_latency.h"
 
 using namespace gps_detail;
@@ -183,8 +184,9 @@ void GpsTime::anchor(time_t second)
     m_lastFix     = second;
     portEXIT_CRITICAL(&m_mux);
 
-    /* Step the 1588 counter onto the edge when its phase is off. The PHC anchor
-     * is dropped after a step, so served time uses esp_timer for one edge. */
+    /* Walk the 1588 counter's phase onto the edge: a rate bias while it is
+     * near, a step only when slewing would take minutes. The PHC anchor is
+     * dropped after a step, so served time uses esp_timer for one edge. */
     if (ppsPtpNs != 0) {
         m_phcPhaseNs = ppsPtpNs - static_cast<int64_t>(second) * 1000000000;
         /* The edge after a step shows what the read-to-set gap lost (about
@@ -199,18 +201,29 @@ void GpsTime::anchor(time_t second)
         m_phcOffEdges = m_phcPhaseNs > kPhcPhaseStepNs || m_phcPhaseNs < -kPhcPhaseStepNs
                             ? m_phcOffEdges + 1
                             : 0;
-        /* Only once the rate is pushed; unsteered, the counter drifts ~30 ppm. */
-        const int64_t stepNs = -m_phcPhaseNs - m_phcStepLagNs;
-        if (m_phcOffEdges >= kPhcPhaseEdges && ptp::steered() && ptp::stepBy(stepNs) == ESP_OK) {
-            ESP_LOGI(TAG, "phc stepped %+lld ns onto the edge (%+lld ns of it the set's lag)",
-                     static_cast<long long>(stepNs), static_cast<long long>(-m_phcStepLagNs));
-            m_phcOffEdges    = 0;
-            m_phcJustStepped = true;
-            ++m_phcSteps;
-            portENTER_CRITICAL(&m_mux);
-            m_anchorPhcNs = 0;
-            portEXIT_CRITICAL(&m_mux);
+        /* fitRate() applies this with the rate, so a phase inside kStepOverNs
+         * walks out at up to kMaxBiasPpb and served time never jumps. A step is
+         * only taken once the rate is pushed; unsteered, the counter drifts
+         * ~30 ppm and a step would be chasing that. */
+        m_phcSlewPpb = phcslew::biasPpb(m_phcPhaseNs);
+        if (m_phcOffEdges >= kPhcPhaseEdges && phcslew::stepInstead(m_phcPhaseNs) &&
+            ptp::steered()) {
+            const int64_t stepNs = -m_phcPhaseNs - m_phcStepLagNs;
+            if (ptp::stepBy(stepNs) == ESP_OK) {
+                ESP_LOGI(TAG, "phc stepped %+lld ns onto the edge (%+lld ns of it the set's lag)",
+                         static_cast<long long>(stepNs), static_cast<long long>(-m_phcStepLagNs));
+                m_phcOffEdges    = 0;
+                m_phcJustStepped = true;
+                m_phcSlewPpb     = 0;
+                ++m_phcSteps;
+                portENTER_CRITICAL(&m_mux);
+                m_anchorPhcNs = 0;
+                portEXIT_CRITICAL(&m_mux);
+            }
         }
+    } else {
+        /* No counter read this edge, so there is no phase to bias on. */
+        m_phcSlewPpb = 0;
     }
 
     if (gapUs >= kLockWindowUs) {
@@ -461,16 +474,22 @@ void GpsTime::fitRate()
     portEXIT_CRITICAL(&m_mux);
 
     /* Push the rate into the 1588 counter when it moves by 500 ppb, and every
-     * 30 s regardless, since a MAC restart loses it. */
+     * 30 s regardless, since a MAC restart loses it. The phase slew is part of
+     * what is pushed: while it is on the sum moves every edge, so it is applied
+     * every edge, which is what walks the counter onto the PPS edge. */
     {
-        static int32_t lastPpb = 0;
-        static int64_t lastUs  = 0;
-        const int64_t  nowUs   = esp_timer_get_time();
+        static int32_t lastApplied    = 0;
+        static bool    lastAppliedSet = false;
+        static int64_t lastUs         = 0;
+        const int64_t  nowUs          = esp_timer_get_time();
+        const int32_t  applied        = static_cast<int32_t>(-ppb) - m_phcSlewPpb;
         if (ptp::hardware() && m_rateSamples >= kRateMinSamples &&
-            (std::abs(static_cast<int32_t>(ppb) - lastPpb) >= 500 || nowUs - lastUs > 30000000)) {
-            if (ptp::setRatePpb(static_cast<int32_t>(-ppb)) == ESP_OK) {
-                lastPpb = static_cast<int32_t>(ppb);
-                lastUs  = nowUs;
+            (m_phcSlewPpb != 0 || !lastAppliedSet || std::abs(applied - lastApplied) >= 500 ||
+             nowUs - lastUs > 30000000)) {
+            if (ptp::setRatePpb(applied) == ESP_OK) {
+                lastApplied    = applied;
+                lastAppliedSet = true;
+                lastUs         = nowUs;
             }
         }
     }

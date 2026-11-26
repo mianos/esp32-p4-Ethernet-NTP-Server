@@ -82,9 +82,12 @@ public:
         int64_t offsetNs = 0;
 
         /* 1588 counter minus the edge's second at the last anchor, which every
-         * PTP stamp carries, and how often it has been stepped. */
+         * PTP stamp carries; how often it has been stepped, and the rate bias
+         * currently slewing it onto the edge (zero when it is inside the
+         * deadband). */
         int64_t  phcPhaseNs = 0;
         uint32_t phcSteps   = 0;
+        int32_t  phcSlewPpb = 0;
 
         /* Framing counters, straight off the decoder. */
         uint32_t frames           = 0;
@@ -194,7 +197,10 @@ public:
         int64_t pairAgeUs    = 0;
         int64_t pairAgeMaxUs = 0;
         double  pairAgeS     = -1;
-        /* Worst and RMS phase excursion in the fit window. */
+        /* Worst and RMS residual of the five-minute rate fit. The window is
+         * long enough that the crystal's own wander (a few ppb) counts as much
+         * as the stamping does, so this is the uncertainty dispersion is built
+         * from, not the per-edge jitter the sample ring records. */
         double  tieMaxNs     = 0;
         double  tieRmsNs     = 0;
         uint32_t ticksPerUs  = 0; /* systimer ticks in a microsecond, as IDF converts it */
@@ -594,13 +600,17 @@ private:
      * the counter is off. */
     int64_t  m_anchorPhcNs = 0;
 
-    /* PHC phase step state, servo task only. m_phcStepLagNs is what a step's
-     * read-to-set gap loses, learned from the edge after each step. */
+    /* PHC phase state, servo task only. The phase is walked out with a rate
+     * bias while it is near the edge (phcslew.h) and stepped when it is not;
+     * m_phcStepLagNs is what a step's read-to-set gap loses, learned from the
+     * edge after each step. */
     int64_t  m_phcPhaseNs     = 0;
     int      m_phcOffEdges    = 0;
     uint32_t m_phcSteps       = 0;
     int64_t  m_phcStepLagNs   = 0;
     bool     m_phcJustStepped = false;
+    /* The bias this edge's phase asks for, applied with the rate by fitRate(). */
+    int32_t  m_phcSlewPpb = 0;
 
     bool     m_anchorValid = false;
     time_t   m_lastFix     = 0;

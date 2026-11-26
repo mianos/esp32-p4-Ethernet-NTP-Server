@@ -171,7 +171,8 @@ constexpr int64_t kStepThresholdNs = 10000000; /* 10 ms */
 constexpr int64_t kPostStepSlewNs = 2000000; /* 2 ms */
 
 /* PTP stamps carry the 1588 counter raw, so its phase against the edge is
- * stepped out when it exceeds this for several edges in a row. NTP uses counter
+ * walked out with a rate bias (phcslew.h) and only stepped when it is beyond
+ * phcslew::kStepOverNs for several edges in a row. NTP uses counter
  * differences and does not see the phase. */
 constexpr int64_t kPhcPhaseStepNs = 10000; /* 10 us */
 constexpr int     kPhcPhaseEdges  = 3;

@@ -117,6 +117,13 @@ carries the indicator, and the TAI-UTC offset PTP announces. 2026 has no leap
 pending, so the steady state is the case that runs for years and the rest would
 otherwise never run at all.
 
+`phcslew_test.cpp` runs the loop that walks the 1588 counter's phase onto the
+PPS edge: that a 10 µs phase (and the ~29 µs the counter starts out with) falls
+inside the deadband without overshooting, that a drifting crystal parks it where
+the bias equals the drift rather than oscillating, and that the rate excursion
+stays inside the 20 ppm cap a PTP slave can follow. A sign error here would push
+served time away from the edge instead of onto it.
+
 ## First boot
 
 The console is UART0, which on this board is the USB-C port's CH343 bridge: the
@@ -490,9 +497,23 @@ microseconds: the same epoch and the same crystal, seen a step finer.
 The rate is pushed into the 1588 counter (`esp_eth_mac_adj_ptp_time()`), so the
 counter that served time and PTP stamps come from runs at GPS rate, and a
 holdover error is the fit's residual rather than rate times gap: 2 µs across
-151 s rather than 4.5 ms. The counter's phase is stepped onto the PPS edge when
-it drifts more than 10 µs. `CLOCK_REALTIME`, used for logs and HTTP, is slewed
-with `adjtime()`.
+151 s rather than 4.5 ms. The counter's phase against the PPS edge is walked out
+with a rate bias of up to 20 ppm on top of the fitted rate (`phc_slew_ppb`,
+`phc_phase_ns`), so its second boundary moves onto the edge smoothly instead of
+jumping. A step of up to 10 µs every hour or two was a discontinuity in served
+time and in every stamp PTP carries, and it left the ~20 µs read-to-set gap
+behind as a landing error to be learned; only a phase beyond 1 ms is stepped now
+(`phc_steps`), since slewing that takes minutes. `CLOCK_REALTIME`, used for logs
+and HTTP, is slewed with `adjtime()`.
+
+Two numbers describe the tie, and they are not the same thing. `tie_rms_ns` and
+`tie_max_ns` are the RMS and worst residual of the five-minute fit, which is
+what dispersion is built from: over five minutes the crystal's own wander (a few
+ppb is a few hundred ns of sag across the window) counts as much as the stamping
+does, so the figure moves with temperature and is not a per-edge measurement. The
+sample ring's `jitterNs` is one edge against the fit as it stood at that edge:
+20–90 ns here, against 24–500 ns for the window figure. Quote the ring when the
+question is a single edge's tie.
 
 ### Accuracy, and the parts that are not
 
@@ -677,7 +698,8 @@ the requester's MAC rather than multicast. A slave reports; it does not steer
 `CLOCK_REALTIME` — the receiver still owns the clock.
 
 The PHC starts from the system clock, is rate-steered by the servo, and has its
-phase stepped onto the PPS edge (`phc_phase_ns`, `phc_steps`).
+phase walked onto the PPS edge with a rate bias (`phc_phase_ns`,
+`phc_slew_ppb`), stepped only past 1 ms (`phc_steps`).
 
 **Only frames whose stamp is used ask for a transmit stamp**: the Sync, a
 slave's Delay_Req, and NTP replies to clients that may be interleaved. The
@@ -879,6 +901,7 @@ the box. See `viewer/README.md`.
 | `gps_receiver.cpp` | configuring the module: the burst, the baud scan, time mode and position hold, send-and-wait |
 | `gps_frames.cpp` | one handler per UBX message |
 | `gps_servo.cpp` | the anchor, the rate fit, the served time, the uncertainty budget, the slew |
+| `phcslew.h` | the counter's phase: a rate bias instead of a step, and where a step is still right |
 | `gps_status.cpp` | the lock decision, `status()`, the reply facts, the `TimeRef` adapter |
 | `gps_bridge.cpp` | the u-center bridge on tcp/3333 |
 | `leap.h` | the leap path: NAV-TIMELS fields, RFC 5905's minute, the reply's indicator |
@@ -902,7 +925,7 @@ the box. See `viewer/README.md`.
 | **`main/http/`** | **the HTTP surface** |
 | `web_server.{cpp,h}` | the HTTP handlers |
 | **elsewhere** | |
-| `test/run.sh` | host tests: `leap_test.cpp` compiles `main/gps/leap.h` itself, no board |
+| `test/run.sh` | host tests: `leap_test.cpp` and `phcslew_test.cpp` compile the firmware's own headers, no board |
 | `tools/ntp_test.py` | wire-level probe: silence cases, origin echo, IPv6, the rate limiter |
 | `tools/ubx.py`, `tools/ubx_test.py` | host twin of the decoder, and its tests |
 | `tools/serial_cap.py` | console capture that does not reset the board |

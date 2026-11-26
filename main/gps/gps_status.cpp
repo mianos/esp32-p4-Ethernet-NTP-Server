@@ -225,6 +225,7 @@ void GpsTime::publishStatus()
     st.servoSteps        = m_servoSteps;
     st.phcPhaseNs        = m_phcPhaseNs;
     st.phcSteps          = m_phcSteps;
+    st.phcSlewPpb        = m_phcSlewPpb;
     st.servoClamps       = m_servoClamps;
     st.edgeSpikes        = m_edgeSpikes;
     st.edgeOutliers      = m_edgeOutliers;
