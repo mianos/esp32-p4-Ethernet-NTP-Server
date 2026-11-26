@@ -320,6 +320,14 @@ class Poller:
                 "io_tx": num(info.get("io_tx_bytes")),
                 "skipped": num(info.get("msg_skipped")),
                 "ubx": num(info.get("msg_ubx")),
+                # A step at boot and a step a minute ago both read "1", so the
+                # steps get the same window treatment as the faults above.
+                "steps": num(info.get("servo_steps")),
+                "phc_steps": num(info.get("phc_steps")),
+                # Replies that took the software transmit lag instead of a
+                # hardware stamp, and stamps the hardware did not deliver.
+                "tx_corrected": num(health.get("ntp_tx_corrected")),
+                "tx_missing": num(health.get("hw_tx_missing")),
             }
         )
         self.recorder.observe(info)
@@ -348,8 +356,11 @@ class Poller:
         now = time.time()
         if not self.history:
             return {"window_s": None, "crc": None, "spikes": None, "clamps": None,
-                    "rescans": None, "io_rx": None, "io_tx": None, "skipped": None, "ubx": None}
-        keys = ("crc", "spikes", "clamps", "rescans", "io_rx", "io_tx", "skipped", "ubx")
+                    "rescans": None, "io_rx": None, "io_tx": None, "skipped": None,
+                    "ubx": None, "steps": None, "phc_steps": None, "tx_corrected": None,
+                    "tx_missing": None}
+        keys = ("crc", "spikes", "clamps", "rescans", "io_rx", "io_tx", "skipped", "ubx",
+                "steps", "phc_steps", "tx_corrected", "tx_missing")
         activity: dict[str, Any] = {"window_s": None}
         activity.update({k: None for k in keys})
 
@@ -374,16 +385,6 @@ class Poller:
         if window == 0.0:
             return activity
         activity["window_s"] = round(window)
-        return activity
-        window = now - baseline["t"]
-        if window < MIN_BASELINE_S:
-            return activity
-
-        activity["window_s"] = round(window)
-        current = self.history[-1]
-        for key in ("crc", "spikes", "clamps", "rescans", "io_rx", "io_tx", "skipped", "ubx"):
-            if current.get(key) is not None and baseline.get(key) is not None:
-                activity[key] = max(0, int(current[key] - baseline[key]))
         return activity
 
     async def loop(self) -> None:
@@ -630,6 +631,12 @@ def build(poller: Poller) -> dict[str, Any]:
             "tp_jitter_ns": num(info.get("tp_jitter_ns")),
             "root_delay_ns": num(info.get("root_delay_ns")),
             "servo_steps": integer(info.get("servo_steps")),
+            # Where the counter's own second sits against the GPS edge, and the
+            # bias walking it in. The offset above is the receiver's anchor; this
+            # is the thing the slew controls, and it was invisible until now.
+            "phc_phase_ns": num(info.get("phc_phase_ns")),
+            "phc_slew_ppb": num(info.get("phc_slew_ppb")),
+            "phc_steps": integer(info.get("phc_steps")),
             "servo_clamps": integer(info.get("servo_clamps")),
             "edge_spikes": integer(info.get("edge_spikes")),
             "gdop": num(info.get("gdop")),
@@ -732,6 +739,21 @@ def build(poller: Poller) -> dict[str, Any]:
             "dropped_crc": integer(health.get("gps_dropped_crc")),
             "dropped_len": integer(health.get("gps_dropped_len")),
             "rescans": integer(health.get("gps_rescans")),
+        },
+        # Who stamped the frames. `hardware` false means the figures above came
+        # from software timestamps, which is the one thing this box exists not to
+        # do; `tx_corrected` counts the replies that took the software transmit
+        # lag instead of a hardware stamp, so it stays 0 on a clean path.
+        "stamps": {
+            "hardware": health.get("phc"),
+            "mode": text(health.get("ptp_mode")),
+            "rx": integer(health.get("hw_rx_stamps")),
+            "tx": integer(health.get("hw_tx_stamps")),
+            "tx_missing": integer(health.get("hw_tx_missing")),
+            "tx_errors": integer(health.get("hw_tx_errors")),
+            "tx_lag_us": num(health.get("ntp_tx_lag_us")),
+            "tx_corrected": integer(health.get("ntp_tx_corrected")),
+            "bound_us": num(health.get("ntp_serve_bound_us")),
         },
     }
 

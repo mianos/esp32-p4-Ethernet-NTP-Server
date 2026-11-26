@@ -202,6 +202,16 @@
     </div>
 
     <div class="panel">
+      <h2>Hardware stamps <span class="muted" id="stampnote"></span></h2>
+      <div class="strip" id="stampstrip"></div>
+      <div class="foot" style="margin-top:6px">The counters behind the claim that a
+        reply leaves with a 1588 timestamp rather than a software one. "SW
+        corrected" is the number of replies that had to take the software
+        transmit lag instead — it stays 0 while every frame is stamped in
+        hardware, which is the point.</div>
+    </div>
+
+    <div class="panel">
       <h2>Link</h2>
       <div class="strip" id="linkstrip"></div>
       <div class="foot" id="framesline" style="margin-top:8px;word-break:break-all">—</div>
@@ -416,18 +426,11 @@ function render(body) {
 
   if (!haveData) {
     fill('healthstrip', []);
-    const stab = body.stability || {};
-  fill('tiestrip', [
-    cell('TIE max', fmt(body.receiver.tie_max_ns, 0, ' ns'),
-         (body.receiver.tie_max_ns ?? 0) > 5000 ? 'warn' : ''),
-    cell('TIE rms', fmt(body.receiver.tie_rms_ns, 0, ' ns')),
-    cell('Window', fmt(stab.rate_n, 0, ' s'), (stab.rate_n ?? 0) < 200 ? 'warn' : ''),
-  ]);
-  $('windownote').textContent = stab.rate_n ? `over ${fmt(stab.rate_n, 0)} s` : 'warming up';
-
-  fill('sigstrip', []);
+    fill('tiestrip', []);
+    fill('sigstrip', []);
     fill('rxstrip', []);
     fill('ntpstrip', []);
+    fill('stampstrip', []);
     fill('linkstrip', []);
     $('framesline').textContent = '—';
     $('raw').textContent = '—';
@@ -496,8 +499,18 @@ function render(body) {
     cell('Root delay', fmt(body.receiver.root_delay_ns, 0, ' ns')),
     cell('Dispersion', fmt(body.receiver.dispersion_us, 1, ' µs')),
     cell('Lock window', fmt(body.receiver.lock_window_s, 0, ' s')),
-    cell('Steps', fmt(body.receiver.servo_steps),
-         body.receiver.servo_steps ? 'warn' : ''),
+    cell('Steps', windowed(body, 'steps', body.receiver.servo_steps),
+         activityClass(body, 'steps')),
+    /* The PHC's second against the GPS edge, and the bias walking it in. Phase
+       is the variable the slew controls; a bias sitting at the limit is the loop
+       losing, which the bias alone makes visible. Both are separate from the
+       offset above, which is the receiver's own anchor. */
+    cell('PHC phase', fmt(body.receiver.phc_phase_ns, 0, ' ns'),
+         Math.abs(body.receiver.phc_phase_ns ?? 0) > 2000 ? 'warn' : ''),
+    cell('PHC slew', fmt(body.receiver.phc_slew_ppb, 0, ' ppb'),
+         Math.abs(body.receiver.phc_slew_ppb ?? 0) >= 20000 ? 'bad' : ''),
+    cell('PHC steps', windowed(body, 'phc_steps', body.receiver.phc_steps),
+         activityClass(body, 'phc_steps')),
     cell('Clamps', windowed(body, 'clamps', body.receiver.servo_clamps), activityClass(body, 'clamps')),
     cell('Spikes', windowed(body, 'spikes', body.receiver.edge_spikes), activityClass(body, 'spikes')),
     cell('GDOP', fmt(body.receiver.gdop, 2)),
@@ -556,6 +569,22 @@ function render(body) {
     cell('Leap pend', body.receiver.leap_pending
       ? `in ${fmt(body.receiver.leap_in_s, 0)} s` : 'no',
       body.receiver.leap_pending ? 'warn' : ''),
+  ]);
+
+  const stamps = body.stamps || {};
+  $('stampnote').textContent = stamps.mode && stamps.mode !== 'off' ? stamps.mode : '';
+  fill('stampstrip', [
+    cell('Path', stamps.hardware ? 'hardware' : 'software',
+         stamps.hardware ? 'good' : 'bad'),
+    cell('Rx stamps', fmt(stamps.rx)),
+    cell('Tx stamps', fmt(stamps.tx)),
+    cell('Tx missing', windowed(body, 'tx_missing', stamps.tx_missing),
+         activityClass(body, 'tx_missing')),
+    cell('Tx errors', fmt(stamps.tx_errors), stamps.tx_errors ? 'bad' : ''),
+    cell('SW corrected', windowed(body, 'tx_corrected', stamps.tx_corrected),
+         activityClass(body, 'tx_corrected')),
+    cell('SW lag', fmt(stamps.tx_lag_us, 1, ' µs')),
+    cell('Serve bound', fmt(stamps.bound_us, 0, ' µs')),
   ]);
 
   const tbody = $('sattable');
