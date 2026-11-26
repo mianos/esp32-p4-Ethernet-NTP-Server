@@ -466,7 +466,7 @@ see `docs/ubx.md`.
 
 Before the crystal's rate is known (sixty anchors, a minute) three missed edges
 demote the server. After that the lock window is ten minutes, with root
-dispersion growing 1 µs per second from about 43 µs at the edge. Replies are
+dispersion growing 1 µs per second from about 47 µs at the edge. Replies are
 also demoted once dispersion passes 400 µs, which by that arithmetic is about six
 minutes into a holdover, before the ten-minute window ends (worked out from the
 code, not measured).
@@ -506,14 +506,27 @@ behind as a landing error to be learned; only a phase beyond 1 ms is stepped now
 (`phc_steps`), since slewing that takes minutes. `CLOCK_REALTIME`, used for logs
 and HTTP, is slewed with `adjtime()`.
 
-Two numbers describe the tie, and they are not the same thing. `tie_rms_ns` and
-`tie_max_ns` are the RMS and worst residual of the five-minute fit, which is
-what dispersion is built from: over five minutes the crystal's own wander (a few
-ppb is a few hundred ns of sag across the window) counts as much as the stamping
-does, so the figure moves with temperature and is not a per-edge measurement. The
-sample ring's `jitterNs` is one edge against the fit as it stood at that edge:
-20–90 ns here, against 24–500 ns for the window figure. Quote the ring when the
-question is a single edge's tie.
+What that comes to at a client: chrony on another host on the LAN, interleaved
+(`xleave`) against this box at a 64 s poll, reports `Offset -5ns` over 453 s of
+samples. The ~2 µs of scatter beneath that figure is the client's, not the
+server's: 0.044 ppm of its own skew across one poll interval is 2.8 µs, which is
+what the per-exchange standard deviation shows.
+
+One number describes the tie, and it appears under three names. `tie_rms_ns`,
+`tp_jitter_ns` and each sample's `jitterNs` are the same quantity: the RMS
+residual of the five-minute rate fit, published once as a float and twice
+clamped to 20 µs for the narrower fields. `tie_max_ns` is the worst residual of
+that same fit. Reading them as three independent measurements, or comparing a
+live value against a sample that was taken earlier, is how they come to look as
+if they disagree.
+
+It is a window figure, not a per-edge one, and it moves with temperature: across
+five minutes a few ppb of the crystal's own wander is a few hundred ns of sag,
+which counts as much as the stamping does. On this board over an hour it read 25
+ns with the receiver quiet and 890 ns while the receiver was re-settling after a
+reboot. The copies in the ring are snapshots of the fit as it stood when each
+sample was pushed, so they trace that figure's history rather than the spread of
+individual edges.
 
 ### Accuracy, and the parts that are not
 
@@ -550,10 +563,15 @@ question is a single edge's tie.
   The indicator is gated on the change type *and* the countdown, because the
   module reports a non-zero countdown even with nothing announced. Unlocked, LI
   is 3.
-- Root delay is 0 (a local reference). Root dispersion is about 43 µs at the
-  edge: a 2 µs latency allowance, half the receiver's quantisation error, the fit
-  jitter, and a term measured from clients' timestamps (at least 40 µs). It grows
-  1 µs per second of holdover. `/healthz` carries both before 16.16 rounding.
+- Root delay is 0 (a local reference). Root dispersion is about 47 µs at the
+  edge: 40 µs from the serving path (how long a reply may have queued), 5 µs for
+  the pulse's offset while TIM-TP is silent in fixed mode, the 2 µs
+  interrupt-latency allowance, half the receiver's quantisation error, a
+  microsecond of wander for a one-second-old edge, and the fit jitter. It grows
+  1 µs per second of holdover, so the 400 µs demotion lands about six minutes in.
+  `/healthz` carries it before 16.16 rounding. It is a bound, not an accuracy:
+  `docs/metrology-plan.md` says what would have to be measured to call it a
+  budget.
 
 ## Serving NTP
 
@@ -939,10 +957,18 @@ chrony client example.
 ## Open items
 
 - The fixed part of the PPS interrupt latency (about 5.8 µs) is not calibrated
-  out, and a few microseconds of the PTP-to-NTP difference seen on mega remain
-  unexplained.
-- PHC phase is corrected in 10 µs steps; steering it through the rate would
-  avoid the steps.
+  out. The fit absorbs it, so it does not move the served time, but it is a link
+  in the chain with no value of its own.
+- Nothing independent measures the output yet. Every stability figure here is
+  either the servo's own residual or an NTP client's offset, so the uncertainties
+  are bounds rather than a budget: `docs/metrology-plan.md` is the plan for a
+  second receiver into a time-interval counter and a published TDEV curve.
 - LI has only ever been 0 here; the next leap second is the test.
 
-`docs/metrology-plan.md` has the acceptance plan and the uncertainty budget.
+`docs/metrology-plan.md` has the acceptance plan, the ladder each claim has to
+clear, and what an uncertainty budget would need to contain before the
+dispersion figures above could be called one.
+
+## Licence
+
+MIT. See `LICENSE`.

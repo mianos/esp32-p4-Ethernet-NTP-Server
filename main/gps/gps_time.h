@@ -197,10 +197,11 @@ public:
         int64_t pairAgeUs    = 0;
         int64_t pairAgeMaxUs = 0;
         double  pairAgeS     = -1;
-        /* Worst and RMS residual of the five-minute rate fit. The window is
-         * long enough that the crystal's own wander (a few ppb) counts as much
-         * as the stamping does, so this is the uncertainty dispersion is built
-         * from, not the per-edge jitter the sample ring records. */
+        /* Worst and RMS residual of the five-minute rate fit. The RMS one is
+         * also the dispersion's jitter term, and is published again as
+         * tp_jitter_ns and as each sample's jitterNs (both clamped to 20 us),
+         * so all three read the same figure. Window-length on purpose: a few
+         * ppb of crystal wander counts here as much as the stamping does. */
         double  tieMaxNs     = 0;
         double  tieRmsNs     = 0;
         uint32_t ticksPerUs  = 0; /* systimer ticks in a microsecond, as IDF converts it */

@@ -12,7 +12,7 @@ they are.
 | discipline | PPS edge (interrupt latency excess removed) → anchor + least-squares rate over 300 anchors; rate pushed into the PHC, PHC phase stepped onto the edge |
 | serving | NTPv4 stratum 1 from the PHC, root delay 0, dispersion ~43 µs + 1 ppm/s; PTP two-step master |
 | timestamps | **hardware** receive and transmit (1588 unit) |
-| PPS jitter | TIE ~300 ns rms over the fit window |
+| PPS jitter | TIE 25–72 ns rms over the fit window; 890 ns while the receiver re-settles |
 | sky | 37 satellites with GPS+Galileo+GLONASS+QZSS, site scatter 26–30 m |
 | holdover | anchor + measured rate; demoted by the 400 µs dispersion gate after about 6 min |
 
