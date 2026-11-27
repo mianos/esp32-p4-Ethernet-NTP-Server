@@ -85,6 +85,9 @@ class Recorder:
         self.db: sqlite3.Connection | None = None
         self.last_t = 0.0
         self.next_prune = time.time() + PRUNE_S
+        # The last polled tie, stamped onto whatever epoch is written next.
+        self.phase_ns: int | None = None
+        self.tie_ns: int | None = None
 
     def open(self) -> None:
         if not self.path:
@@ -120,6 +123,15 @@ class Recorder:
         # the clock being honest, the same excursion inside a narrow one is not.
         if "dispersion_ns" not in have:
             self.db.execute("ALTER TABLE samples ADD COLUMN dispersion_ns INTEGER")
+        # The two tie figures the phase loop is judged on: the counter's phase at
+        # the edge, and the fit's residual. Read at poll time like the receiver
+        # statistics, so the row they land on carries the poll's value and the
+        # epoch is only what makes it a series. Kept in the log because the live
+        # page's ring forgets them on restart, and "held at 200 ns since boot" is
+        # only an answer if the boot before it is still on disk.
+        for column in ("phc_phase_ns", "tie_rms_ns"):
+            if column not in have:
+                self.db.execute(f"ALTER TABLE samples ADD COLUMN {column} INTEGER")
 
     def _prune(self) -> None:
         if time.time() < self.next_prune or self.db is None:
@@ -134,15 +146,30 @@ class Recorder:
 
         The box records ppb and the column is ppm, so it is divided here: the
         charts, the bursts and adev.py all treat the column as ppm.
+
+        A gap row is a placeholder for a second the ring said it had dropped, and
+        the ring can still hand that second over on a later page -- when it does,
+        the placeholder is what the row has to become. Plain INSERT OR IGNORE let
+        the placeholder win the primary key and the second was lost; 156 rows in
+        this log were exactly that. An existing device row is never rewritten, so
+        a re-fetch still costs nothing.
         """
         if self.db is None:
             return
         self.db.execute(
-            "INSERT OR IGNORE INTO samples"
+            "INSERT INTO samples"
             " (epoch, boot, seq, kind, offset_ns, rate_ppm, jitter_ns, flags, sats,"
-            "  dispersion_ns)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (epoch,) + row[:4] + (row[4] / 1000.0,) + row[5:])
+            "  dispersion_ns, phc_phase_ns, tie_rms_ns)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(epoch) DO UPDATE SET boot = excluded.boot, seq = excluded.seq,"
+            "  kind = excluded.kind, offset_ns = excluded.offset_ns,"
+            "  rate_ppm = excluded.rate_ppm, jitter_ns = excluded.jitter_ns,"
+            "  flags = excluded.flags, sats = excluded.sats,"
+            "  dispersion_ns = excluded.dispersion_ns,"
+            "  phc_phase_ns = excluded.phc_phase_ns, tie_rms_ns = excluded.tie_rms_ns"
+            " WHERE samples.kind = 1",
+            (epoch,) + row[:4] + (row[4] / 1000.0,) + row[5:]
+            + (self.phase_ns, self.tie_ns))
         self._prune()
 
     def gap(self, first_epoch: int, count: int) -> None:
@@ -164,6 +191,10 @@ class Recorder:
         """Receiver statistics as read at poll time."""
         if self.db is None:
             return
+        # Stashed every poll, before the RECORD_S gate, which is about the rx
+        # table's cadence rather than about what the next epoch should carry.
+        self.phase_ns = integer(info.get("phc_phase_ns"))
+        self.tie_ns = integer(info.get("tie_rms_ns"))
         now = time.time()
         if now - self.last_t < RECORD_S:
             return
@@ -842,22 +873,22 @@ def build_long(span: int) -> dict[str, Any]:
     since = int(time.time() - span)
     db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     rows = db.execute(
-        "SELECT epoch, offset_ns, rate_ppm, dispersion_ns FROM samples"
-        " WHERE kind = 0 AND epoch >= ? ORDER BY epoch", (since,)
+        "SELECT epoch, offset_ns, rate_ppm, dispersion_ns, phc_phase_ns, tie_rms_ns"
+        " FROM samples WHERE kind = 0 AND epoch >= ? ORDER BY epoch", (since,)
     ).fetchall()
     db.close()
 
     width = max(1, span // LONG_BUCKETS)
-    buckets: dict[int, list[tuple[int, float, float, int | None]]] = {}
-    for epoch, offset, rate, disp in rows:
+    buckets: dict[int, list[tuple[Any, ...]]] = {}
+    for epoch, offset, rate, disp, phase, tie in rows:
         buckets.setdefault((epoch - since) // width, []).append(
-            (epoch, offset / 1000.0, rate, disp))
+            (epoch, offset / 1000.0, rate, disp, phase, tie))
 
     series = []
     for key in sorted(buckets):
         group = buckets[key]
         point: dict[str, Any] = {"t": since + (key + 0.5) * width}
-        for name, index in (("off", 1), ("rate", 2)):
+        for name, index in (("off", 1), ("rate", 2), ("phase", 4), ("tie", 5)):
             values = [g[index] for g in group if g[index] is not None]
             if values:
                 point[name] = round(sum(values) / len(values), 3)
@@ -873,7 +904,7 @@ def build_long(span: int) -> dict[str, Any]:
     # One tau per octave, out to an eighth of the span: past that there are too
     # few independent windows for the answer to mean anything.
     deviation = []
-    pairs = [(float(epoch), float(rate)) for epoch, _, rate, _ in rows if rate is not None]
+    pairs = [(float(epoch), float(rate)) for epoch, _, rate, *_ in rows if rate is not None]
     parts = analysis.runs(pairs)
     tau0 = analysis.sample_interval(pairs)
     if parts and tau0 > 0:

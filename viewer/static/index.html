@@ -178,12 +178,16 @@
       <div class="strip" id="longspans" style="margin-bottom:8px"></div>
       <div id="longoff" class="longchart"></div>
       <div id="longrate" class="longchart" style="margin-top:8px"></div>
+      <div id="longphase" class="longchart" style="margin-top:8px"></div>
       <div id="longadev" class="longchart" style="margin-top:8px"></div>
       <div class="foot" style="margin-top:6px">From the SQLite log, not the
         window: min-max band with the mean through it, so a spike survives the
         decimation. ADEV is computed from the raw rows out to an eighth of the
         span and stops there. Nothing under 300 s is the crystal — that is
-        inside the firmware's own fit window.</div>
+        inside the firmware's own fit window. PHC phase is the counter's reading
+        at the PPS edge, polled every couple of seconds and logged with the
+        second it was read on: it is the tie the 200 ns deadband holds, not the
+        five-minute fit's residual.</div>
     </div>
 
     <div class="panel">
@@ -843,6 +847,7 @@ async function renderLong() {
   $('longnote').textContent = `last ${label}, ${payload.rows ?? 0} samples`;
   longChart($('longoff'), payload.series || [], 'off', 'us', 'offset');
   longChart($('longrate'), payload.series || [], 'rate', 'ppm', 'servo rate');
+  longChart($('longphase'), payload.series || [], 'phase', 'ns', 'PHC phase');
   longAdev($('longadev'), payload.adev || []);
 }
 
