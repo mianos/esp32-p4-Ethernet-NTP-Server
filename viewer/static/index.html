@@ -801,11 +801,26 @@ function longAdev(host, deviation) {
   const y = (v) => T + (1 - (Math.log10(v) - Math.log10(lo)) /
     ((Math.log10(hi) - Math.log10(lo)) || 1)) * (H - T - B);
   const svg = svgEl('svg', { viewBox: `0 0 ${W} ${H}` });
-  for (const tick of [1, 10, 100, 1000, 10000]) {
-    if (tick < lo || tick > hi) continue;
+  /* Ticks at 1, 2 and 5 per decade, across whatever window the data gives. A
+   * fixed list of decades was fine while the deviation sat in the hundreds of
+   * ppb; below 1 ppb every tick fell outside the window and the chart drew no
+   * scale at all, which is where a locked box ends up. Thinned when the window
+   * is wide, and the ends labelled when it straddles no tick. */
+  const ticks = [];
+  for (let decade = Math.floor(Math.log10(lo)); decade <= Math.ceil(Math.log10(hi)); decade++) {
+    for (const mantissa of [1, 2, 5]) {
+      const tick = mantissa * Math.pow(10, decade);
+      if (tick >= lo && tick <= hi) ticks.push(tick);
+    }
+  }
+  if (ticks.length === 0) ticks.push(lo, hi);
+  const drawn = ticks.length > 6 ? ticks.filter((_, i) => i % 2 === 0) : ticks;
+  for (const tick of drawn) {
+    const label = tick >= 1000 ? `${tick / 1000}k`
+      : tick >= 1 ? `${tick}` : `${Number(tick.toPrecision(2))}`;
     svg.appendChild(svgEl('line', { x1: L, x2: W - R, y1: y(tick), y2: y(tick), class: 'grid' }));
     svg.appendChild(Object.assign(svgEl('text', { x: L - 4, y: y(tick) + 3, class: 'axis' }),
-      { textContent: tick >= 1000 ? `${tick / 1000}k` : `${tick}` }));
+      { textContent: label }));
   }
   for (const d of pts) {
     svg.appendChild(Object.assign(svgEl('text', { x: x(d.tau), y: H - 5, class: 'axis' }),
